@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AnswerEvidence, FinalAnswerJudgement, Rubric, RubricDecision } from "../shared/types.js";
 import { demoRubric } from "./demoData.js";
-import { answerCollectionsEquivalent, calculateGrade, expressionsEquivalent, splitAnswerExpressions } from "./gradingEngine.js";
+import { answerCollectionsEquivalent, calculateGrade, expressionsEquivalent, normalizeEvidenceReferences, splitAnswerExpressions } from "./gradingEngine.js";
+import { assertRubricIntegrity } from "./schemas.js";
 
 const baseEvidence: AnswerEvidence = {
   lines: [
@@ -97,16 +98,19 @@ describe("calculateGrade teacher-model authority", () => {
     expect(result.subquestions[0].auditDeductions?.[0].deductedScore).toBe(0);
   });
 
-  it("does not deduct an uncertain process point and marks it for review", () => {
+  it("keeps an uncertain process point out of confirmed score and marks it for review", () => {
     const result = calculateGrade({
       id: "uncertain-process", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
       evidence: baseEvidence, finalAnswerJudgements: [finalJudgement("incorrect")],
       decisions: decisions().map((item, index) => index === 2 ? { ...item, status: "insufficient_evidence" as const, requiresReview: true, reviewReason: "涂改无法确认" } : item),
       modelName: "test", durationMs: 10
     });
-    expect(result.score).toBe(8);
+    expect(result.score).toBe(6);
+    expect(result.maximumPossibleScore).toBe(8);
+    expect(result.subquestions[0].uncertainScore).toBe(2);
     expect(result.subquestions[0].decisions[2].scoringDisposition).toBe("uncertain_no_deduction");
-    expect(result.subquestions[0].decisions[2].awardedScore).toBe(2);
+    expect(result.subquestions[0].decisions[2].awardedScore).toBe(0);
+    expect(result.subquestions[0].decisions[2].uncertainScore).toBe(2);
     expect(result.status).toBe("needs_review");
   });
 
@@ -221,11 +225,123 @@ describe("real grading regression 16", () => {
       id: "real-16", studentId: "学生 01", fileName: "学生答案.png", rubric, evidence,
       finalAnswerJudgements: teacherJudgements, decisions: processDecisions, modelName: "teacher-model", durationMs: 10
     });
-    expect(result.score).toBe(12);
-    expect(result.subquestions.map((item) => item.score)).toEqual([4, 6, 2]);
+    expect(result.score).toBe(11);
+    expect(result.maximumPossibleScore).toBe(15);
+    expect(result.subquestions.map((item) => item.score)).toEqual([4, 6, 1]);
+    expect(result.subquestions.map((item) => item.maximumPossibleScore)).toEqual([4, 6, 5]);
     expect(result.subquestions[0].decisions.every((item) => item.scoringDisposition === "not_deducted_by_final_answer")).toBe(true);
     expect(result.subquestions[1].decisions.every((item) => item.scoringDisposition === "not_deducted_by_final_answer")).toBe(true);
     expect(result.subquestions[2].finalAnswerStatus).toBe("incorrect");
     expect(result.status).toBe("needs_review");
+  });
+});
+
+describe("grading evidence and confidence safeguards", () => {
+  it("normalizes a low-confidence correct judgement to uncertain", () => {
+    const result = calculateGrade({
+      id: "low-confidence-correct", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
+      evidence: baseEvidence,
+      finalAnswerJudgements: [finalJudgement("correct", "N=3mg", 0.7)],
+      decisions: decisions(), modelName: "test", durationMs: 10
+    });
+
+    expect(result.subquestions[0].finalAnswerStatus).toBe("uncertain");
+    expect(result.subquestions[0].score).toBe(6);
+    expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join(" ")).toContain("低于自动判定阈值");
+  });
+
+  it("does not accept a correct judgement that cites a missing line", () => {
+    const result = calculateGrade({
+      id: "missing-evidence", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
+      evidence: baseEvidence,
+      finalAnswerJudgements: [{
+        ...finalJudgement("correct", "N=3mg"),
+        evidenceLineIds: ["UNKNOWN"]
+      }],
+      decisions: decisions(), modelName: "test", durationMs: 10
+    });
+
+    expect(result.subquestions[0].finalAnswerStatus).toBe("uncertain");
+    expect(result.subquestions[0].finalAnswerEvidenceLineIds).toEqual([]);
+    expect(result.subquestions[0].score).toBe(6);
+    expect(result.status).toBe("needs_review");
+  });
+
+  it("normalizes a process point with invalid evidence and does not award it", () => {
+    const result = calculateGrade({
+      id: "invalid-point-evidence", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
+      evidence: baseEvidence,
+      finalAnswerJudgements: [finalJudgement("incorrect")],
+      decisions: decisions().map((decision) => decision.pointId === "P1"
+        ? { ...decision, evidenceLineIds: ["UNKNOWN"] }
+        : decision),
+      modelName: "test", durationMs: 10
+    });
+
+    expect(result.subquestions[0].decisions[0].status).toBe("insufficient_evidence");
+    expect(result.subquestions[0].decisions[0].awardedScore).toBe(0);
+    expect(result.subquestions[0].uncertainScore).toBe(3);
+    expect(result.subquestions[0].score).toBe(3);
+    expect(result.subquestions[0].maximumPossibleScore).toBe(6);
+    expect(result.status).toBe("needs_review");
+  });
+
+  it("does not apply a deduction without valid evidence", () => {
+    const result = calculateGrade({
+      id: "deduction-without-evidence", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
+      evidence: baseEvidence,
+      finalAnswerJudgements: [finalJudgement("incorrect")],
+      decisions: decisions(),
+      appliedDeductions: [{ subquestionId: "Q1-1", ruleId: "D1", evidenceLineIds: [], reason: "单位错误", confidence: 0.99 }],
+      modelName: "test", durationMs: 10
+    });
+
+    expect(result.subquestions[0].deductions).toHaveLength(0);
+    expect(result.subquestions[0].score).toBe(6);
+    expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join(" ")).toContain("扣分规则 D1");
+  });
+
+  it("reports missing process decisions instead of claiming full rule coverage", () => {
+    const result = calculateGrade({
+      id: "missing-process", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
+      evidence: baseEvidence,
+      finalAnswerJudgements: [finalJudgement("incorrect")],
+      decisions: [], modelName: "test", durationMs: 10
+    });
+
+    expect(result.metrics.ruleCoverage).toBe(0);
+    expect(result.metrics.evidenceTraceability).toBe(0);
+    expect(result.metrics.autoDecisionRate).toBe(0);
+    expect(result.score).toBe(0);
+    expect(result.maximumPossibleScore).toBe(8);
+  });
+
+  it("removes duplicate and crossed-out final answer references", () => {
+    const normalized = normalizeEvidenceReferences({
+      lines: [
+        { id: "L1", text: "x=1", status: "active", confidence: 0.9 },
+        { id: "L1", text: "duplicate", status: "active", confidence: 0.9 },
+        { id: "L2", text: "x=2", status: "crossed_out", confidence: 0.9 }
+      ],
+      finalAnswers: [
+        { subquestionId: "Q1-1", lineId: "L1", expression: "x=1", confidence: 0.9 },
+        { subquestionId: "Q1-1", lineId: "L2", expression: "x=2", confidence: 0.9 },
+        { subquestionId: "Q1-1", lineId: "UNKNOWN", expression: "x=3", confidence: 0.9 }
+      ],
+      ambiguities: []
+    });
+
+    expect(normalized.lines.map((line) => line.id)).toEqual(["L1", "L2"]);
+    expect(normalized.finalAnswers.map((answer) => answer.lineId)).toEqual(["L1"]);
+    expect(normalized.ambiguities).toHaveLength(3);
+  });
+
+  it("rejects duplicate IDs and inconsistent totals before locking", () => {
+    const invalid = structuredClone(demoRubric);
+    invalid.totalScore = 9;
+    invalid.subquestions[0].scorePoints[1].id = invalid.subquestions[0].scorePoints[0].id;
+    expect(() => assertRubricIntegrity(invalid)).toThrow("评分标准校验失败");
   });
 });

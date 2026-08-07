@@ -11,6 +11,9 @@ import type {
 } from "../shared/types.js";
 import { logEvent } from "./systemLog.js";
 
+export const AUTO_CONFIDENCE_THRESHOLD = 0.85;
+export const REVIEW_CONFIDENCE_THRESHOLD = 0.6;
+
 const unitAliases: Record<string, string> = {
   "米/秒": "m/s",
   "米每秒": "m/s",
@@ -21,6 +24,84 @@ const unitAliases: Record<string, string> = {
   "焦": "J",
   "焦耳": "J"
 };
+
+interface EvidenceReferenceCheck {
+  validLineIds: string[];
+  missingLineIds: string[];
+  crossedOutLineIds: string[];
+  uncertainLineIds: string[];
+}
+
+function inspectEvidenceLineIds(evidence: AnswerEvidence, lineIds: string[]): EvidenceReferenceCheck {
+  const linesById = new Map(evidence.lines.map((line) => [line.id, line]));
+  const validLineIds: string[] = [];
+  const missingLineIds: string[] = [];
+  const crossedOutLineIds: string[] = [];
+  const uncertainLineIds: string[] = [];
+
+  for (const lineId of [...new Set(lineIds)]) {
+    const line = linesById.get(lineId);
+    if (!line) {
+      missingLineIds.push(lineId);
+    } else if (line.status === "crossed_out") {
+      crossedOutLineIds.push(lineId);
+    } else if (line.status === "uncertain") {
+      uncertainLineIds.push(lineId);
+    } else if ((line.text?.trim() || line.latex?.trim())) {
+      validLineIds.push(lineId);
+    } else {
+      uncertainLineIds.push(lineId);
+    }
+  }
+
+  return { validLineIds, missingLineIds, crossedOutLineIds, uncertainLineIds };
+}
+
+function evidenceReferenceReason(check: EvidenceReferenceCheck): string {
+  const reasons: string[] = [];
+  if (check.missingLineIds.length) reasons.push(`引用了不存在的卷面行：${check.missingLineIds.join(", ")}`);
+  if (check.crossedOutLineIds.length) reasons.push(`引用了已划掉的卷面行：${check.crossedOutLineIds.join(", ")}`);
+  if (check.uncertainLineIds.length) reasons.push(`引用的卷面行存在视觉歧义：${check.uncertainLineIds.join(", ")}`);
+  if (!check.validLineIds.length) reasons.push("没有可确认的有效卷面证据");
+  return reasons.join("；");
+}
+
+function canSupportAutomaticDecision(check: EvidenceReferenceCheck, confidence: number): { ok: boolean; reason?: string } {
+  if (confidence < AUTO_CONFIDENCE_THRESHOLD) {
+    return { ok: false, reason: `置信度 ${Math.round(confidence * 100)}% 低于自动判定阈值 ${Math.round(AUTO_CONFIDENCE_THRESHOLD * 100)}%` };
+  }
+  if (check.missingLineIds.length || check.crossedOutLineIds.length || check.uncertainLineIds.length || !check.validLineIds.length) {
+    return { ok: false, reason: evidenceReferenceReason(check) };
+  }
+  return { ok: true };
+}
+
+export function normalizeEvidenceReferences(input: AnswerEvidence): AnswerEvidence {
+  const seenLineIds = new Set<string>();
+  const ambiguities = [...input.ambiguities];
+  const lines = input.lines.filter((line) => {
+    if (seenLineIds.has(line.id)) {
+      ambiguities.push({ lineId: line.id, reason: "卷面转录返回了重复的行ID，已保留第一条", scoreImpact: "certain" });
+      return false;
+    }
+    seenLineIds.add(line.id);
+    return true;
+  });
+  const linesById = new Map(lines.map((line) => [line.id, line]));
+  const finalAnswers = input.finalAnswers.filter((answer) => {
+    const line = linesById.get(answer.lineId);
+    if (!line) {
+      ambiguities.push({ lineId: answer.lineId, reason: `最终答案引用了不存在的卷面行 ${answer.lineId}`, scoreImpact: "certain" });
+      return false;
+    }
+    if (line.status === "crossed_out") {
+      ambiguities.push({ lineId: answer.lineId, reason: "最终答案引用了已划掉的卷面行，已从有效候选中排除", scoreImpact: "certain" });
+      return false;
+    }
+    return true;
+  });
+  return { ...input, lines, finalAnswers, ambiguities };
+}
 
 function normalizeUnit(unit?: string): string {
   if (!unit) return "";
@@ -216,9 +297,9 @@ export function answerCollectionsEquivalent(actual: string, expected: string, to
   };
 }
 
-export const GRADING_ENGINE_VERSION = "2.1.0";
-export const TEACHER_JUDGEMENT_VERSION = "final-answer-v1";
-export const TEACHER_COMMENTARY_VERSION = "teacher-commentary-v1";
+export const GRADING_ENGINE_VERSION = "2.2.0";
+export const TEACHER_JUDGEMENT_VERSION = "final-answer-v2";
+export const TEACHER_COMMENTARY_VERSION = "teacher-commentary-v2";
 
 export function createFallbackTeacherCommentary(result: GradingResult): TeacherCommentary {
   const lostPoints = result.subquestions.flatMap((subquestion) => subquestion.decisions
@@ -243,9 +324,12 @@ export function createFallbackTeacherCommentary(result: GradingResult): TeacherC
     .filter((decision) => decision.status === "satisfied")
     .map((decision) => `${subquestion.title}：${decision.pointId}已满足评分要求`));
   const reviewItems = result.reviewReasons;
-  const overallComment = result.score === result.maxScore
-    ? "本次作答最终得分为满分。过程审验已执行，存在的证据不足或过程问题仅作为人工复核提示，不影响最终得分。"
-    : `本次作答得分${result.score}/${result.maxScore}分。主要失分来自已确认未满足的评分点；证据不足的项目已保留并标记为人工复核。`;
+  const maximumPossibleScore = result.maximumPossibleScore ?? result.score;
+  const overallComment = maximumPossibleScore !== result.score
+    ? `本次作答已确认得分至少为 ${result.score}/${result.maxScore} 分，待复核项目确认后最高可能为 ${maximumPossibleScore}/${result.maxScore} 分。`
+    : result.score === result.maxScore
+      ? "本次作答最终得分为满分。过程审验已执行，存在的证据不足或过程问题仅作为人工复核提示，不影响最终得分。"
+      : `本次作答得分${result.score}/${result.maxScore}分。主要失分来自已确认未满足的评分点；证据不足的项目已保留并标记为人工复核。`;
   return {
     overallComment,
     strengths: [...new Set(strengths)].slice(0, 8),
@@ -348,11 +432,13 @@ export function calculateGrade(input: {
   const reviewReasons = new Set<string>();
   const deductions = input.appliedDeductions ?? [];
 
+  const linesById = new Map(input.evidence.lines.map((line) => [line.id, line]));
   const subquestions = input.rubric.subquestions.map((subquestion) => {
     const finalEvidenceItems = input.evidence.finalAnswers.filter((item) => item.subquestionId === subquestion.id);
+    const activeFinalEvidenceItems = finalEvidenceItems.filter((item) => linesById.get(item.lineId)?.status === "active");
     const modelJudgement = input.finalAnswerJudgements.find((item) => item.subquestionId === subquestion.id);
     const finalAnswerDecisionSource = modelJudgement ? "teacher_model" as const : "missing_teacher_judgement" as const;
-    const finalAnswerJudgement: FinalAnswerJudgement = modelJudgement ?? {
+    let finalAnswerJudgement: FinalAnswerJudgement = modelJudgement ?? {
       subquestionId: subquestion.id,
       status: "uncertain",
       evidenceLineIds: [],
@@ -361,8 +447,20 @@ export function calculateGrade(input: {
       reason: "教师模型未返回该小问的最终答案判定，不能自动发布结果。",
       confidence: 0
     };
-    const finalAnswerStatus = finalAnswerJudgement.status;
-    const localAuditComputation = auditFinalAnswer(subquestion.finalAnswers, finalEvidenceItems);
+    let finalAnswerStatus = finalAnswerJudgement.status;
+    const finalEvidenceCheck = inspectEvidenceLineIds(input.evidence, finalAnswerJudgement.evidenceLineIds);
+    if (modelJudgement && (finalAnswerStatus === "correct" || finalAnswerStatus === "incorrect")) {
+      const automaticDecision = canSupportAutomaticDecision(finalEvidenceCheck, finalAnswerJudgement.confidence);
+      if (!automaticDecision.ok) {
+        finalAnswerJudgement = {
+          ...finalAnswerJudgement,
+          status: "uncertain",
+          reason: `教师模型原始结论为${finalAnswerStatus}，但${automaticDecision.reason}，已转为待复核。`
+        };
+        finalAnswerStatus = "uncertain";
+      }
+    }
+    const localAuditComputation = auditFinalAnswer(subquestion.finalAnswers, activeFinalEvidenceItems);
     const localAuditConflict = (finalAnswerStatus === "correct" && localAuditComputation.status === "not_equivalent")
       || (finalAnswerStatus === "incorrect" && localAuditComputation.status === "equivalent");
     const localFinalAnswerAudit: LocalFinalAnswerAudit = {
@@ -375,9 +473,12 @@ export function calculateGrade(input: {
     if (finalAnswerStatus === "uncertain") {
       reviewReasons.add(`${subquestion.title}最终答案待复核：${finalAnswerJudgement.reason}`);
     }
+    if (localAuditConflict) {
+      reviewReasons.add(`${subquestion.title}的教师模型结论与本地等价审计冲突，需要人工复核。`);
+    }
 
-    // System invariant: a teacher-model "correct" decision always grants full credit.
-    // Process auditing still runs and remains visible, but its findings cannot deduct.
+    // A high-confidence teacher-model "correct" decision with valid evidence grants full credit.
+    // Lower-confidence or unsupported judgements are normalized to uncertain above.
     const grantsFullCredit = finalAnswerStatus === "correct";
     if (input.operationId) {
       logEvent(input.operationId, "equivalence", "final_answer_authority_decision", `${subquestion.title}：教师模型判定最终答案为${finalAnswerStatus}`, {
@@ -400,17 +501,39 @@ export function calculateGrade(input: {
       const modelDecision = input.decisions.find(
         (item) => item.subquestionId === subquestion.id && item.pointId === point.id
       );
-      const decision = modelDecision ?? {
-        subquestionId: subquestion.id,
-        pointId: point.id,
-        status: "insufficient_evidence" as const,
-        evidenceLineIds: [],
-        evidenceQuote: "",
-        reason: "模型未返回该评分点的判断",
-        confidence: 0,
-        requiresReview: true,
-        reviewReason: "评分点缺少判断结果"
-      };
+      let decision: RubricDecision;
+      if (!modelDecision) {
+        decision = {
+          subquestionId: subquestion.id,
+          pointId: point.id,
+          status: "insufficient_evidence" as const,
+          evidenceLineIds: [],
+          evidenceQuote: "",
+          reason: "模型未返回该评分点的判断",
+          confidence: 0,
+          requiresReview: true,
+          reviewReason: "评分点缺少判断结果",
+          decisionSource: "synthetic_missing"
+        };
+      } else {
+        decision = { ...modelDecision, decisionSource: "model" };
+        if (decision.status === "satisfied" || decision.status === "not_satisfied") {
+          const evidenceCheck = inspectEvidenceLineIds(input.evidence, decision.evidenceLineIds);
+          const automaticDecision = canSupportAutomaticDecision(evidenceCheck, decision.confidence);
+          if (!automaticDecision.ok) {
+            decision = {
+              ...decision,
+              status: "insufficient_evidence",
+              evidenceLineIds: evidenceCheck.validLineIds,
+              evidenceQuote: evidenceCheck.validLineIds.length ? decision.evidenceQuote : "",
+              reason: `${decision.reason}；${automaticDecision.reason}`,
+              requiresReview: true,
+              reviewReason: automaticDecision.reason,
+              decisionSource: "normalized_uncertain"
+            };
+          }
+        }
+      }
       const requiresReview = decision.requiresReview || decision.status === "insufficient_evidence";
       const scoringDisposition = grantsFullCredit
         ? "not_deducted_by_final_answer" as const
@@ -425,7 +548,8 @@ export function calculateGrade(input: {
         requiresReview,
         scoringDisposition,
         maxScore: point.score,
-        awardedScore: grantsFullCredit || decision.status === "satisfied" || decision.status === "insufficient_evidence" || decision.status === "not_required" ? point.score : 0
+        awardedScore: grantsFullCredit || decision.status === "satisfied" || decision.status === "not_required" ? point.score : 0,
+        uncertainScore: !grantsFullCredit && decision.status === "insufficient_evidence" ? point.score : 0
       };
     });
 
@@ -433,11 +557,17 @@ export function calculateGrade(input: {
       .filter((item) => item.subquestionId === subquestion.id)
       .reduce<Array<AppliedDeduction & { deductedScore: number }>>((items, deduction) => {
         const rule = subquestion.deductions.find((candidate) => candidate.id === deduction.ruleId);
+        const evidenceCheck = inspectEvidenceLineIds(input.evidence, deduction.evidenceLineIds);
+        const automaticDeduction = canSupportAutomaticDecision(evidenceCheck, deduction.confidence);
+        if (!automaticDeduction.ok) {
+          reviewReasons.add(`${subquestion.title}的扣分规则 ${deduction.ruleId} 证据不足：${automaticDeduction.reason}`);
+          return items;
+        }
         if (!rule || items.some((item) => {
           const priorRule = subquestion.deductions.find((candidate) => candidate.id === item.ruleId);
           return priorRule?.exclusiveGroup === rule.exclusiveGroup;
         })) return items;
-        items.push({ ...deduction, deductedScore: rule.deduct });
+        items.push({ ...deduction, evidenceLineIds: evidenceCheck.validLineIds, deductedScore: rule.deduct });
         return items;
       }, []);
     const auditDeductions = uniqueDeductions.map((deduction) => ({
@@ -448,13 +578,18 @@ export function calculateGrade(input: {
     const subDeductions = grantsFullCredit ? [] : auditDeductions;
 
     const processScore = pointDecisions.reduce((sum, item) => sum + item.awardedScore, 0);
+    const uncertainScore = pointDecisions.reduce((sum, item) => sum + (item.uncertainScore ?? 0), 0);
     const deductionTotal = subDeductions.reduce((sum, item) => sum + item.deductedScore, 0);
     const scoreBeforeDeduction = grantsFullCredit
       ? subquestion.maxScore
       : processScore;
     const score = Math.max(0, Math.min(subquestion.maxScore, scoreBeforeDeduction - deductionTotal));
+    const maximumPossibleScore = Math.max(0, Math.min(
+      subquestion.maxScore,
+      grantsFullCredit ? subquestion.maxScore : scoreBeforeDeduction + uncertainScore - deductionTotal
+    ));
     if (input.operationId) {
-      logEvent(input.operationId, "scoring", "subquestion_score", `${subquestion.title}：${score}/${subquestion.maxScore}分`, {
+      logEvent(input.operationId, "scoring", "subquestion_score", `${subquestion.title}：${score}${maximumPossibleScore > score ? `-${maximumPossibleScore}` : ""}/${subquestion.maxScore}分`, {
         subquestionId: subquestion.id,
         finalAnswerStatus,
         teacherReason: finalAnswerJudgement.reason,
@@ -464,6 +599,8 @@ export function calculateGrade(input: {
         localAuditConflict,
         grantsFullCredit,
         processScore,
+        uncertainScore,
+        maximumPossibleScore,
         appliedDeduction: deductionTotal,
         processPointsOverridden: grantsFullCredit,
         processAuditExecuted: true,
@@ -476,11 +613,13 @@ export function calculateGrade(input: {
       title: subquestion.title,
       score,
       maxScore: subquestion.maxScore,
+      maximumPossibleScore,
+      uncertainScore,
       finalAnswerStatus,
       finalAnswerReason: finalAnswerJudgement.reason,
       finalAnswerConfidence: finalAnswerJudgement.confidence,
       finalAnswerDecisionSource,
-      finalAnswerEvidenceLineIds: finalAnswerJudgement.evidenceLineIds,
+      finalAnswerEvidenceLineIds: finalEvidenceCheck.validLineIds,
       studentFinalAnswer: finalAnswerJudgement.studentAnswer,
       referenceFinalAnswer: finalAnswerJudgement.referenceAnswer,
       localFinalAnswerAudit,
@@ -498,10 +637,33 @@ export function calculateGrade(input: {
   });
 
   const allDecisions = subquestions.flatMap((item) => item.decisions);
-  const traceable = allDecisions.filter((item) => item.evidenceLineIds.length > 0 || item.status === "not_satisfied").length;
-  const automatic = allDecisions.filter((item) => !item.requiresReview).length;
-  const ambiguityCount = input.evidence.ambiguities.filter((item) => item.scoreImpact !== "none").length;
+  const expectedDecisionCount = input.rubric.subquestions.reduce((sum, item) => sum + item.scorePoints.length, 0);
+  const executedDecisions = allDecisions.filter((item) => item.decisionSource !== "synthetic_missing");
+  const traceable = executedDecisions.filter((item) => {
+    const evidenceCheck = inspectEvidenceLineIds(input.evidence, item.evidenceLineIds);
+    return evidenceCheck.validLineIds.length > 0
+      && evidenceCheck.missingLineIds.length === 0
+      && evidenceCheck.crossedOutLineIds.length === 0
+      && evidenceCheck.uncertainLineIds.length === 0;
+  }).length;
+  const automatic = executedDecisions.filter((item) => {
+    const evidenceCheck = inspectEvidenceLineIds(input.evidence, item.evidenceLineIds);
+    return item.decisionSource === "model"
+      && !item.requiresReview
+      && item.confidence >= AUTO_CONFIDENCE_THRESHOLD
+      && evidenceCheck.validLineIds.length > 0
+      && evidenceCheck.missingLineIds.length === 0
+      && evidenceCheck.crossedOutLineIds.length === 0
+      && evidenceCheck.uncertainLineIds.length === 0;
+  }).length;
+  const ambiguousLineIds = new Set([
+    ...input.evidence.lines.filter((line) => line.status === "uncertain").map((line) => line.id),
+    ...input.evidence.ambiguities
+      .filter((item) => item.scoreImpact !== "none" && item.lineId && input.evidence.lines.some((line) => line.id === item.lineId))
+      .map((item) => item.lineId as string)
+  ]);
   const score = subquestions.reduce((sum, item) => sum + item.score, 0);
+  const maximumPossibleScore = subquestions.reduce((sum, item) => sum + (item.maximumPossibleScore ?? item.score), 0);
 
   return {
     id: input.id,
@@ -509,15 +671,16 @@ export function calculateGrade(input: {
     fileName: input.fileName,
     score,
     maxScore: input.rubric.totalScore,
+    maximumPossibleScore,
     status: reviewReasons.size > 0 ? "needs_review" : "completed",
     reviewReasons: [...reviewReasons],
     evidence: input.evidence,
     subquestions,
     metrics: {
-      ruleCoverage: allDecisions.length ? allDecisions.filter((item) => item.status).length / allDecisions.length : 1,
-      evidenceTraceability: allDecisions.length ? traceable / allDecisions.length : 1,
-      autoDecisionRate: allDecisions.length ? automatic / allDecisions.length : 1,
-      ambiguityRate: input.evidence.lines.length ? ambiguityCount / input.evidence.lines.length : 0,
+      ruleCoverage: expectedDecisionCount ? executedDecisions.length / expectedDecisionCount : 1,
+      evidenceTraceability: expectedDecisionCount ? traceable / expectedDecisionCount : 1,
+      autoDecisionRate: expectedDecisionCount ? automatic / expectedDecisionCount : 1,
+      ambiguityRate: input.evidence.lines.length ? ambiguousLineIds.size / input.evidence.lines.length : 0,
       durationMs: input.durationMs
     },
     modelName: input.modelName,

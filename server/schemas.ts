@@ -1,8 +1,9 @@
 import { z } from "zod";
+import type { Rubric } from "../shared/types.js";
 
 const scorePointSchema = z.object({
-  id: z.string(),
-  title: z.string(),
+  id: z.string().trim().min(1),
+  title: z.string().trim().min(1),
   description: z.string(),
   score: z.number().nonnegative(),
   type: z.enum(["formula", "substitution", "result", "text"]),
@@ -11,14 +12,14 @@ const scorePointSchema = z.object({
 });
 
 export const rubricSchema = z.object({
-  title: z.string(),
+  title: z.string().trim().min(1),
   recognizedQuestionText: z.string().default(""),
   version: z.number().int().positive().default(1),
   status: z.enum(["draft", "locked"]).default("draft"),
   totalScore: z.number().nonnegative(),
   subquestions: z.array(z.object({
-    id: z.string(),
-    title: z.string(),
+    id: z.string().trim().min(1),
+    title: z.string().trim().min(1),
     maxScore: z.number().nonnegative(),
     finalAnswerPolicy: z.enum(["full_credit", "process_required"]),
     finalAnswers: z.array(z.object({
@@ -29,10 +30,10 @@ export const rubricSchema = z.object({
     })),
     scorePoints: z.array(scorePointSchema),
     deductions: z.array(z.object({
-      id: z.string(),
+      id: z.string().trim().min(1),
       reason: z.string(),
       deduct: z.number().nonnegative(),
-      exclusiveGroup: z.string()
+      exclusiveGroup: z.string().trim().min(1)
     })).default([])
   })),
   warnings: z.array(z.string()).default([])
@@ -135,6 +136,53 @@ export function validateRubricTotals<T extends z.infer<typeof rubricSchema>>(rub
     }
   }
   return { ...rubric, warnings };
+}
+
+export function assertRubricIntegrity(rubric: Rubric): void {
+  const errors: string[] = [];
+  const subquestionIds = new Set<string>();
+  const subquestionTotal = rubric.subquestions.reduce((sum, item) => sum + item.maxScore, 0);
+
+  if (rubric.subquestions.length === 0) {
+    errors.push("至少需要一个小题");
+  }
+  if (Math.abs(subquestionTotal - rubric.totalScore) > 1e-9) {
+    errors.push(`小题满分合计 ${subquestionTotal} 分，与总分 ${rubric.totalScore} 分不一致`);
+  }
+
+  for (const subquestion of rubric.subquestions) {
+    if (subquestionIds.has(subquestion.id)) {
+      errors.push(`小题ID重复：${subquestion.id}`);
+    }
+    subquestionIds.add(subquestion.id);
+
+    const pointIds = new Set<string>();
+    const pointTotal = subquestion.scorePoints.reduce((sum, item) => sum + item.score, 0);
+    if (Math.abs(pointTotal - subquestion.maxScore) > 1e-9) {
+      errors.push(`${subquestion.title}的评分点合计 ${pointTotal} 分，与小题满分 ${subquestion.maxScore} 分不一致`);
+    }
+    if (subquestion.maxScore > 0 && subquestion.scorePoints.length === 0) {
+      errors.push(`${subquestion.title}没有评分点，但小题满分大于0`);
+    }
+    for (const point of subquestion.scorePoints) {
+      if (pointIds.has(point.id)) {
+        errors.push(`${subquestion.title}的评分点ID重复：${point.id}`);
+      }
+      pointIds.add(point.id);
+    }
+
+    const deductionIds = new Set<string>();
+    for (const deduction of subquestion.deductions) {
+      if (deductionIds.has(deduction.id)) {
+        errors.push(`${subquestion.title}的扣分规则ID重复：${deduction.id}`);
+      }
+      deductionIds.add(deduction.id);
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`评分标准校验失败：${errors.join("；")}`);
+  }
 }
 
 export const rubricJsonSchema = {
