@@ -1,6 +1,7 @@
 export type DecisionStatus = "satisfied" | "not_satisfied" | "insufficient_evidence" | "not_required";
 export type FinalAnswerStatus = "correct" | "incorrect" | "missing" | "uncertain";
 export type ScoringDisposition = "awarded" | "not_awarded" | "not_deducted_by_final_answer" | "uncertain_no_deduction";
+export type DecisionSource = "model" | "normalized_uncertain" | "synthetic_missing";
 
 export interface FinalAnswerRule {
   expression: string;
@@ -85,6 +86,8 @@ export interface RubricDecision {
   requiresReview: boolean;
   reviewReason?: string;
   scoringDisposition?: ScoringDisposition;
+  decisionSource?: DecisionSource;
+  uncertainScore?: number;
 }
 
 export interface AppliedDeduction {
@@ -154,6 +157,8 @@ export interface SubquestionResult {
   title: string;
   score: number;
   maxScore: number;
+  maximumPossibleScore?: number;
+  uncertainScore?: number;
   finalAnswerStatus: FinalAnswerStatus;
   finalAnswerReason?: string;
   finalAnswerConfidence?: number;
@@ -174,6 +179,7 @@ export interface GradingResult {
   fileName: string;
   score: number;
   maxScore: number;
+  maximumPossibleScore?: number;
   status: "completed" | "needs_review" | "failed";
   reviewReasons: string[];
   evidence: AnswerEvidence;

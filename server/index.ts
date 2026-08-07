@@ -8,7 +8,7 @@ import { readModelConfig, saveModelConfig, toPublicConfig } from "./configStore.
 import { createDemoResults, demoQuestion, demoReference, demoRubric } from "./demoData.js";
 import { extractDocumentText } from "./documentExtractor.js";
 import { testModelConnection } from "./modelClient.js";
-import { rubricSchema } from "./schemas.js";
+import { assertRubricIntegrity, rubricSchema } from "./schemas.js";
 import { gradeStudentAnswer, structureRubric } from "./workflows.js";
 import {
   getRegradeContext,
@@ -144,6 +144,7 @@ app.post("/api/templates", upload.fields([
       rubric: z.string().min(2)
     }).parse(req.body);
     const rubric: Rubric = rubricSchema.parse(JSON.parse(input.rubric));
+    assertRubricIntegrity(rubric);
     const files = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
     const summary = await saveTemplate({
       questionText: input.questionText,
@@ -166,6 +167,7 @@ app.post("/api/grading/grade", upload.single("image"), asyncRoute(async (req, re
   if (!req.file.mimetype.startsWith("image/")) throw new Error("首版仅支持 JPG、PNG、WEBP 等图片格式");
   const rubric: Rubric = rubricSchema.parse(JSON.parse(String(req.body.rubric)));
   if (rubric.status !== "locked") throw new Error("评分标准尚未锁定");
+  assertRubricIntegrity(rubric);
   const studentId = String(req.body.studentId || req.file.originalname);
   const grading = await gradeStudentAnswer(await requireConfig(), {
     id: crypto.randomUUID(), studentId, fileName: normalizeUploadedFileName(req.file.originalname),

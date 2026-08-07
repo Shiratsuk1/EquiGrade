@@ -81,11 +81,17 @@ export async function callStructured<T>(
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
       try {
+        const modeUserContent = mode === "json_schema"
+          ? userContent
+          : [
+            { type: "text", text: `${input.prompt}\n\n请严格返回符合以下 JSON Schema 的对象，不要输出任何额外文字：\n${JSON.stringify(input.schema)}` },
+            ...userContent.slice(1)
+          ];
         const body: Record<string, unknown> = {
           model: input.model,
           messages: [
             { role: "system", content: input.system },
-            { role: "user", content: userContent }
+            { role: "user", content: modeUserContent }
           ],
           temperature: 0,
           max_tokens: config.maxOutputTokens

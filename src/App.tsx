@@ -78,6 +78,12 @@ function percent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
+function scoreLabel(score: number, maximumPossibleScore?: number) {
+  return typeof maximumPossibleScore === "number" && maximumPossibleScore > score
+    ? `${score}-${maximumPossibleScore}`
+    : String(score);
+}
+
 function confidenceClass(value: number) {
   if (value < 0.6) return "low-confidence";
   if (value < 0.85) return "medium-confidence";
@@ -658,7 +664,7 @@ function RubricReview({ rubric, editingJson, rubricJson, setRubricJson, onEdit, 
     {editingJson ? <div className="json-editor"><textarea value={rubricJson} onChange={(event) => setRubricJson(event.target.value)} spellCheck={false} /><div><button className="button secondary" onClick={onCancelEdit}>取消</button><button className="button dark" onClick={onApplyJson}><Check size={16} />应用修改</button></div></div> : <div className="rubric-content">
       <div className="rubric-summary"><div><span>题目</span><strong>{rubric.title}</strong></div><div><span>总分</span><strong>{rubric.totalScore} 分</strong></div><div><span>小问</span><strong>{rubric.subquestions.length}</strong></div><div><span>评分点</span><strong>{rubric.subquestions.reduce((sum, item) => sum + item.scorePoints.length, 0)}</strong></div></div>
       <div className="recognized-question"><div className="recognized-question-header"><FileText size={16} /><strong>识别到的题目原文</strong><span>锁定前请核对公式、单位和小问编号</span></div>{rubric.recognizedQuestionText ? <MathText value={rubric.recognizedQuestionText} formulaByDefault /> : <p className="empty-recognition">模型未返回题目原文，请编辑 JSON 补充或重新生成。</p>}</div>
-      {rubric.subquestions.map((subquestion) => <div className="subquestion" key={subquestion.id}><div className="subquestion-header"><div><strong>{subquestion.title}</strong><span>{subquestion.id}</span></div><b>{subquestion.maxScore} 分</b></div><div className="answer-rule"><span>最终答案</span><div className="formula-list">{subquestion.finalAnswers.length ? subquestion.finalAnswers.map((item, index) => <span className="formula-option" key={`${item.expression}-${index}`}><FinalAnswerFormula expression={item.expression} unit={item.unit} />{index < subquestion.finalAnswers.length - 1 && <i>/</i>}</span>) : <span>未配置</span>}</div><small>教师模型判定正确时直接满分</small></div><div className="rubric-table"><div className="rubric-table-head"><span>评分点</span><span>判定依据</span><span>分值</span></div>{subquestion.scorePoints.map((point) => <div className="rubric-table-row" key={point.id}><span><b>{point.id}</b>{point.title}</span><span>{point.description}<MathText value={point.expected} formulaByDefault /></span><strong>{point.score}</strong></div>)}</div></div>)}
+      {rubric.subquestions.map((subquestion) => <div className="subquestion" key={subquestion.id}><div className="subquestion-header"><div><strong>{subquestion.title}</strong><span>{subquestion.id}</span></div><b>{subquestion.maxScore} 分</b></div><div className="answer-rule"><span>最终答案</span><div className="formula-list">{subquestion.finalAnswers.length ? subquestion.finalAnswers.map((item, index) => <span className="formula-option" key={`${item.expression}-${index}`}><FinalAnswerFormula expression={item.expression} unit={item.unit} />{index < subquestion.finalAnswers.length - 1 && <i>/</i>}</span>) : <span>未配置</span>}</div><small>高置信度且有有效卷面证据时直接满分</small></div><div className="rubric-table"><div className="rubric-table-head"><span>评分点</span><span>判定依据</span><span>分值</span></div>{subquestion.scorePoints.map((point) => <div className="rubric-table-row" key={point.id}><span><b>{point.id}</b>{point.title}</span><span>{point.description}<MathText value={point.expected} formulaByDefault /></span><strong>{point.score}</strong></div>)}</div></div>)}
     </div>}
   </section>;
 }
@@ -673,7 +679,7 @@ function ResultsSection({ results, metrics, selected, onSelect, templateId, regr
       <Metric icon={<Gauge size={18} />} label="自动判定率" value={percent(metrics.automatic)} detail="无须人工介入" tone="ink" />
       <Metric icon={<AlertTriangle size={18} />} label="答卷复核率" value={percent(metrics.review)} detail="包含至少一项风险" tone="amber" />
     </div>
-    <div className="result-table"><div className="result-head"><span>学生</span><span>文件</span><span>得分</span><span>处理状态</span><span>耗时</span><span /></div>{results.map((result) => <button className={selected?.id === result.id ? "result-row selected" : "result-row"} key={result.id} onClick={() => onSelect(result.id)}><span><strong>{result.studentId}</strong></span><span>{result.fileName}</span><span><b>{result.score}</b> / {result.maxScore}</span><span><i className={`status-chip ${result.status}`}>{result.status === "completed" ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}{statusLabel(result.status)}</i></span><span>{(result.metrics.durationMs / 1000).toFixed(1)} s</span><ChevronRight size={16} /></button>)}</div>
+    <div className="result-table"><div className="result-head"><span>学生</span><span>文件</span><span>得分</span><span>处理状态</span><span>耗时</span><span /></div>{results.map((result) => <button className={selected?.id === result.id ? "result-row selected" : "result-row"} key={result.id} onClick={() => onSelect(result.id)}><span><strong>{result.studentId}</strong></span><span>{result.fileName}</span><span><b>{scoreLabel(result.score, result.maximumPossibleScore)}</b> / {result.maxScore}</span><span><i className={`status-chip ${result.status}`}>{result.status === "completed" ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}{statusLabel(result.status)}</i></span><span>{(result.metrics.durationMs / 1000).toFixed(1)} s</span><ChevronRight size={16} /></button>)}</div>
     {selected && <ResultDetail result={selected} canRegrade={Boolean(templateId)} regrading={regrading} onRegrade={onRegrade} />}
   </section>;
 }
@@ -714,7 +720,7 @@ function ResultDetail({ result, canRegrade, regrading, onRegrade }: { result: Gr
       </div>
       <div className="detail-summary-actions">
         {canRegrade && <button className="button secondary" disabled={regrading} onClick={() => void onRegrade(result.id)}>{regrading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}{regrading ? "判定中" : "重新判定"}</button>}
-        <div className="score-block"><strong>{result.score}</strong><span>/ {result.maxScore} 分</span></div>
+        <div className="score-block"><strong>{scoreLabel(result.score, result.maximumPossibleScore)}</strong><span>/ {result.maxScore} 分{result.maximumPossibleScore !== undefined && result.maximumPossibleScore > result.score ? "（含待复核分值）" : ""}</span></div>
       </div>
     </div>
     {result.reviewReasons.length > 0 && <div className="review-banner"><AlertTriangle size={17} /><div><strong>需要人工复核</strong>{result.reviewReasons.map((reason) => <p key={reason}>{reason}</p>)}</div></div>}
@@ -730,7 +736,7 @@ function ResultDetail({ result, canRegrade, regrading, onRegrade }: { result: Gr
         const teacherDecision = Boolean(subquestion.finalAnswerDecisionSource);
         const audit = subquestion.localFinalAnswerAudit;
         return <div className="report-question" key={subquestion.id}>
-          <div className="report-question-title"><strong>{subquestion.title}</strong><span>{subquestion.score}/{subquestion.maxScore} 分</span></div>
+          <div className="report-question-title"><strong>{subquestion.title}</strong><span>{scoreLabel(subquestion.score, subquestion.maximumPossibleScore)}/{subquestion.maxScore} 分</span></div>
           <div className={`final-verdict ${subquestion.finalAnswerStatus}`}>
             <div className="final-verdict-title">
               {subquestion.finalAnswerStatus === "correct" ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
@@ -750,11 +756,11 @@ function ResultDetail({ result, canRegrade, regrading, onRegrade }: { result: Gr
           </div>
           {subquestion.processAuditSummary && <div className="process-audit-summary"><span>过程审验 {subquestion.processAuditSummary.totalPoints} 项</span><b>{subquestion.processAuditSummary.satisfied} 项通过</b><b>{subquestion.processAuditSummary.notSatisfied} 项未满足</b><b>{subquestion.processAuditSummary.uncertain} 项证据不足</b>{subquestion.processAuditSummary.reviewRequired > 0 && <strong>{subquestion.processAuditSummary.reviewRequired} 项待复核</strong>}</div>}
           {subquestion.decisions.map((decision) => <div className="decision-row" key={decision.pointId}>
-            <span className={`decision-icon ${decision.status}`}>{decision.status === "satisfied" ? <Check size={14} /> : decision.status === "not_satisfied" ? <XCircle size={14} /> : <AlertTriangle size={14} />}</span>
-            <div><div className="decision-heading"><strong>{decision.pointId}</strong><span className={`decision-audit-status ${decision.status}`}>{decisionAuditLabel(decision.status)}</span></div><p className="decision-reason"><MathText value={decision.reason} formulaByDefault /></p><div className="evidence-formula">{decision.evidenceQuote ? <><span>卷面证据：</span><MathText value={decision.evidenceQuote} formulaByDefault /></> : <span>未找到可引用的卷面证据</span>}</div><small className={`decision-scoring ${decision.scoringDisposition ?? "legacy"}`}>{scoringDispositionLabel(decision.scoringDisposition)}</small></div>
-            <b>{decision.awardedScore}/{decision.maxScore}</b>
-          </div>)}
-          {subquestion.auditDeductions && subquestion.auditDeductions.length > 0 && <div className="audit-deduction-list"><strong>扣分点审验</strong>{subquestion.auditDeductions.map((deduction) => <p key={deduction.ruleId}><b>{deduction.ruleId}</b>：<MathText value={deduction.reason} formulaByDefault />；{deduction.scoringDisposition === "not_deducted_by_final_answer" ? "最终答案正确，本次不扣分" : `扣 ${deduction.deductedScore} 分`}</p>)}</div>}
+             <span className={`decision-icon ${decision.status}`}>{decision.status === "satisfied" ? <Check size={14} /> : decision.status === "not_satisfied" ? <XCircle size={14} /> : <AlertTriangle size={14} />}</span>
+             <div><div className="decision-heading"><strong>{decision.pointId}</strong><span className={`decision-audit-status ${decision.status}`}>{decisionAuditLabel(decision.status)}</span><small className={confidenceClass(decision.confidence)}>置信度 {percent(decision.confidence)}</small></div><p className="decision-reason"><MathText value={decision.reason} formulaByDefault /></p><div className="evidence-formula">{decision.evidenceQuote ? <><span>卷面证据：</span><MathText value={decision.evidenceQuote} formulaByDefault /></> : <span>未找到可引用的卷面证据</span>}</div><small className={`decision-scoring ${decision.scoringDisposition ?? "legacy"}`}>{scoringDispositionLabel(decision.scoringDisposition)}{decision.uncertainScore ? `；待复核 ${decision.uncertainScore} 分` : ""}</small></div>
+             <b>{decision.status === "insufficient_evidence" ? `?/${decision.maxScore}` : `${decision.awardedScore}/${decision.maxScore}`}</b>
+           </div>)}
+          {subquestion.auditDeductions && subquestion.auditDeductions.length > 0 && <div className="audit-deduction-list"><strong>扣分点审验</strong>{subquestion.auditDeductions.map((deduction) => <p key={deduction.ruleId}><b>{deduction.ruleId}</b>：<MathText value={deduction.reason} formulaByDefault />；{deduction.scoringDisposition === "not_deducted_by_final_answer" ? "最终答案正确，本次不扣分" : `扣 ${deduction.deductedScore} 分`}；置信度 {percent(deduction.confidence)}</p>)}</div>}
         </div>;
       })}</div>
       <aside className="transcript-panel"><div className="transcript-title"><FileText size={16} /><strong>卷面转录</strong><span>{result.evidence.lines.length} 行</span></div>{result.evidence.lines.map((line) => {
