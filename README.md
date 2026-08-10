@@ -13,7 +13,30 @@ npm run dev
 
 ## Windows 用户端
 
-项目提供 Electron 用户端：左侧加载评分控制台，右侧加载独立的内嵌改卷网页。服务端首次启动时会自动保存一份内置、锁定的“模拟网页改卷演练 · 圆周运动”模板；模拟改卷网页地址为 `/mock-grading`，网页只提供模拟学生作答图片、评分输入框、提交按钮和下一份按钮，不携带预设分数，也不调用后端控制翻页。
+项目提供 Electron 用户端：左侧加载评分控制台，右侧加载独立的内嵌改卷网页。服务端首次启动时会自动保存一份内置、锁定的“模拟网页改卷演练 · 圆周运动”模板。
+
+本地测试站有两个入口：`/mock-grading` 是通用 `data-grading-*` 控件测试页；`/zhixue-mock` 是智学网专用适配器模拟页，复刻 `#topicImgContent`、`.scorearea`、`#txt_marking_all`、`#bnt_save`、`a[title="上一份"]` 和 `a[title="下一份"]` 等真实结构。模拟页提供 JSON 测试用例导入/导出、答卷图像、最终总分保存、自动提交开关、上一份/下一份和任务量进度，不连接真实智学网。
+
+JSON 测试用例格式如下，`imageDataUrl` 可选；没有图片时会根据 `lines` 生成本地 SVG 答卷图：
+
+```json
+{
+  "version": 1,
+  "site": "zhixue-mock",
+  "cases": [
+    {
+      "id": "student-001",
+      "studentId": "学生 001",
+      "label": "学生 001",
+      "questionLabel": "第 16 题 · 竖直圆轨道综合题",
+      "maxScore": 18,
+      "lines": ["mgR = 1/2mv²", "N - mg = mv² / R", "N = 3mg"]
+    }
+  ]
+}
+```
+
+Electron 流水线的“测试任务”默认打开 `/zhixue-mock`，因此可以直接验证智学网专用适配器的页面检查、图像提取、总分写入、提交确认和翻页逻辑；原 `/mock-grading` 入口仍保留用于通用适配器回归测试。
 
 Electron 目标页适配器会从网页的 `img.currentSrc`、`src`、`srcset`、`data-src`、`data-original`、CSS `background-image` 或 `canvas` 中提取学生作答图片，必要时将 SVG 转换为 PNG，计算图片 SHA-256 后调用 `/api/pipeline/grade`。教师模型返回批改结果后，适配器才向网页评分框写入数字、点击提交并进入下一份；服务端会重新计算上传图片哈希并校验。异常会跳过当前答卷并记录原因，连续 3 次失败后暂停。
 

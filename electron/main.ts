@@ -376,7 +376,7 @@ ipcMain.handle("pipeline:select-task", async (event, selection: PipelineTaskSele
   }
   const context = await loadPipelineTemplate(selection);
   const targetUrl = selection.mode === "test"
-    ? `${localBaseUrl()}/mock-grading?embedded=1&scenario=complex`
+    ? `${localBaseUrl()}/zhixue-mock?embedded=1`
     : selection.targetUrl?.trim();
   if (!targetUrl) throw new Error("真实批改任务未指定阅卷页面");
   const session = requireBrowserSession();
@@ -473,6 +473,14 @@ ipcMain.handle("plugin:set-preferences", (event, preferences: PluginUiPreference
   const positions = new Set(["bottom-right", "bottom-left"]);
   const materials = new Set<WindowMaterial>(["solid", "mica", "acrylic"]);
   const motionIntensities = new Set(["off", "comfortable", "lively"]);
+  const fontFamilies = new Set(["system", "inter", "noto-sans-sc", "source-han-sans", "microsoft-yahei"]);
+  const monoFontFamilies = new Set(["cascadia", "consolas", "system"]);
+  const fontWeights = new Set([400, 500, 600, 700]);
+  const numericPreference = (value: unknown, fallback: number, min: number, max: number) => {
+    const numberValue = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(numberValue) ? Math.min(max, Math.max(min, numberValue)) : fallback;
+  };
+  const requestedFontWeight = Number(preferences?.fontWeight);
   requireBrowserSession().setPluginPreferences({
     accent: accents.has(preferences?.accent) ? preferences.accent : "teal",
     visible: preferences?.visible !== false,
@@ -481,7 +489,13 @@ ipcMain.handle("plugin:set-preferences", (event, preferences: PluginUiPreference
     confirmBeforeStart: preferences?.confirmBeforeStart !== false,
     material: materials.has(preferences?.material as WindowMaterial) ? preferences.material as WindowMaterial : "mica",
     motionIntensity: motionIntensities.has(preferences?.motionIntensity as string) ? preferences.motionIntensity : "comfortable",
-    reduceMotion: preferences?.reduceMotion === true
+    reduceMotion: preferences?.reduceMotion === true,
+    fontFamily: fontFamilies.has(preferences?.fontFamily as string) ? preferences.fontFamily : "noto-sans-sc",
+    monoFontFamily: monoFontFamilies.has(preferences?.monoFontFamily as string) ? preferences.monoFontFamily : "cascadia",
+    fontWeight: fontWeights.has(requestedFontWeight) ? requestedFontWeight : 500,
+    fontScale: numericPreference(preferences?.fontScale, 1.1, 0.9, 1.2),
+    lineHeight: numericPreference(preferences?.lineHeight, 1.5, 1.3, 1.9),
+    letterSpacing: numericPreference(preferences?.letterSpacing, 0, -0.02, 0.06)
   });
 });
 ipcMain.handle("window:set-material", (event, material: WindowMaterial) => {

@@ -55,7 +55,13 @@ const DEFAULT_PLUGIN_PREFERENCES: PluginUiPreferences = {
   confirmBeforeStart: true,
   material: "mica",
   motionIntensity: "comfortable",
-  reduceMotion: false
+  reduceMotion: false,
+  fontFamily: "noto-sans-sc",
+  monoFontFamily: "cascadia",
+  fontWeight: 500,
+  fontScale: 1.1,
+  lineHeight: 1.5,
+  letterSpacing: 0
 };
 
 function imageExtension(mimeType: string) {
@@ -133,9 +139,18 @@ function securityForUrl(value: string): BrowserSecurityState {
   return "unknown";
 }
 
-function normalizeNavigationUrl(value: string) {
+function normalizeNavigationUrl(value: string, baseUrl = "") {
   const input = value.trim();
   if (!input) throw new Error("请输入目标阅卷网站地址");
+  if (input.startsWith("/")) {
+    try {
+      const base = new URL(baseUrl);
+      if (base.protocol !== "http:" && base.protocol !== "https:") throw new Error();
+      return new URL(input, base.origin).href;
+    } catch {
+      throw new Error("相对地址只能在已打开的网页中使用");
+    }
+  }
   const url = /^[a-z][a-z\d+.-]*:/i.test(input)
     ? new URL(input)
     : /^(localhost|127\.0\.0\.1)(:\d+)?(?:\/|$)/i.test(input)
@@ -310,7 +325,7 @@ export class EmbeddedBrowserSession {
 
   async navigate(value: string) {
     await this.initialize();
-    const url = normalizeNavigationUrl(value);
+    const url = normalizeNavigationUrl(value, this.view.webContents.getURL() || this.homeUrl);
     if (this.view.webContents.getURL() === url) return this.getState();
     if (this.pendingNavigation?.url === url) return this.pendingNavigation.promise;
     const promise = this.view.webContents.loadURL(url).then(() => this.getState()).finally(() => {

@@ -22,6 +22,10 @@ function validScore(score: number, maxScore: number) {
 
 export function matchesZhixueUrl(url: URL) {
   const hostname = url.hostname.toLowerCase();
+  const isLocalMock = url.protocol === "http:"
+    && (hostname === "localhost" || hostname === "127.0.0.1")
+    && url.pathname.startsWith("/zhixue-mock");
+  if (isLocalMock) return true;
   const isZhixue = hostname === "zhixue.com" || hostname.endsWith(".zhixue.com");
   if (url.protocol !== "https:" || !isZhixue) return false;
   return url.pathname.startsWith("/htm-container-web/") || url.pathname.startsWith("/webmarking/");

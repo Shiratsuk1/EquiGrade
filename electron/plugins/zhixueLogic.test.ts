@@ -34,12 +34,14 @@ describe("matchesZhixueUrl", () => {
     expect(matchesZhixueUrl(new URL("https://www.zhixue.com/htm-container-web/index.html?app-0=x"))).toBe(true);
     expect(matchesZhixueUrl(new URL("https://school.zhixue.com/webmarking/example/"))).toBe(true);
     expect(matchesZhixueUrl(new URL("https://zhixue.com/webmarking/example/"))).toBe(true);
+    expect(matchesZhixueUrl(new URL("http://127.0.0.1:38123/zhixue-mock?embedded=1"))).toBe(true);
   });
 
   it("rejects insecure, unrelated, and lookalike URLs", () => {
     expect(matchesZhixueUrl(new URL("http://www.zhixue.com/webmarking/example/"))).toBe(false);
     expect(matchesZhixueUrl(new URL("https://www.zhixue.com/login.html"))).toBe(false);
     expect(matchesZhixueUrl(new URL("https://zhixue.com.evil.example/webmarking/example/"))).toBe(false);
+    expect(matchesZhixueUrl(new URL("http://127.0.0.1:38123/mock-grading"))).toBe(false);
   });
 });
 

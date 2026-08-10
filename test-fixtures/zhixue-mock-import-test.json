@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "site": "zhixue-mock",
+  "cases": [
+    {
+      "id": "imported-101",
+      "studentId": "导入学生 101",
+      "label": "导入学生 101",
+      "questionLabel": "第 1 题 · 导入样例",
+      "maxScore": 10,
+      "lines": ["v = 2gR", "N = 4mg"]
+    },
+    {
+      "id": "imported-102",
+      "studentId": "导入学生 102",
+      "label": "导入学生 102",
+      "questionLabel": "第 1 题 · 导入样例",
+      "maxScore": 10,
+      "lines": ["v = ?", "N = 0"]
+    }
+  ]
+}
