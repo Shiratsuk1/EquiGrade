@@ -3,6 +3,7 @@ import type { AnswerEvidence, FinalAnswerJudgement, Rubric, RubricDecision } fro
 import { demoRubric } from "./demoData.js";
 import { answerCollectionsEquivalent, calculateGrade, expressionsEquivalent, normalizeEvidenceReferences, splitAnswerExpressions } from "./gradingEngine.js";
 import { assertRubricIntegrity } from "./schemas.js";
+import { clearCompletedLogs, getLogSnapshot } from "./systemLog.js";
 
 const baseEvidence: AnswerEvidence = {
   lines: [
@@ -34,6 +35,17 @@ function decisions(): RubricDecision[] {
   ];
 }
 
+function rubricWithUnitDeduction(): Rubric {
+  const rubric = structuredClone(demoRubric);
+  rubric.subquestions[0].deductions = [{
+    id: "D1",
+    reason: "最终结果单位错误",
+    deduct: 1,
+    exclusiveGroup: "result_format"
+  }];
+  return rubric;
+}
+
 describe("expressionsEquivalent", () => {
   it("accepts algebraically equivalent expressions", () => {
     expect(expressionsEquivalent("sqrt(2)/2", "1/sqrt(2)")).toBe(true);
@@ -56,7 +68,24 @@ describe("expressionsEquivalent", () => {
 });
 
 describe("calculateGrade teacher-model authority", () => {
-  it("awards full credit whenever the teacher model marks the final answer correct", () => {
+  it("records every rubric-point decision for audit without affecting the final web score", () => {
+    clearCompletedLogs();
+    const result = calculateGrade({
+      id: "point-audit", studentId: "S1", fileName: "1.jpg", rubric: structuredClone(demoRubric), evidence: baseEvidence,
+      finalAnswerJudgements: [finalJudgement("incorrect")], decisions: decisions(), modelName: "test", durationMs: 10,
+      operationId: "point-audit-operation"
+    });
+    const auditEntries = getLogSnapshot(100).entries.filter((entry) => (
+      entry.operationId === "point-audit-operation" && entry.step === "score_point_audit"
+    ));
+    expect(auditEntries).toHaveLength(result.subquestions[0].decisions.length);
+    expect(auditEntries.map((entry) => entry.details)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ pointId: "P1", awardedScore: 3, maxScore: 3, status: "satisfied" }),
+      expect.objectContaining({ pointId: "P3", awardedScore: 0, maxScore: 2, status: "not_satisfied" })
+    ]));
+  });
+
+  it("keeps full credit when the final answer is correct even if process points fail", () => {
     const rubric = structuredClone(demoRubric);
     rubric.subquestions[0].finalAnswerPolicy = "process_required";
     const evidence: AnswerEvidence = {
@@ -76,8 +105,8 @@ describe("calculateGrade teacher-model authority", () => {
     expect(result.subquestions[0].finalAnswerDecisionSource).toBe("teacher_model");
   });
 
-  it("ignores process failures, deductions, and a conflicting local audit after a correct teacher decision", () => {
-    const rubric = structuredClone(demoRubric);
+  it("uses the teacher decision without creating a local-equivalence conflict", () => {
+    const rubric = rubricWithUnitDeduction();
     rubric.subquestions[0].finalAnswers = [{ expression: "10", unit: "N", tolerance: 0 }];
     const evidence: AnswerEvidence = {
       ...baseEvidence,
@@ -91,14 +120,16 @@ describe("calculateGrade teacher-model authority", () => {
       modelName: "test", durationMs: 10
     });
     expect(result.score).toBe(8);
+    expect(result.status).toBe("completed");
     expect(result.subquestions[0].finalAnswerStatus).toBe("correct");
-    expect(result.subquestions[0].localFinalAnswerAudit).toMatchObject({ status: "not_equivalent", conflict: true });
+    expect(result.subquestions[0].localFinalAnswerAudit).toBeUndefined();
+    expect(result.reviewReasons.join(" ")).not.toContain("本地等价审计");
     expect(result.subquestions[0].deductions).toHaveLength(0);
     expect(result.subquestions[0].auditDeductions).toHaveLength(1);
     expect(result.subquestions[0].auditDeductions?.[0].deductedScore).toBe(0);
   });
 
-  it("keeps an uncertain process point out of confirmed score and marks it for review", () => {
+  it("scores an unreadable process point as zero without creating a score range", () => {
     const result = calculateGrade({
       id: "uncertain-process", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
       evidence: baseEvidence, finalAnswerJudgements: [finalJudgement("incorrect")],
@@ -106,12 +137,56 @@ describe("calculateGrade teacher-model authority", () => {
       modelName: "test", durationMs: 10
     });
     expect(result.score).toBe(6);
-    expect(result.maximumPossibleScore).toBe(8);
-    expect(result.subquestions[0].uncertainScore).toBe(2);
-    expect(result.subquestions[0].decisions[2].scoringDisposition).toBe("uncertain_no_deduction");
+    expect(result.maximumPossibleScore).toBe(6);
+    expect(result.subquestions[0].uncertainScore).toBe(0);
+    expect(result.subquestions[0].decisions[2].status).toBe("unreadable");
+    expect(result.subquestions[0].decisions[2].scoringDisposition).toBe("not_awarded");
     expect(result.subquestions[0].decisions[2].awardedScore).toBe(0);
-    expect(result.subquestions[0].decisions[2].uncertainScore).toBe(2);
+    expect(result.subquestions[0].decisions[2].uncertainScore).toBe(0);
     expect(result.status).toBe("needs_review");
+    expect(result.reviewPolicy).toEqual({
+      unreadableScoreThreshold: 2,
+      unreadableAffectedScore: 2,
+      unreadableReviewTriggered: true
+    });
+  });
+
+  it("keeps the same unreadable score out of review when the teacher raises the threshold", () => {
+    const result = calculateGrade({
+      id: "configured-threshold", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
+      evidence: baseEvidence, finalAnswerJudgements: [finalJudgement("incorrect")],
+      decisions: decisions().map((item, index) => index === 2 ? { ...item, status: "unreadable" as const, requiresReview: true, reviewReason: "涂改无法确认" } : item),
+      unreadableReviewThreshold: 3,
+      modelName: "test", durationMs: 10
+    });
+
+    expect(result.score).toBe(6);
+    expect(result.subquestions[0].decisions[2].requiresReview).toBe(false);
+    expect(result.reviewPolicy).toEqual({
+      unreadableScoreThreshold: 3,
+      unreadableAffectedScore: 2,
+      unreadableReviewTriggered: false
+    });
+    expect(result.status).toBe("completed");
+  });
+
+  it("does not count unreadable process work when a correct final answer prevents the deduction", () => {
+    const result = calculateGrade({
+      id: "correct-answer-unreadable-process", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
+      evidence: baseEvidence, finalAnswerJudgements: [finalJudgement("correct", "N=3mg")],
+      decisions: decisions().map((item) => ({ ...item, status: "unreadable" as const, requiresReview: true, reviewReason: "卷面无法辨认" })),
+      unreadableReviewThreshold: 0.5,
+      modelName: "test", durationMs: 10
+    });
+
+    expect(result.score).toBe(8);
+    expect(result.reviewPolicy).toEqual({
+      unreadableScoreThreshold: 0.5,
+      unreadableAffectedScore: 0,
+      unreadableReviewTriggered: false
+    });
+    expect(result.subquestions[0].decisions.every((item) => item.requiresReview === false)).toBe(true);
+    expect(result.status).toBe("completed");
   });
 
   it("uses process points when the teacher model marks the final answer incorrect", () => {
@@ -123,8 +198,36 @@ describe("calculateGrade teacher-model authority", () => {
     expect(result.score).toBe(6);
   });
 
+  it("scores the built-in no-unit fixture as 3+3+0 without applying an undeclared deduction", () => {
+    expect(demoRubric.subquestions[0].finalAnswers[0].unit).toBeUndefined();
+    expect(demoRubric.subquestions[0].deductions).toEqual([]);
+    const result = calculateGrade({
+      id: "built-in-no-unit-fixture",
+      studentId: "S",
+      fileName: "fixture.jpg",
+      rubric: demoRubric,
+      evidence: baseEvidence,
+      finalAnswerJudgements: [finalJudgement("incorrect")],
+      decisions: decisions(),
+      appliedDeductions: [{
+        subquestionId: "Q1-1",
+        ruleId: "D1",
+        evidenceLineIds: ["L3"],
+        reason: "最终结果未标注单位",
+        confidence: 0.99
+      }],
+      modelName: "test",
+      durationMs: 10
+    });
+
+    expect(result.subquestions[0].decisions.map((item) => `${item.awardedScore}/${item.maxScore}`)).toEqual(["3/3", "3/3", "0/2"]);
+    expect(result.subquestions[0].score).toBe(6);
+    expect(result.score).toBe(6);
+    expect(result.subquestions[0].auditDeductions).toEqual([]);
+  });
+
   it("does not apply two deductions from the same exclusive group", () => {
-    const rubric = structuredClone(demoRubric);
+    const rubric = rubricWithUnitDeduction();
     rubric.subquestions[0].deductions.push({ id: "D2", reason: "符号格式错误", deduct: 2, exclusiveGroup: "result_format" });
     const result = calculateGrade({
       id: "deductions", studentId: "S3", fileName: "3.jpg", rubric, evidence: baseEvidence,
@@ -136,6 +239,38 @@ describe("calculateGrade teacher-model authority", () => {
     });
     expect(result.score).toBe(5);
     expect(result.subquestions[0].deductions).toHaveLength(1);
+  });
+
+  it("never reports or applies a deduction below zero", () => {
+    const result = calculateGrade({
+      id: "deduction-floor",
+      studentId: "S",
+      fileName: "zero.jpg",
+      rubric: rubricWithUnitDeduction(),
+      evidence: baseEvidence,
+      finalAnswerJudgements: [finalJudgement("incorrect")],
+      decisions: decisions().map((item) => ({
+        ...item,
+        status: "not_satisfied" as const
+      })),
+      appliedDeductions: [{
+        subquestionId: "Q1-1",
+        ruleId: "D1",
+        evidenceLineIds: ["L3"],
+        reason: "最终结果未标注单位",
+        confidence: 0.99
+      }],
+      modelName: "test",
+      durationMs: 10
+    });
+
+    expect(result.score).toBe(0);
+    expect(result.subquestions[0].score).toBe(0);
+    expect(result.subquestions[0].deductions).toHaveLength(0);
+    expect(result.subquestions[0].auditDeductions?.[0]).toMatchObject({
+      deductedScore: 0,
+      scoringDisposition: "not_deducted_by_score_floor"
+    });
   });
 
   it("marks a missing teacher judgement uncertain instead of falling back to local matching", () => {
@@ -220,24 +355,30 @@ describe("real grading regression 16", () => {
     }))
   ];
 
-  it("gives 12/16 and never lets process ambiguity reduce correct subquestions", () => {
+  it("produces one deterministic score and never reserves points for ambiguity", () => {
     const result = calculateGrade({
       id: "real-16", studentId: "学生 01", fileName: "学生答案.png", rubric, evidence,
       finalAnswerJudgements: teacherJudgements, decisions: processDecisions, modelName: "teacher-model", durationMs: 10
     });
     expect(result.score).toBe(11);
-    expect(result.maximumPossibleScore).toBe(15);
+    expect(result.maximumPossibleScore).toBe(11);
     expect(result.subquestions.map((item) => item.score)).toEqual([4, 6, 1]);
-    expect(result.subquestions.map((item) => item.maximumPossibleScore)).toEqual([4, 6, 5]);
+    expect(result.subquestions.map((item) => item.maximumPossibleScore)).toEqual([4, 6, 1]);
     expect(result.subquestions[0].decisions.every((item) => item.scoringDisposition === "not_deducted_by_final_answer")).toBe(true);
     expect(result.subquestions[1].decisions.every((item) => item.scoringDisposition === "not_deducted_by_final_answer")).toBe(true);
     expect(result.subquestions[2].finalAnswerStatus).toBe("incorrect");
-    expect(result.status).toBe("needs_review");
+    expect(result.subquestions[2].decisions[1].requiresReview).toBe(false);
+    expect(result.reviewPolicy).toEqual({
+      unreadableScoreThreshold: 2,
+      unreadableAffectedScore: 1,
+      unreadableReviewTriggered: false
+    });
+    expect(result.status).toBe("completed");
   });
 });
 
 describe("grading evidence and confidence safeguards", () => {
-  it("normalizes a low-confidence correct judgement to uncertain", () => {
+  it("keeps a low-confidence teacher judgement authoritative", () => {
     const result = calculateGrade({
       id: "low-confidence-correct", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
       evidence: baseEvidence,
@@ -245,13 +386,12 @@ describe("grading evidence and confidence safeguards", () => {
       decisions: decisions(), modelName: "test", durationMs: 10
     });
 
-    expect(result.subquestions[0].finalAnswerStatus).toBe("uncertain");
-    expect(result.subquestions[0].score).toBe(6);
-    expect(result.status).toBe("needs_review");
-    expect(result.reviewReasons.join(" ")).toContain("低于自动判定阈值");
+    expect(result.subquestions[0].finalAnswerStatus).toBe("correct");
+    expect(result.subquestions[0].score).toBe(8);
+    expect(result.status).toBe("completed");
   });
 
-  it("does not accept a correct judgement that cites a missing line", () => {
+  it("does not override a teacher judgement with local evidence-reference rules", () => {
     const result = calculateGrade({
       id: "missing-evidence", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
       evidence: baseEvidence,
@@ -262,10 +402,10 @@ describe("grading evidence and confidence safeguards", () => {
       decisions: decisions(), modelName: "test", durationMs: 10
     });
 
-    expect(result.subquestions[0].finalAnswerStatus).toBe("uncertain");
+    expect(result.subquestions[0].finalAnswerStatus).toBe("correct");
     expect(result.subquestions[0].finalAnswerEvidenceLineIds).toEqual([]);
-    expect(result.subquestions[0].score).toBe(6);
-    expect(result.status).toBe("needs_review");
+    expect(result.subquestions[0].score).toBe(8);
+    expect(result.status).toBe("completed");
   });
 
   it("normalizes a process point with invalid evidence and does not award it", () => {
@@ -279,17 +419,43 @@ describe("grading evidence and confidence safeguards", () => {
       modelName: "test", durationMs: 10
     });
 
-    expect(result.subquestions[0].decisions[0].status).toBe("insufficient_evidence");
+    expect(result.subquestions[0].decisions[0].status).toBe("unreadable");
     expect(result.subquestions[0].decisions[0].awardedScore).toBe(0);
-    expect(result.subquestions[0].uncertainScore).toBe(3);
+    expect(result.subquestions[0].uncertainScore).toBe(0);
     expect(result.subquestions[0].score).toBe(3);
-    expect(result.subquestions[0].maximumPossibleScore).toBe(6);
+    expect(result.subquestions[0].maximumPossibleScore).toBe(3);
+    expect(result.status).toBe("needs_review");
+  });
+
+  it("reviews a low-confidence not-present judgement while keeping its score at zero", () => {
+    const result = calculateGrade({
+      id: "low-confidence-not-present", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
+      evidence: baseEvidence,
+      finalAnswerJudgements: [finalJudgement("incorrect")],
+      decisions: decisions().map((decision) => decision.pointId === "P1"
+        ? {
+            ...decision,
+            status: "not_present" as const,
+            evidenceLineIds: [],
+            evidenceQuote: "",
+            reason: "没有找到对应公式",
+            confidence: 0.7,
+            requiresReview: false
+          }
+        : decision),
+      modelName: "test", durationMs: 10
+    });
+
+    expect(result.subquestions[0].decisions[0].status).toBe("unreadable");
+    expect(result.subquestions[0].decisions[0].awardedScore).toBe(0);
+    expect(result.subquestions[0].decisions[0].requiresReview).toBe(true);
+    expect(result.subquestions[0].maximumPossibleScore).toBe(result.subquestions[0].score);
     expect(result.status).toBe("needs_review");
   });
 
   it("does not apply a deduction without valid evidence", () => {
     const result = calculateGrade({
-      id: "deduction-without-evidence", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
+      id: "deduction-without-evidence", studentId: "S", fileName: "s.jpg", rubric: rubricWithUnitDeduction(),
       evidence: baseEvidence,
       finalAnswerJudgements: [finalJudgement("incorrect")],
       decisions: decisions(),
@@ -315,7 +481,122 @@ describe("grading evidence and confidence safeguards", () => {
     expect(result.metrics.evidenceTraceability).toBe(0);
     expect(result.metrics.autoDecisionRate).toBe(0);
     expect(result.score).toBe(0);
-    expect(result.maximumPossibleScore).toBe(8);
+    expect(result.maximumPossibleScore).toBe(0);
+  });
+
+  it("returns a fixed zero when the final answer is missing and all six process points are unreadable", () => {
+    const rubric: Rubric = {
+      title: "动摩擦因数",
+      recognizedQuestionText: "求动摩擦因数",
+      version: 1,
+      status: "locked",
+      totalScore: 6,
+      warnings: [],
+      subquestions: [{
+        id: "16(3)",
+        title: "求动摩擦因数",
+        maxScore: 6,
+        finalAnswerPolicy: "process_required",
+        finalAnswers: [{ expression: String.raw`\mu=\frac{4}{9}` }],
+        scorePoints: [1, 2, 3, 4, 5, 6].map((index) => ({
+          id: `16(3)-${index}`,
+          title: `评分点${index}`,
+          description: "",
+          score: 1,
+          type: index === 6 ? "result" as const : "formula" as const,
+          expected: ""
+        })),
+        deductions: []
+      }]
+    };
+    const evidence: AnswerEvidence = {
+      lines: [
+        { id: "L1", text: "整行已划去", status: "crossed_out", confidence: 0.99 },
+        { id: "L2", text: "含混关系式", status: "uncertain", confidence: 0.55 }
+      ],
+      finalAnswers: [],
+      ambiguities: [{ lineId: "L2", reason: "大面积涂改，公式无法辨认", scoreImpact: "certain" }]
+    };
+    const result = calculateGrade({
+      id: "missing-final-six-unreadable",
+      studentId: "S",
+      fileName: "answer.jpg",
+      rubric,
+      evidence,
+      finalAnswerJudgements: [{
+        subquestionId: "16(3)",
+        status: "missing",
+        evidenceLineIds: [],
+        studentAnswer: "未写出可识别的动摩擦因数最终值",
+        referenceAnswer: "mu=4/9",
+        reason: "有效卷面中没有明确最终答案，先前数值已划去。",
+        confidence: 0.98
+      }],
+      decisions: rubric.subquestions[0].scorePoints.map((point) => ({
+        subquestionId: "16(3)",
+        pointId: point.id,
+        status: "unreadable" as const,
+        evidenceLineIds: ["L2"],
+        evidenceQuote: "含混关系式",
+        reason: "存在作答痕迹，但无法确认写出了该评分点。",
+        confidence: 0.95,
+        requiresReview: true,
+        reviewReason: "卷面无法辨认"
+      })),
+      modelName: "teacher-model",
+      durationMs: 10
+    });
+
+    expect(result.score).toBe(0);
+    expect(result.maximumPossibleScore).toBe(0);
+    expect(result.subquestions[0].score).toBe(0);
+    expect(result.subquestions[0].maximumPossibleScore).toBe(0);
+    expect(result.subquestions[0].uncertainScore).toBe(0);
+    expect(result.subquestions[0].finalAnswerStatus).toBe("missing");
+    expect(result.subquestions[0].decisions.every((decision) => decision.awardedScore === 0)).toBe(true);
+    expect(result.subquestions[0].processAuditSummary).toMatchObject({ unreadable: 6, reviewRequired: 6 });
+    expect(result.status).toBe("needs_review");
+  });
+
+  it("treats absent or crossed-out work as not present without reserving points", () => {
+    const crossedOutEvidence: AnswerEvidence = {
+      lines: [{ id: "L4", text: "N=3mg", status: "crossed_out", confidence: 0.99 }],
+      finalAnswers: [],
+      ambiguities: []
+    };
+    const result = calculateGrade({
+      id: "crossed-out-only",
+      studentId: "S",
+      fileName: "answer.jpg",
+      rubric: demoRubric,
+      evidence: crossedOutEvidence,
+      finalAnswerJudgements: [{
+        subquestionId: "Q1-1",
+        status: "missing",
+        evidenceLineIds: [],
+        studentAnswer: "",
+        referenceAnswer: "N=3mg",
+        reason: "只有已划掉的结果，没有有效最终答案。",
+        confidence: 0.99
+      }],
+      decisions: demoRubric.subquestions[0].scorePoints.map((point) => ({
+        subquestionId: "Q1-1",
+        pointId: point.id,
+        status: "not_present" as const,
+        evidenceLineIds: ["L4"],
+        evidenceQuote: "已划掉：N=3mg",
+        reason: "有效卷面中未保留该评分点。",
+        confidence: 0.99,
+        requiresReview: false
+      })),
+      modelName: "teacher-model",
+      durationMs: 10
+    });
+
+    expect(result.score).toBe(0);
+    expect(result.maximumPossibleScore).toBe(0);
+    expect(result.status).toBe("completed");
+    expect(result.subquestions[0].processAuditSummary).toMatchObject({ notPresent: 3, reviewRequired: 0 });
   });
 
   it("removes duplicate and crossed-out final answer references", () => {

@@ -1,5 +1,17 @@
+function authenticatedOptions(options?: RequestInit): RequestInit | undefined {
+  const apiToken = (window as Window & { electronHost?: { apiToken?: string } }).electronHost?.apiToken;
+  if (!apiToken) return options;
+  const headers = new Headers(options?.headers);
+  headers.set("X-Hengzhun-Token", apiToken);
+  return { ...options, headers };
+}
+
+export async function authorizedFetch(path: string, options?: RequestInit): Promise<Response> {
+  return fetch(path, authenticatedOptions(options));
+}
+
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, options);
+  const response = await authorizedFetch(path, options);
   const body = await response.json().catch(() => ({})) as { error?: string };
   if (!response.ok) throw new Error(body.error || `请求失败：${response.status}`);
   return body as T;
@@ -10,4 +22,3 @@ export async function uploadDocument(file: File): Promise<{ fileName: string; te
   data.append("file", file);
   return api("/api/documents/extract", { method: "POST", body: data });
 }
-

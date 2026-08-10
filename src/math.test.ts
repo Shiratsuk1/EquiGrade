@@ -21,6 +21,13 @@ describe("formula rendering", () => {
     expect(normalizeLatex(String.raw`N-mg=mv²/R`)).toBe(String.raw`N-mg=m\frac{v^{2}}{R}`);
   });
 
+  it("does not consume the sqrt command while formatting fractions inside a radicand", () => {
+    expect(normalizeLatex(String.raw`√(gR/3)`)).toBe(String.raw`\sqrt{\frac{gR}{3}}`);
+    expect(normalizeLatex(String.raw`2√(gR/3)`)).toBe(String.raw`2\sqrt{\frac{gR}{3}}`);
+    expect(normalizeLatex(String.raw`√((a+b)/(c+d))`)).toBe(String.raw`\sqrt{\frac{a+b}{c+d}}`);
+    expect(normalizeLatex(String.raw`v_A=√(gR/3)，v_C=2√(gR/3)`)).toBe(String.raw`v_A=\sqrt{\frac{gR}{3}}，v_C=2\sqrt{\frac{gR}{3}}`);
+  });
+
   it("keeps unit slashes while rendering Chinese text labels in formulas", () => {
     expect(normalizeLatex(String.raw`v=2\;\mathrm{m/s}`)).toBe(String.raw`v=2\;\mathrm{m/s}`);
     expect(renderFormulaHtml(String.raw`V_{\text{相}}=V_C';a_{\text{相对}}=4\mu g`)).toContain("katex");

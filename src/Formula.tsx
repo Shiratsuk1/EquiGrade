@@ -1,7 +1,8 @@
 import { useMemo } from "react";
+import { splitFormulaTextBlocks, type FormulaTextBlock } from "../shared/formulaProtocol";
 import { isLikelyFormula, renderFormulaHtml } from "./math";
 
-type MathTextPart = { type: "text" | "math"; value: string; display?: boolean };
+type MathTextPart = FormulaTextBlock;
 
 function containsCjk(value: string) {
   return /[\u3400-\u9fff\u3040-\u30ff]/.test(value);
@@ -90,35 +91,18 @@ export function Formula({ value, display = false, auto = false, className = "" }
 }
 
 export function MathText({ value, className = "", formulaByDefault = false }: { value: string; className?: string; formulaByDefault?: boolean }) {
-  const tokenPattern = /(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$[^$\n]+?\$)/g;
-  const hasExplicitToken = /(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$[^$\n]+?\$)/.test(value);
-  if (formulaByDefault && !hasExplicitToken && canRenderAsWholeFormula(value)) {
-    return <span className={`math-text${className ? ` ${className}` : ""}`}><Formula value={value} display /></span>;
+  const explicitBlocks = splitFormulaTextBlocks(value);
+  const hasExplicitFormula = explicitBlocks.some((block) => block.type === "math");
+  if (formulaByDefault && !hasExplicitFormula && canRenderAsWholeFormula(value)) {
+    return <span className={`math-text math-format-deterministic${className ? ` ${className}` : ""}`}><Formula value={value} display /></span>;
   }
 
-  const parts: MathTextPart[] = [];
-  let cursor = 0;
+  const parts = explicitBlocks.flatMap<MathTextPart>((block) => {
+    if (block.type === "math" || !formulaByDefault) return [block];
+    return splitMixedFormulaText(block.value);
+  });
 
-  for (const match of value.matchAll(tokenPattern)) {
-    const index = match.index ?? 0;
-    if (index > cursor) {
-      const text = value.slice(cursor, index);
-      parts.push(...(formulaByDefault ? splitMixedFormulaText(text) : [{ type: "text", value: text } as MathTextPart]));
-    }
-    const token = match[0];
-    parts.push({
-      type: "math",
-      value: token,
-      display: token.startsWith("$$") || token.startsWith("\\[")
-    });
-    cursor = index + token.length;
-  }
-  if (cursor < value.length) {
-    const text = value.slice(cursor);
-    parts.push(...(formulaByDefault ? splitMixedFormulaText(text) : [{ type: "text", value: text } as MathTextPart]));
-  }
-
-  return <span className={`math-text${className ? ` ${className}` : ""}`}>{parts.map((part, index) => {
+  return <span className={`math-text math-format-deterministic${className ? ` ${className}` : ""}`}>{parts.map((part, index) => {
     if (part.type === "math") return <Formula key={index} value={part.value} display={part.display} />;
     return <span className="math-text-copy" key={index}>{part.value}</span>;
   })}</span>;

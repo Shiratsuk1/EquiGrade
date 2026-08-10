@@ -1,12 +1,22 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ModelConfigInput, PublicModelConfig } from "../shared/types.js";
+import {
+  DEFAULT_GRADING_MODE,
+  DEFAULT_MODEL_TIMEOUT_MS,
+  DEFAULT_TEACHER_REASONING_EFFORT,
+  DEFAULT_UNREADABLE_REVIEW_THRESHOLD,
+  GRADING_MODES,
+  TEACHER_REASONING_EFFORTS
+} from "../shared/types.js";
+import type { GradingMode, ModelConfigInput, PublicModelConfig, TeacherReasoningEffort } from "../shared/types.js";
 
-interface StoredConfig extends ModelConfigInput {
+export interface ActiveModelConfig extends ModelConfigInput {
   id: string;
   updatedAt: string;
 }
+
+type StoredConfig = ActiveModelConfig;
 
 interface EncryptedPayload {
   iv: string;
@@ -14,7 +24,9 @@ interface EncryptedPayload {
   data: string;
 }
 
-const dataDirectory = path.resolve(".data");
+const dataDirectory = process.env.APP_DATA_DIR
+  ? path.resolve(process.env.APP_DATA_DIR)
+  : path.resolve(".data");
 const keyPath = path.join(dataDirectory, "master.key");
 const configPath = path.join(dataDirectory, "model-config.enc.json");
 
@@ -52,14 +64,50 @@ async function decrypt(payload: EncryptedPayload): Promise<StoredConfig> {
   return JSON.parse(decrypted.toString("utf8")) as StoredConfig;
 }
 
-export async function readModelConfig(): Promise<StoredConfig | null> {
+function withConfigDefaults(config: StoredConfig): StoredConfig {
+  const configuredTimeoutMs = Number(config.timeoutMs);
+  const timeoutMs = configuredTimeoutMs === 120_000
+    ? DEFAULT_MODEL_TIMEOUT_MS
+    : configuredTimeoutMs;
+  const unreadableReviewThreshold = Number(config.unreadableReviewThreshold);
+  const configuredReasoningEffort = config.teacherReasoningEffort;
+  const teacherReasoningEffort: TeacherReasoningEffort = configuredReasoningEffort
+    && TEACHER_REASONING_EFFORTS.includes(configuredReasoningEffort)
+    ? configuredReasoningEffort
+    : DEFAULT_TEACHER_REASONING_EFFORT;
+  const configuredGradingMode = config.gradingMode;
+  const gradingMode: GradingMode = configuredGradingMode
+    && GRADING_MODES.includes(configuredGradingMode)
+    ? configuredGradingMode
+    : DEFAULT_GRADING_MODE;
+  return {
+    ...config,
+    timeoutMs: Number.isFinite(timeoutMs) && timeoutMs >= 1_000
+      ? timeoutMs
+      : DEFAULT_MODEL_TIMEOUT_MS,
+    unreadableReviewThreshold: Number.isFinite(unreadableReviewThreshold) && unreadableReviewThreshold >= 0.5
+      ? unreadableReviewThreshold
+      : DEFAULT_UNREADABLE_REVIEW_THRESHOLD,
+    teacherReasoningEffort,
+    gradingMode
+  };
+}
+
+export async function readModelConfig(): Promise<ActiveModelConfig | null> {
   try {
     const payload = JSON.parse(await readFile(configPath, "utf8")) as EncryptedPayload;
-    return await decrypt(payload);
+    return withConfigDefaults(await decrypt(payload));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
+}
+
+export async function requireModelConfig(): Promise<ActiveModelConfig> {
+  const config = await readModelConfig();
+  if (!config?.enabled) throw new Error("请先在模型服务中保存并启用一个配置");
+  if (!config.apiKey) throw new Error("当前模型配置缺少 API Key");
+  return config;
 }
 
 export async function saveModelConfig(input: ModelConfigInput): Promise<PublicModelConfig> {
@@ -67,8 +115,11 @@ export async function saveModelConfig(input: ModelConfigInput): Promise<PublicMo
   const apiKey = input.apiKey?.trim() || current?.apiKey || "";
   const stored: StoredConfig = {
     ...input,
+    name: input.name.trim(),
     baseUrl: input.baseUrl.replace(/\/+$/, ""),
     apiKey,
+    visionModel: input.visionModel.trim(),
+    textModel: input.textModel.trim(),
     id: current?.id ?? crypto.randomUUID(),
     updatedAt: new Date().toISOString()
   };
@@ -89,6 +140,9 @@ export function toPublicConfig(config: StoredConfig): PublicModelConfig {
     maxRetries: config.maxRetries,
     maxConcurrency: config.maxConcurrency,
     maxOutputTokens: config.maxOutputTokens,
+    unreadableReviewThreshold: config.unreadableReviewThreshold ?? DEFAULT_UNREADABLE_REVIEW_THRESHOLD,
+    gradingMode: config.gradingMode ?? DEFAULT_GRADING_MODE,
+    teacherReasoningEffort: config.teacherReasoningEffort ?? DEFAULT_TEACHER_REASONING_EFFORT,
     supportsJsonSchema: config.supportsJsonSchema,
     supportsJsonObject: config.supportsJsonObject,
     supportsBase64Images: config.supportsBase64Images,
@@ -98,4 +152,3 @@ export function toPublicConfig(config: StoredConfig): PublicModelConfig {
     updatedAt: config.updatedAt
   };
 }
-

@@ -81,7 +81,7 @@ export const processJudgementSchema = z.object({
   decisions: z.array(z.object({
     subquestionId: z.string(),
     pointId: z.string(),
-    status: z.enum(["satisfied", "not_satisfied", "insufficient_evidence"]),
+    status: z.enum(["satisfied", "not_satisfied", "not_present", "unreadable", "insufficient_evidence"]),
     evidenceLineIds: z.array(z.string()),
     evidenceQuote: z.string(),
     reason: z.string(),
@@ -96,6 +96,13 @@ export const processJudgementSchema = z.object({
     reason: z.string(),
     confidence: z.number().min(0).max(1)
   })).default([])
+});
+
+const directVisionGradeCoreSchema = z.object({
+  evidence: evidenceSchema,
+  finalAnswerJudgements: finalAnswerJudgementsSchema.shape.finalAnswerJudgements,
+  decisions: processJudgementSchema.shape.decisions,
+  appliedDeductions: processJudgementSchema.shape.appliedDeductions
 });
 
 const teacherCommentaryLossPointSchema = z.object({
@@ -121,6 +128,14 @@ export const teacherCommentarySchema = z.object({
   auditConcerns: z.array(teacherCommentaryAuditConcernSchema).default([]),
   reviewItems: z.array(z.string()).default([]),
   basedOnDecisionIds: z.array(z.string()).default([])
+});
+
+export const directVisionGradeSchema = directVisionGradeCoreSchema.extend({
+  teacherCommentary: teacherCommentarySchema
+});
+
+export const processJudgementWithCommentarySchema = processJudgementSchema.extend({
+  teacherCommentary: teacherCommentarySchema
 });
 
 export function validateRubricTotals<T extends z.infer<typeof rubricSchema>>(rubric: T): T {
@@ -254,8 +269,20 @@ export const processJudgementJsonSchema = {
   additionalProperties: false,
   required: ["decisions", "appliedDeductions"],
   properties: {
-    decisions: { type: "array", items: { type: "object", additionalProperties: false, required: ["subquestionId", "pointId", "status", "evidenceLineIds", "evidenceQuote", "reason", "confidence", "requiresReview", "reviewReason"], properties: { subquestionId: { type: "string" }, pointId: { type: "string" }, status: { type: "string", enum: ["satisfied", "not_satisfied", "insufficient_evidence"] }, evidenceLineIds: { type: "array", items: { type: "string" } }, evidenceQuote: { type: "string" }, reason: { type: "string" }, confidence: { type: "number" }, requiresReview: { type: "boolean" }, reviewReason: { type: "string" } } } },
+    decisions: { type: "array", items: { type: "object", additionalProperties: false, required: ["subquestionId", "pointId", "status", "evidenceLineIds", "evidenceQuote", "reason", "confidence", "requiresReview", "reviewReason"], properties: { subquestionId: { type: "string" }, pointId: { type: "string" }, status: { type: "string", enum: ["satisfied", "not_satisfied", "not_present", "unreadable"] }, evidenceLineIds: { type: "array", items: { type: "string" } }, evidenceQuote: { type: "string" }, reason: { type: "string" }, confidence: { type: "number" }, requiresReview: { type: "boolean" }, reviewReason: { type: "string" } } } },
     appliedDeductions: { type: "array", items: { type: "object", additionalProperties: false, required: ["subquestionId", "ruleId", "evidenceLineIds", "reason", "confidence"], properties: { subquestionId: { type: "string" }, ruleId: { type: "string" }, evidenceLineIds: { type: "array", items: { type: "string" } }, reason: { type: "string" }, confidence: { type: "number" } } } }
+  }
+} as const;
+
+const directVisionGradeCoreJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["evidence", "finalAnswerJudgements", "decisions", "appliedDeductions"],
+  properties: {
+    evidence: evidenceJsonSchema,
+    finalAnswerJudgements: finalAnswerJudgementsJsonSchema.properties.finalAnswerJudgements,
+    decisions: processJudgementJsonSchema.properties.decisions,
+    appliedDeductions: processJudgementJsonSchema.properties.appliedDeductions
   }
 } as const;
 
@@ -293,5 +320,23 @@ export const teacherCommentaryJsonSchema = {
     },
     reviewItems: { type: "array", items: { type: "string" } },
     basedOnDecisionIds: { type: "array", items: { type: "string" } }
+  }
+} as const;
+
+export const directVisionGradeJsonSchema = {
+  ...directVisionGradeCoreJsonSchema,
+  required: [...directVisionGradeCoreJsonSchema.required, "teacherCommentary"],
+  properties: {
+    ...directVisionGradeCoreJsonSchema.properties,
+    teacherCommentary: teacherCommentaryJsonSchema
+  }
+} as const;
+
+export const processJudgementWithCommentaryJsonSchema = {
+  ...processJudgementJsonSchema,
+  required: [...processJudgementJsonSchema.required, "teacherCommentary"],
+  properties: {
+    ...processJudgementJsonSchema.properties,
+    teacherCommentary: teacherCommentaryJsonSchema
   }
 } as const;
