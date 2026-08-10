@@ -193,7 +193,7 @@ export default function ElectronPipelineConsole() {
 
       <section className="electron-console-panel">
         <div className="electron-console-section-heading"><div><span className="electron-console-index">03</span><div><h2>流水线范围</h2><p>当前 Electron 会话使用固定的本地测试入口。</p></div></div></div>
-        <div className="electron-console-lock"><span className="electron-console-lock-mark">锁定</span><div><strong>内置评分模板已锁定</strong><p>目标页：右侧嵌入的 `/mock-grading` 测试阅卷页面。</p></div></div>
+        <div className="electron-console-lock"><span className="electron-console-lock-mark">锁定</span><div><strong>内置评分模板已锁定</strong><p>目标页：右侧嵌入的 `/zhixue-mock` 智学网专用模拟阅卷页面。</p></div></div>
         <p className="electron-console-note">右侧页面保留现有目标页悬浮控件；跳过、异常记录和连续三次失败暂停仍由目标页脚本负责。</p>
       </section>
 

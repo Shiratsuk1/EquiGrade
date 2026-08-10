@@ -79,6 +79,8 @@ const monoFontStacks: Record<UiMonoFontFamily, string> = {
   consolas: 'Consolas, "Cascadia Mono", monospace',
   system: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
 };
+const typographyDefaultsVersionKey = "hengzhun.typographyDefaultsVersion";
+const typographyDefaultsVersion = "noto-sans-sc-110-v1";
 
 type DesktopPreferences = PluginUiPreferences & {
   fontSize: DesktopFontSize;
@@ -101,10 +103,10 @@ type DesktopPreferences = PluginUiPreferences & {
 const defaultDesktopPreferences: DesktopPreferences = {
   fontSize: "comfortable",
   density: "comfortable",
-  fontFamily: "system",
+  fontFamily: "noto-sans-sc",
   monoFontFamily: "cascadia",
   fontWeight: 500,
-  fontScale: 1,
+  fontScale: 1.1,
   lineHeight: 1.5,
   letterSpacing: 0,
   accent: "teal",
@@ -135,15 +137,25 @@ function readDesktopPreferences(): DesktopPreferences {
       const numberValue = typeof value === "number" ? value : Number(value);
       return Number.isFinite(numberValue) ? Math.min(max, Math.max(min, numberValue)) : fallback;
     };
-    return {
+    const hasOwn = (key: string) => Object.prototype.hasOwnProperty.call(saved, key);
+    const hasTypographyPreferences = ["fontFamily", "monoFontFamily", "fontWeight", "fontScale", "lineHeight", "letterSpacing"].some(hasOwn);
+    const hasLegacyTypographyDefaults = (!hasOwn("fontFamily") || saved.fontFamily === "system")
+      && (!hasOwn("monoFontFamily") || saved.monoFontFamily === "cascadia")
+      && (!hasOwn("fontWeight") || Number(saved.fontWeight) === 500)
+      && (!hasOwn("fontScale") || Number(saved.fontScale) === 1)
+      && (!hasOwn("lineHeight") || Number(saved.lineHeight) === 1.5)
+      && (!hasOwn("letterSpacing") || Number(saved.letterSpacing) === 0);
+    const shouldMigrateTypographyDefaults = localStorage.getItem(typographyDefaultsVersionKey) !== typographyDefaultsVersion
+      && (!hasTypographyPreferences || hasLegacyTypographyDefaults);
+    const normalized: DesktopPreferences = {
       ...defaultDesktopPreferences,
       ...saved,
       fontSize: desktopFontSizes.includes((saved.fontSize || legacyFontSize) as DesktopFontSize) ? (saved.fontSize || legacyFontSize) as DesktopFontSize : "comfortable",
       density: saved.density === "compact" ? "compact" : "comfortable",
-      fontFamily: fontFamilies.includes(saved.fontFamily as UiFontFamily) ? saved.fontFamily as UiFontFamily : "system",
+      fontFamily: shouldMigrateTypographyDefaults ? "noto-sans-sc" : fontFamilies.includes(saved.fontFamily as UiFontFamily) ? saved.fontFamily as UiFontFamily : "noto-sans-sc",
       monoFontFamily: monoFontFamilies.includes(saved.monoFontFamily as UiMonoFontFamily) ? saved.monoFontFamily as UiMonoFontFamily : "cascadia",
       fontWeight: desktopFontWeights.includes(Number(saved.fontWeight) as DesktopFontWeight) ? Number(saved.fontWeight) as DesktopFontWeight : 500,
-      fontScale: numericPreference(saved.fontScale, 1, 0.9, 1.2),
+      fontScale: shouldMigrateTypographyDefaults ? 1.1 : numericPreference(saved.fontScale, 1.1, 0.9, 1.2),
       lineHeight: numericPreference(saved.lineHeight, 1.5, 1.3, 1.9),
       letterSpacing: numericPreference(saved.letterSpacing, 0, -0.02, 0.06),
       accent: accents.includes(saved.accent as PluginAccent) ? saved.accent as PluginAccent : "teal",
@@ -153,6 +165,9 @@ function readDesktopPreferences(): DesktopPreferences {
       surfaceOpacity: numericPreference(saved.surfaceOpacity, 78, 68, 88),
       blurStrength: numericPreference(saved.blurStrength, 20, 12, 28)
     };
+    localStorage.setItem(typographyDefaultsVersionKey, typographyDefaultsVersion);
+    if (shouldMigrateTypographyDefaults) localStorage.setItem("hengzhun.desktopPreferences", JSON.stringify(normalized));
+    return normalized;
   } catch {
     return { ...defaultDesktopPreferences };
   }
@@ -229,6 +244,37 @@ const defaultModelConfig: ModelConfigInput = {
 
 function getHost() {
   return (window as Window & { electronHost?: ElectronHostBridge }).electronHost;
+}
+
+function normalizeBrowserAddress(value: string, currentUrl: string) {
+  const input = value.trim();
+  if (!input) throw new Error("请输入目标阅卷网站地址");
+
+  // When the user enters a path while viewing a local test site, keep that
+  // path on the current local origin instead of turning it into an HTTPS
+  // hostname. The Electron session performs the same validation again.
+  if (input.startsWith("/")) {
+    try {
+      const current = new URL(currentUrl);
+      if (current.protocol === "http:" || current.protocol === "https:") {
+        return new URL(input, current.origin).href;
+      }
+    } catch {
+      // Fall through to the normal URL error below.
+    }
+    throw new Error("相对地址只能在已打开的网页中使用");
+  }
+
+  if (/^[a-z][a-z\d+.-]*:/i.test(input)) {
+    const url = new URL(input);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error("目标地址仅支持 HTTP 或 HTTPS 网页");
+    }
+    return url.href;
+  }
+
+  const localInput = /^(localhost|127\.0\.0\.1)(:\d+)?(?:\/|$)/i.test(input);
+  return new URL(`${localInput ? "http" : "https"}://${input}`).href;
 }
 
 function parseDesktopRoute(pathname: string): DesktopRoute {
@@ -521,20 +567,39 @@ function BrowserToolbar({ browser, compact = false }: { browser: EmbeddedBrowser
   useEffect(() => setAddress(browser.url), [browser.url]);
   const action = async (value: BrowserAction) => {
     try {
-      const result = await getHost()?.runBrowserAction(value);
+      const host = getHost();
+      if (!host) throw new Error("桌面端控制桥接尚未就绪，请稍后重试");
+      const result = await host.runBrowserAction(value);
       setMessage(result?.message || "");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "浏览器操作失败");
     }
   };
-  const navigate = async (event: React.FormEvent) => {
-    event.preventDefault();
+  const navigate = async () => {
     try {
-      await getHost()?.navigateBrowser(address);
+      const host = getHost();
+      if (!host) throw new Error("桌面端控制桥接尚未就绪，请稍后重试");
+      const normalized = normalizeBrowserAddress(address, browser.url);
+      setAddress(normalized);
+      setMessage("正在打开网页…");
+      await host.navigateBrowser(normalized);
       setMessage("");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "网页地址无效");
     }
+  };
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    void navigate();
+  };
+  const handleAddressKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    // Some embedded Electron layouts can consume the native form submit
+    // event. Handle Enter directly as well, while preventing a duplicate
+    // submit from the browser's implicit form behavior.
+    event.preventDefault();
+    event.stopPropagation();
+    void navigate();
   };
   return <div className={compact ? "desktop-browser-toolbar compact" : "desktop-browser-toolbar"}>
     <div className="desktop-browser-nav">
@@ -543,9 +608,9 @@ function BrowserToolbar({ browser, compact = false }: { browser: EmbeddedBrowser
       <button title={browser.isLoading ? "停止加载" : "刷新"} onClick={() => void action(browser.isLoading ? "stop" : "reload")}>{browser.isLoading ? <XCircle size={16} /> : <RefreshCw className={browser.isLoading ? "spin" : ""} size={16} />}</button>
       <button title="返回内置测试站" onClick={() => void action("home")}><Home size={16} /></button>
     </div>
-    <form className="desktop-address" onSubmit={(event) => void navigate(event)}>
+    <form className="desktop-address" onSubmit={submit}>
       <span title={browser.security === "secure" ? "HTTPS 安全连接" : browser.security === "local" ? "本机网页" : "非安全连接"}>{browser.security === "secure" || browser.security === "local" ? <Lock size={13} /> : <AlertTriangle size={13} />}</span>
-      <input aria-label="目标阅卷网站地址" value={address} onChange={(event) => setAddress(event.target.value)} spellCheck={false} />
+      <input aria-label="目标阅卷网站地址" value={address} onChange={(event) => { setAddress(event.target.value); setMessage(""); }} onKeyDown={handleAddressKeyDown} spellCheck={false} enterKeyHint="go" />
     </form>
     <span className={browser.plugin.connected ? "desktop-plugin-pill online" : "desktop-plugin-pill"}>{browser.plugin.connected ? <Plug size={13} /> : <Unplug size={13} />}{compact ? phaseLabel(browser.plugin.phase) : browser.plugin.adapterId}</span>
     <div className="desktop-browser-tools">
@@ -553,7 +618,7 @@ function BrowserToolbar({ browser, compact = false }: { browser: EmbeddedBrowser
       <button title="打开目标网页开发者工具" onClick={() => void action("open_devtools")}><Code2 size={16} /></button>
       <button title="重新加载插件" onClick={() => void action("reload_plugin")}><RotateCcw size={16} /></button>
     </div>
-    {message && <span className="desktop-toolbar-message">{message}</span>}
+    {message && <span className="desktop-toolbar-message" role="status" aria-live="polite">{message}</span>}
   </div>;
 }
 
@@ -1226,7 +1291,7 @@ function PluginsDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
   return <div className="desktop-page-body desktop-plugin-debug">
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>当前适配器</span><h2>{browser.plugin.adapterName}</h2></div><span className={browser.plugin.connected ? "desktop-status-label locked" : "desktop-status-label warning"}>{browser.plugin.connected ? <Plug size={13} /> : <Unplug size={13} />}{phaseLabel(browser.plugin.phase)}</span></div><div className="desktop-plugin-meta"><div><span>ID</span><strong>{browser.plugin.adapterId}</strong></div><div><span>版本</span><strong>{browser.plugin.adapterVersion}</strong></div><div><span>页面线索</span><strong title="非学生 ID，仅用于判断智学网页面是否切换">{browser.plugin.pageKey || "未识别"}</strong></div><div><span>更新时间</span><strong>{formatTime(browser.plugin.updatedAt)}</strong></div></div><div className="desktop-form-actions"><button className="desktop-save-button" disabled={pending} onClick={() => void preflight()}>{pending ? <LoaderCircle className="spin" size={15} /> : <ListChecks size={15} />}重新执行页面检查</button><button className="desktop-secondary-action" onClick={() => void getHost()?.runBrowserAction("reload_plugin")}><RotateCcw size={14} />重载插件</button></div></section>
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>DOM 能力</span><h2>自动化控件检查</h2></div></div><div className="desktop-capability-grid"><Capability label="学生答卷图像" value={capabilities.answerImage} selector={isZhixue ? "#topicImgContent 原始作答图" : "[data-grading-answer-image] / img / canvas"} /><Capability label="最终总分输入框" value={capabilities.scoreInput} selector={isZhixue ? "可见总分/满分输入框（只写最终总分）" : "[data-grading-score]"} /><Capability label="提交按钮" value={capabilities.submit} selector={isZhixue ? "#bnt_save" : "[data-grading-submit]"} /><Capability label="下一份按钮" value={capabilities.next} selector={isZhixue ? "a[title='下一份']" : "[data-grading-next]"} /></div></section>
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>适配顺序</span><h2>预置插件</h2></div></div><div className="desktop-adapter-list"><div><span>01</span><div><strong>mock-grading</strong><p>内置复杂测试站，优先匹配本机 `/mock-grading`。</p></div><b>启用</b></div><div><span>02</span><div><strong>zhixue-grading</strong><p>智学网专用适配器，读取同源阅卷子页面、原始答卷图和唯一最终总分控件。</p></div><b>专用</b></div><div><span>03</span><div><strong>generic-data-attributes</strong><p>真实网站通用适配器，使用稳定 data 属性定位答卷、写分与翻页控件。</p></div><b>后备</b></div></div></section>
+    <section className="desktop-section"><div className="desktop-section-heading"><div><span>适配顺序</span><h2>预置插件</h2></div></div><div className="desktop-adapter-list"><div><span>01</span><div><strong>zhixue-grading</strong><p>智学网专用适配器；本地 `/zhixue-mock` 复刻真实阅卷 DOM，用于导入测试用例和回归验证。</p></div><b>专用</b></div><div><span>02</span><div><strong>mock-grading</strong><p>通用 `data-grading-*` 控件测试站，保留用于通用适配器回归。</p></div><b>启用</b></div><div><span>03</span><div><strong>generic-data-attributes</strong><p>真实网站通用适配器，使用稳定 data 属性定位答卷、写分与翻页控件。</p></div><b>后备</b></div></div></section>
   </div>;
 }
 
@@ -1236,7 +1301,7 @@ function Capability({ label, value, selector }: { label: string; value: boolean;
 
 function SettingsPage({ browser, preferences, onPreferencesChange }: { browser: EmbeddedBrowserState; preferences: DesktopPreferences; onPreferencesChange: (patch: Partial<DesktopPreferences>) => void }) {
   const savedStartUrl = localStorage.getItem("hengzhun.startUrl");
-  const [startUrl, setStartUrl] = useState(() => savedStartUrl || browser.url || "http://localhost:8788/mock-grading?embedded=1&scenario=complex");
+  const [startUrl, setStartUrl] = useState(() => savedStartUrl || browser.url || "http://localhost:5173/zhixue-mock?embedded=1");
   const [saved, setSaved] = useState(false);
   useEffect(() => {
     if (!savedStartUrl && browser.url) setStartUrl(browser.url);
@@ -1297,7 +1362,7 @@ function SettingsPage({ browser, preferences, onPreferencesChange }: { browser: 
         <label><span>字间距</span><input type="range" min="-0.02" max="0.06" step="0.01" value={preferences.letterSpacing} onChange={(event) => onPreferencesChange({ letterSpacing: Number(event.target.value) })} /><output>{preferences.letterSpacing > 0 ? "+" : ""}{preferences.letterSpacing.toFixed(2)}em</output></label>
       </div>
       <div className="desktop-font-preview" style={{ fontFamily: fontFamilyStacks[preferences.fontFamily], fontWeight: preferences.fontWeight, lineHeight: preferences.lineHeight, letterSpacing: `${preferences.letterSpacing}em` }}><div><span>字体实时预览</span><strong>衡准自动改卷工作台</strong><p>高中物理 · 评分标准 · Newton's second law: F = ma</p></div><code style={{ fontFamily: monoFontStacks[preferences.monoFontFamily] }}>score = 8 / 10</code></div>
-      <div className="desktop-form-actions desktop-typography-actions"><button className="desktop-secondary-action" onClick={() => onPreferencesChange({ fontFamily: "system", monoFontFamily: "cascadia", fontWeight: 500, fontScale: 1, lineHeight: 1.5, letterSpacing: 0 })}><RotateCcw size={14} />恢复字体默认</button><span className="desktop-setting-hint">字体设置会同时作用于工作台和网页中的衡准控制插件；答卷网页自身的字体不被修改。</span></div>
+      <div className="desktop-form-actions desktop-typography-actions"><button className="desktop-secondary-action" onClick={() => onPreferencesChange({ fontFamily: "noto-sans-sc", monoFontFamily: "cascadia", fontWeight: 500, fontScale: 1.1, lineHeight: 1.5, letterSpacing: 0 })}><RotateCcw size={14} />恢复字体默认</button><span className="desktop-setting-hint">字体设置会同时作用于工作台和网页中的衡准控制插件；答卷网页自身的字体不被修改。</span></div>
       <div className="desktop-setting-block"><div className="desktop-setting-copy"><strong>界面密度</strong><span>控制页面留白和列表行高，字体大小保持不变。</span></div><div className="desktop-segment-control" role="group" aria-label="界面密度"><button className={preferences.density === "comfortable" ? "active" : ""} aria-pressed={preferences.density === "comfortable"} onClick={() => onPreferencesChange({ density: "comfortable" })}>舒适</button><button className={preferences.density === "compact" ? "active" : ""} aria-pressed={preferences.density === "compact"} onClick={() => onPreferencesChange({ density: "compact" })}>紧凑</button></div></div>
       <label className="desktop-setting-switch"><div><strong>减少界面动效</strong><span>关闭状态脉冲和非必要过渡，适合长时间阅卷；也会自动跟随 Windows 的减少动态效果设置。</span></div><input type="checkbox" checked={preferences.reduceMotion} onChange={(event) => onPreferencesChange({ reduceMotion: event.target.checked })} /><i /></label>
       <div className="prism-preview-card" data-material={preferences.materialMode} data-motion={preferences.motionIntensity}><div className="prism-preview-sheen" /><div><span>实时预览</span><strong>晶透工作台 · Prism Mica</strong><p>页面内容保持近乎不透明，导航与浮层保留适度材质层次。</p></div><div className="prism-preview-actions"><i /><i /><i /></div></div>

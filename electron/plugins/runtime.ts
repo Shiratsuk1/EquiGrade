@@ -10,7 +10,9 @@ import type {
   PluginRequest,
   PluginResponse,
   PluginStatus,
-  PluginUiPreferences
+  PluginUiPreferences,
+  UiFontFamily,
+  UiMonoFontFamily
 } from "../../shared/electron.js";
 import { EMPTY_PLUGIN_STATUS } from "../../shared/electron.js";
 import type { GradingResult } from "../../shared/types.js";
@@ -59,7 +61,13 @@ let pluginPreferences: PluginUiPreferences = {
   confirmBeforeStart: true,
   material: "mica",
   motionIntensity: "comfortable",
-  reduceMotion: false
+  reduceMotion: false,
+  fontFamily: "noto-sans-sc",
+  monoFontFamily: "cascadia",
+  fontWeight: 500,
+  fontScale: 1.1,
+  lineHeight: 1.5,
+  letterSpacing: 0
 };
 
 const pluginThemes: Record<PluginUiPreferences["accent"], { accent: string; hover: string; soft: string; ring: string }> = {
@@ -67,6 +75,20 @@ const pluginThemes: Record<PluginUiPreferences["accent"], { accent: string; hove
   blue: { accent: "#397fe8", hover: "#2868c9", soft: "#edf4ff", ring: "rgba(57,127,232,.14)" },
   green: { accent: "#2d8b68", hover: "#237255", soft: "#eaf6f0", ring: "rgba(45,139,104,.14)" },
   graphite: { accent: "#4f6572", hover: "#394d59", soft: "#edf2f4", ring: "rgba(79,101,114,.14)" }
+};
+
+const pluginFontStacks: Record<UiFontFamily, string> = {
+  system: '"Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", Arial, sans-serif',
+  inter: 'Inter, "Segoe UI Variable", "Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", sans-serif',
+  "noto-sans-sc": '"Noto Sans SC", "Noto Sans CJK SC", "Segoe UI", "Microsoft YaHei UI", sans-serif',
+  "source-han-sans": '"Source Han Sans SC", "思源黑体", "Noto Sans SC", "Microsoft YaHei UI", sans-serif',
+  "microsoft-yahei": '"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif'
+};
+
+const pluginMonoFontStacks: Record<UiMonoFontFamily, string> = {
+  cascadia: '"Cascadia Code", "Cascadia Mono", Consolas, monospace',
+  consolas: 'Consolas, "Cascadia Mono", monospace',
+  system: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
 };
 
 function selectAdapter() {
@@ -130,8 +152,8 @@ function ensureWidget() {
     </div>`;
   const style = document.createElement("style");
   style.textContent = `
-    #hengzhun-grading-plugin{--hz-accent:#13a8a2;--hz-accent-hover:#0d8c88;--hz-accent-soft:#e8f8f6;--hz-accent-ring:rgba(19,168,162,.14);--hz-surface:#f6fafa;--hz-filter:blur(10px) saturate(115%);position:fixed;z-index:2147483647;right:16px;bottom:16px;width:236px;border:1px solid rgba(255,255,255,.72);border-radius:9px;background:var(--hz-surface);backdrop-filter:var(--hz-filter);-webkit-backdrop-filter:var(--hz-filter);box-shadow:0 8px 20px rgba(32,41,51,.14),0 1px 2px rgba(32,41,51,.08);font:12px/1.4 "Segoe UI","Microsoft YaHei",sans-serif;color:#202933;letter-spacing:0;transition:transform .22s cubic-bezier(.22,1,.36,1),box-shadow .22s cubic-bezier(.22,1,.36,1)}
-    #hengzhun-grading-plugin *{box-sizing:border-box;letter-spacing:0}
+    #hengzhun-grading-plugin{--hz-accent:#13a8a2;--hz-accent-hover:#0d8c88;--hz-accent-soft:#e8f8f6;--hz-accent-ring:rgba(19,168,162,.14);--hz-surface:#f6fafa;--hz-filter:blur(10px) saturate(115%);--hz-font-family:"Noto Sans SC","Noto Sans CJK SC","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;--hz-mono-font-family:"Cascadia Code","Cascadia Mono",Consolas,monospace;--hz-font-weight:500;--hz-font-scale:1.1;--hz-line-height:1.5;--hz-letter-spacing:0em;position:fixed;z-index:2147483647;right:16px;bottom:16px;width:236px;border:1px solid rgba(255,255,255,.72);border-radius:9px;background:var(--hz-surface);backdrop-filter:var(--hz-filter);-webkit-backdrop-filter:var(--hz-filter);box-shadow:0 8px 20px rgba(32,41,51,.14),0 1px 2px rgba(32,41,51,.08);font-family:var(--hz-font-family);font-size:calc(12px * var(--hz-font-scale));font-weight:var(--hz-font-weight);line-height:var(--hz-line-height);color:#202933;letter-spacing:var(--hz-letter-spacing);transition:transform .22s cubic-bezier(.22,1,.36,1),box-shadow .22s cubic-bezier(.22,1,.36,1)}
+    #hengzhun-grading-plugin *{box-sizing:border-box;letter-spacing:inherit}
     .hz-plugin-head{height:38px;display:flex;align-items:center;gap:7px;padding:0 9px;border-bottom:1px solid #e2e8ec}.hz-plugin-mark{padding:3px 5px;border-radius:3px;background:var(--hz-accent);color:#fff;font-size:9px;font-weight:800}.hz-plugin-head strong{font-size:12px}.hz-plugin-head button{margin-left:auto;width:25px;height:25px;border:0;background:transparent;color:#66717d;font-size:17px;cursor:pointer}
     .hz-plugin-body{padding:10px}.hz-plugin-state{display:flex;align-items:center;gap:6px}.hz-plugin-state i{width:7px;height:7px;border-radius:50%;background:var(--hz-accent);box-shadow:0 0 0 3px var(--hz-accent-ring)}.hz-plugin-state span{color:#66717d;font-size:10px}.hz-plugin-state b{margin-left:auto;color:var(--hz-accent);font-size:13px}.hz-plugin-body p{min-height:30px;margin:8px 0;color:#66717d;font-size:10px;line-height:1.5}.hz-plugin-actions{display:grid;grid-template-columns:1fr 64px;gap:6px}.hz-plugin-actions button{height:30px;border:1px solid #cfd9de;border-radius:4px;background:#fff;color:#202933;font:inherit;font-size:10px;font-weight:750;cursor:pointer}.hz-plugin-actions button:first-child{border-color:var(--hz-accent);background:var(--hz-accent);color:#fff}.hz-plugin-actions button:first-child:hover{border-color:var(--hz-accent-hover);background:var(--hz-accent-hover)}.hz-plugin-actions button:disabled{opacity:.45;cursor:default}
     #hengzhun-grading-plugin.hz-solid{--hz-surface:#f5f8f8;--hz-filter:none}.hz-acrylic{--hz-surface:rgba(255,255,255,.92);--hz-filter:blur(8px) saturate(110%)}.hz-collapsed{width:154px}.hz-collapsed .hz-plugin-body{display:none}.hz-collapsed .hz-plugin-head{border-bottom:0}.hz-motion-off,.hz-motion-off *{animation:none!important;transition:none!important}
@@ -161,6 +183,12 @@ function applyPluginPreferences(widget = document.getElementById("hengzhun-gradi
   widget.style.setProperty("--hz-accent-hover", theme.hover);
   widget.style.setProperty("--hz-accent-soft", theme.soft);
   widget.style.setProperty("--hz-accent-ring", theme.ring);
+  widget.style.setProperty("--hz-font-family", pluginFontStacks[pluginPreferences.fontFamily ?? "noto-sans-sc"]);
+  widget.style.setProperty("--hz-mono-font-family", pluginMonoFontStacks[pluginPreferences.monoFontFamily ?? "cascadia"]);
+  widget.style.setProperty("--hz-font-weight", String(pluginPreferences.fontWeight ?? 500));
+  widget.style.setProperty("--hz-font-scale", String(pluginPreferences.fontScale ?? 1.1));
+  widget.style.setProperty("--hz-line-height", String(pluginPreferences.lineHeight ?? 1.5));
+  widget.style.setProperty("--hz-letter-spacing", `${pluginPreferences.letterSpacing ?? 0}em`);
   widget.style.display = pluginPreferences.visible ? "block" : "none";
   widget.classList.toggle("hz-left", pluginPreferences.position === "bottom-left");
   widget.classList.toggle("hz-collapsed", pluginPreferences.defaultCollapsed);
