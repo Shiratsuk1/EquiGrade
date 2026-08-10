@@ -1,16 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   AlertTriangle, Check, CheckCircle2, ChevronRight, CircleGauge,
   ClipboardCheck, CloudCog, Code2, FileCheck2, FileText, Gauge, ImagePlus,
-  History, KeyRound, LoaderCircle, LockKeyhole, Play, RefreshCw, Save,
-  ScrollText, ShieldCheck, Sparkles, Trash2, Upload, XCircle
+  History, KeyRound, LoaderCircle, LockKeyhole, Maximize2, Play, RefreshCw, Save,
+  ScrollText, ShieldCheck, Sparkles, Trash2, Upload, X, XCircle, ZoomIn, ZoomOut
 } from "lucide-react";
+import { DEFAULT_GRADING_MODE, DEFAULT_MODEL_TIMEOUT_MS, DEFAULT_TEACHER_REASONING_EFFORT, DEFAULT_UNREADABLE_REVIEW_THRESHOLD } from "../shared/types";
 import type {
   GradingResult, GradingTemplateDetail, GradingTemplateSummary, ModelConfigInput,
-  PublicModelConfig, Rubric, SystemLogSnapshot
+  ModelCallLogDetails, PublicModelConfig, Rubric, SystemLogEntry, SystemLogSnapshot
 } from "../shared/types";
 import { api, uploadDocument } from "./api";
 import { MathText } from "./Formula";
+import { directionFromPopState, replaceRoute, runRouteTransition } from "./navigation";
 
 type View = "workspace" | "history" | "logs" | "models";
 type AppRoute = { view: View; templateId?: string; resultId?: string };
@@ -24,10 +26,13 @@ const defaultConfig: ModelConfigInput = {
   apiKey: "",
   visionModel: "",
   textModel: "",
-  timeoutMs: 120000,
+  timeoutMs: DEFAULT_MODEL_TIMEOUT_MS,
   maxRetries: 1,
   maxConcurrency: 2,
   maxOutputTokens: 4096,
+  unreadableReviewThreshold: DEFAULT_UNREADABLE_REVIEW_THRESHOLD,
+  gradingMode: DEFAULT_GRADING_MODE,
+  teacherReasoningEffort: DEFAULT_TEACHER_REASONING_EFFORT,
   supportsJsonSchema: true,
   supportsJsonObject: true,
   supportsBase64Images: true,
@@ -117,11 +122,15 @@ function App() {
 
   const navigate = useCallback((next: AppRoute, replace = false) => {
     const nextPath = routePath(next);
-    if (window.location.pathname !== nextPath) {
-      const method = replace ? "replaceState" : "pushState";
-      window.history[method]({}, "", nextPath);
-    }
-    setRoute(next);
+    if (window.location.pathname === nextPath) return;
+    const direction = nextPath.split("/").filter(Boolean).length < window.location.pathname.split("/").filter(Boolean).length
+      ? "back"
+      : "forward";
+    runRouteTransition(() => {
+      if (replace) replaceRoute(nextPath);
+      else window.history.pushState({ prismDirection: direction }, "", nextPath);
+      setRoute(next);
+    }, direction);
   }, []);
 
   const navigateFromLink = useCallback((event: React.MouseEvent<HTMLAnchorElement>, next: AppRoute) => {
@@ -132,7 +141,9 @@ function App() {
 
   useEffect(() => {
     void refreshConfig();
-    const onPopState = () => setRoute(parseRoute(window.location.pathname));
+    const onPopState = (event: PopStateEvent) => {
+      runRouteTransition(() => setRoute(parseRoute(window.location.pathname)), directionFromPopState(event));
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
@@ -140,7 +151,7 @@ function App() {
   useEffect(() => {
     const canonicalPath = routePath(route);
     if (window.location.pathname !== canonicalPath) {
-      window.history.replaceState({}, "", canonicalPath);
+      replaceRoute(canonicalPath);
     }
   }, [route]);
 
@@ -153,7 +164,7 @@ function App() {
             {taskActivity ? <LoaderCircle className="spin" size={18} /> : <ClipboardCheck size={18} />}<span>批改任务</span>
           </a>
           <a className={view === "models" ? "nav-item active" : "nav-item"} href="/models" aria-current={view === "models" ? "page" : undefined} onClick={(event) => navigateFromLink(event, { view: "models" })}>
-            <CloudCog size={18} /><span>模型服务</span>
+            <CloudCog size={18} /><span>系统设置</span>
           </a>
           <a className={view === "history" ? "nav-item active" : "nav-item"} href="/history" aria-current={view === "history" ? "page" : undefined} onClick={(event) => navigateFromLink(event, { view: "history" })}>
             <History size={18} /><span>历史记录</span>
@@ -171,25 +182,30 @@ function App() {
 
       <main className="main-content">
         {notice && <div className="global-notice"><CheckCircle2 size={16} />{notice}<button title="关闭提示" onClick={() => setNotice("")}><XCircle size={16} /></button></div>}
-        <div hidden={view !== "workspace"}>
-          <GradingWorkspace
-            configReady={Boolean(config?.enabled && config.hasApiKey)}
-            onOpenModels={() => navigate({ view: "models" })}
-            onActivityChange={setTaskActivity}
-            openTemplateId={route.templateId ?? null}
-            openResultId={route.resultId ?? null}
-            onResultSelected={(templateId, resultId) => navigate({ view: "workspace", templateId, resultId })}
-            onTemplateSaved={handleTemplateSaved}
-          />
-        </div>
-        <div hidden={view !== "history"}>
-          <HistoryPage revision={historyRevision} onOpen={(id) => navigate({ view: "workspace", templateId: id })} />
-        </div>
-        <div hidden={view !== "logs"}>
-          <LogsPage active={view === "logs"} />
-        </div>
-        <div hidden={view !== "models"}>
-          <ModelSettings current={config} onSaved={async () => { await refreshConfig(); setNotice("模型配置已安全保存"); }} />
+        <div className="route-stage">
+          <div hidden={view !== "workspace"}>
+            <GradingWorkspace
+              configReady={Boolean(config?.enabled && config.hasApiKey)}
+              onOpenModels={() => navigate({ view: "models" })}
+              onActivityChange={setTaskActivity}
+              openTemplateId={route.templateId ?? null}
+              openResultId={route.resultId ?? null}
+              onResultSelected={(templateId, resultId) => navigate({ view: "workspace", templateId, resultId })}
+              onTemplateSaved={handleTemplateSaved}
+            />
+          </div>
+          <div hidden={view !== "history"}>
+            <HistoryPage revision={historyRevision} onOpen={(id) => navigate({ view: "workspace", templateId: id })} />
+          </div>
+          <div hidden={view !== "logs"}>
+            <LogsPage active={view === "logs"} />
+          </div>
+          <div hidden={view !== "models"}>
+            <ModelSettings current={config} onSaved={async () => {
+              await refreshConfig();
+              setNotice("系统配置已安全保存");
+            }} />
+          </div>
         </div>
       </main>
     </div>
@@ -214,11 +230,19 @@ function ModelSettings({ current, onSaved }: { current: PublicModelConfig | null
     setForm((previous) => ({ ...previous, [key]: value }));
   };
 
+  const applyCurrentConfig = async () => {
+    await api<PublicModelConfig>("/api/model-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(form)
+    });
+    await onSaved();
+  };
+
   const save = async () => {
     setSaving(true); setTestResult(null);
     try {
-      await api("/api/model-config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
-      await onSaved();
+      await applyCurrentConfig();
     } catch (error) {
       setTestResult({ type: "error", text: error instanceof Error ? error.message : "保存失败" });
     } finally { setSaving(false); }
@@ -226,20 +250,31 @@ function ModelSettings({ current, onSaved }: { current: PublicModelConfig | null
 
   const test = async (mode: "text" | "vision") => {
     setTesting(mode); setTestResult(null);
+    let applied = false;
     try {
+      await applyCurrentConfig();
+      applied = true;
       const result = await api<{ message: string; durationMs: number; model: string }>("/api/model-config/test", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode })
       });
       setTestResult({ type: "ok", text: `${result.model}：${result.message}，${result.durationMs} ms` });
     } catch (error) {
-      setTestResult({ type: "error", text: error instanceof Error ? error.message : "连接失败" });
+      const message = error instanceof Error ? error.message : "连接失败";
+      setTestResult({ type: "error", text: applied ? `配置已全局应用，但连接测试失败：${message}` : `配置保存失败：${message}` });
     } finally { setTesting(null); }
   };
+
+  const canTest = Boolean(
+    form.baseUrl.trim()
+    && form.visionModel.trim()
+    && form.textModel.trim()
+    && (form.apiKey?.trim() || current?.hasApiKey)
+  );
 
   return (
     <div className="page narrow-page">
       <header className="page-header">
-        <div><p className="eyebrow">系统设置</p><h1>模型服务</h1><p>统一接入 OpenAI 兼容的 Chat Completions 接口。</p></div>
+        <div><p className="eyebrow">系统设置</p><h1>模型与批改策略</h1><p>配置 OpenAI 兼容模型服务和人工复核边界。</p></div>
         <div className={current?.hasApiKey ? "connection-badge connected" : "connection-badge"}>
           <span className="status-dot online" />{current?.hasApiKey ? "配置已保存" : "尚未配置"}
         </div>
@@ -255,6 +290,24 @@ function ModelSettings({ current, onSaved }: { current: PublicModelConfig | null
       </section>
 
       <section className="settings-section">
+        <div className="section-heading"><Gauge size={18} /><div><h2>人工复核策略</h2><p>按整张试卷中因卷面无法辨认而未获得的分值累计。</p></div></div>
+        <div className="form-grid">
+          <label>
+            <span>无法辨认复核阈值（分）</span>
+            <input
+              type="number"
+              min="0.5"
+              max="100"
+              step="0.5"
+              value={form.unreadableReviewThreshold}
+              onChange={(event) => update("unreadableReviewThreshold", Number(event.target.value))}
+            />
+            <small>累计影响分值达到或超过该值时，整卷进入人工复核；低于该值仍按 0 分计并保留审验标记。</small>
+          </label>
+        </div>
+      </section>
+
+      <section className="settings-section">
         <div className="section-heading"><Sparkles size={18} /><div><h2>模型与调用</h2><p>文字结构化与视觉批改可使用不同模型。</p></div></div>
         <div className="form-grid">
           <label><span>多模态模型</span><input value={form.visionModel} onChange={(event) => update("visionModel", event.target.value)} placeholder="vision-model-name" /></label>
@@ -263,6 +316,8 @@ function ModelSettings({ current, onSaved }: { current: PublicModelConfig | null
           <label><span>最大输出 Token</span><input type="number" value={form.maxOutputTokens} onChange={(event) => update("maxOutputTokens", Number(event.target.value))} /></label>
           <label><span>失败重试</span><input type="number" value={form.maxRetries} onChange={(event) => update("maxRetries", Number(event.target.value))} /></label>
           <label><span>最大并发</span><input type="number" value={form.maxConcurrency} onChange={(event) => update("maxConcurrency", Number(event.target.value))} /></label>
+          <label className="span-2"><span>学生答卷批改方式</span><select value={form.gradingMode ?? DEFAULT_GRADING_MODE} onChange={(event) => update("gradingMode", event.target.value as ModelConfigInput["gradingMode"])}><option value="vision_direct">视觉直批（推荐）</option><option value="evidence_pipeline">先提取卷面证据，再分步评分（兼容模式）</option></select><small>视觉直批会把题目、评分标准和学生答卷原图直接交给教师模型；兼容模式保留旧的分步提取流程。</small></label>
+          <label className="span-2"><span>教师模型推理强度</span><select value={form.teacherReasoningEffort ?? DEFAULT_TEACHER_REASONING_EFFORT} onChange={(event) => update("teacherReasoningEffort", event.target.value as ModelConfigInput["teacherReasoningEffort"])}><option value="disabled">默认，不额外传递推理强度</option><option value="low">低，优先响应速度</option><option value="medium">中，适合常规阅卷</option><option value="high">高，适合复杂等价判断</option></select><small>仅用于最终答案判断和逐点评分审验。仅在服务支持 OpenAI 兼容的 <code>reasoning_effort</code> 参数时启用；不支持时请保持默认。</small></label>
         </div>
         <div className="toggle-row">
           <Toggle label="JSON Schema" checked={form.supportsJsonSchema} onChange={(value) => update("supportsJsonSchema", value)} />
@@ -277,10 +332,10 @@ function ModelSettings({ current, onSaved }: { current: PublicModelConfig | null
       </div>}
 
       <div className="action-bar">
-        <div><strong>连接测试会产生一次最小模型调用</strong><small>请先保存配置，再分别验证文字和图像能力。</small></div>
-        <button className="button secondary" disabled={!current?.hasApiKey || Boolean(testing)} onClick={() => void test("text")}>{testing === "text" ? <LoaderCircle className="spin" size={16} /> : <Code2 size={16} />}测试文本</button>
-        <button className="button secondary" disabled={!current?.hasApiKey || Boolean(testing)} onClick={() => void test("vision")}>{testing === "vision" ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}测试多模态</button>
-        <button className="button primary" disabled={saving} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存配置</button>
+        <div><strong>连接测试会产生一次最小模型调用</strong><small>测试前会先保存并全局应用当前页面中的连接信息、模型和调用参数。</small></div>
+        <button className="button secondary" disabled={!canTest || saving || Boolean(testing)} onClick={() => void test("text")}>{testing === "text" ? <LoaderCircle className="spin" size={16} /> : <Code2 size={16} />}测试文本</button>
+        <button className="button secondary" disabled={!canTest || saving || Boolean(testing)} onClick={() => void test("vision")}>{testing === "vision" ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}测试多模态</button>
+        <button className="button primary" disabled={saving || Boolean(testing)} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存并全局应用</button>
       </div>
     </div>
   );
@@ -308,6 +363,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
   const [editingJson, setEditingJson] = useState(false);
   const [students, setStudents] = useState<StudentFile[]>([]);
   const [results, setResults] = useState<GradingResult[]>([]);
+  const [answerImageUrls, setAnswerImageUrls] = useState<Record<string, string>>({});
   const [selectedResultId, setSelectedResultId] = useState<string | null>(null);
   const [busy, setBusy] = useState<"document" | "structure" | "grade" | "regrade" | "demo" | "save" | "history" | null>(null);
   const [progress, setProgress] = useState(0);
@@ -317,6 +373,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
   const [structureStartedAt, setStructureStartedAt] = useState<number | null>(null);
   const [structureElapsed, setStructureElapsed] = useState(0);
   const [templateId, setTemplateId] = useState<string | null>(null);
+  const [defaultFixtureId, setDefaultFixtureId] = useState<string | null>(null);
   const questionInput = useRef<HTMLInputElement>(null);
   const referenceInput = useRef<HTMLInputElement>(null);
   const studentInput = useRef<HTMLInputElement>(null);
@@ -352,12 +409,26 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
   }, [busy, onActivityChange, progress, structureElapsed]);
 
   useEffect(() => {
-    if (!openTemplateId) return;
+    if (openTemplateId || !window.location.search.includes("electron=1")) return;
+    let cancelled = false;
+    void api<{ templateId: string }>("/api/pipeline/fixture")
+      .then((fixture) => {
+        if (!cancelled) setDefaultFixtureId(fixture.templateId);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : "内置测试模板加载失败");
+      });
+    return () => { cancelled = true; };
+  }, [openTemplateId]);
+
+  useEffect(() => {
+    const templateToRestore = openTemplateId ?? defaultFixtureId;
+    if (!templateToRestore) return;
     let cancelled = false;
     const restore = async () => {
       setBusy("history"); setError(""); setWarning("");
       try {
-        const detail = await api<GradingTemplateDetail>(`/api/templates/${openTemplateId}`);
+        const detail = await api<GradingTemplateDetail>(`/api/templates/${templateToRestore}`);
         const toMaterial = async (asset: GradingTemplateDetail["questionImages"][number]): Promise<MaterialImage> => {
           const response = await fetch(asset.url);
           if (!response.ok) throw new Error(`无法读取历史图片：${asset.fileName}`);
@@ -386,6 +457,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
         setTemplateId(detail.id);
         const restoredResults = detail.records.map((record) => record.result);
         setResults(restoredResults);
+        setAnswerImageUrls(Object.fromEntries(detail.records.map((record) => [record.result.id, record.answerImage.url])));
         setSelectedResultId(restoredResults[0]?.id ?? null);
         setStudents([]);
         setStructureLogs([]);
@@ -401,7 +473,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
     };
     void restore();
     return () => { cancelled = true; };
-  }, [openTemplateId]);
+  }, [defaultFixtureId, openTemplateId]);
 
   useEffect(() => {
     if (!openResultId) return;
@@ -414,7 +486,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
     try {
       const result = await uploadDocument(file);
       if (target === "question") setQuestionText(result.text); else setReferenceText(result.text);
-      setRubric(null); setResults([]); setTemplateId(null);
+      setRubric(null); setResults([]); setAnswerImageUrls({}); setTemplateId(null);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "文档读取失败"); }
     finally { setBusy(null); }
   };
@@ -441,7 +513,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
         { id: crypto.randomUUID(), time: now(), message: "模型响应已接收，结构与分值校验通过", status: "done" },
         { id: crypto.randomUUID(), time: now(), message: `评分规则草稿生成完成，用时 ${Math.max(1, Math.round((Date.now() - startedAt) / 1000))} 秒`, status: "done" }
       ]);
-      setRubric(next); setRubricJson(JSON.stringify(next, null, 2)); setResults([]); setTemplateId(null);
+      setRubric(next); setRubricJson(JSON.stringify(next, null, 2)); setResults([]); setAnswerImageUrls({}); setTemplateId(null);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : "结构化失败";
       setError(message);
@@ -459,7 +531,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
       const demo = await api<{ questionText: string; referenceText: string; rubric: Rubric; results: GradingResult[] }>("/api/demo");
       setQuestionText(demo.questionText); setReferenceText(demo.referenceText); setRubric(demo.rubric);
       setQuestionImages([]); setReferenceImages([]);
-      setRubricJson(JSON.stringify(demo.rubric, null, 2)); setResults(demo.results); setSelectedResultId(demo.results[0]?.id ?? null); setTemplateId(null);
+      setRubricJson(JSON.stringify(demo.rubric, null, 2)); setResults(demo.results); setAnswerImageUrls({}); setSelectedResultId(demo.results[0]?.id ?? null); setTemplateId(null);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "演示数据加载失败"); }
     finally { setBusy(null); }
   };
@@ -507,7 +579,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
       id: crypto.randomUUID(), studentId: `学生 ${String(students.length + index + 1).padStart(2, "0")}`,
       file, preview: URL.createObjectURL(file)
     }));
-    setStudents((previous) => [...previous, ...next]); setResults([]);
+    setStudents((previous) => [...previous, ...next]); setResults([]); setAnswerImageUrls({});
   };
 
   const grade = async () => {
@@ -521,8 +593,13 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
         const student = students[index];
         const form = new FormData();
         form.append("image", student.file); form.append("studentId", student.studentId); form.append("rubric", JSON.stringify(rubric));
+        form.append("questionText", questionText); form.append("referenceText", referenceText);
+        questionImages.forEach((image) => form.append("questionImages", image.file, image.file.name));
+        referenceImages.forEach((image) => form.append("referenceImages", image.file, image.file.name));
         if (templateId) form.append("templateId", templateId);
-        completed.push(await api<GradingResult>("/api/grading/grade", { method: "POST", body: form }));
+        const completedResult = await api<GradingResult>("/api/grading/grade", { method: "POST", body: form });
+        completed.push(completedResult);
+        setAnswerImageUrls((previous) => ({ ...previous, [completedResult.id]: student.preview }));
         setResults([...completed, ...priorResults]); setProgress((index + 1) / students.length);
       }
       setSelectedResultId(completed[0]?.id ?? null);
@@ -544,6 +621,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resultId, reason: "采用教师模型最终答案权威判定重新批改" })
       });
+      setAnswerImageUrls((previous) => ({ ...previous, [next.id]: previous[resultId] ?? "" }));
       setResults((previous) => [next, ...previous]);
       setSelectedResultId(next.id);
       onResultSelected(templateId, next.id);
@@ -598,7 +676,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
         {busy === "grade" && <div className="progress-track"><span style={{ width: `${progress * 100}%` }} /></div>}
       </section>}
 
-      {results.length > 0 && metrics && <ResultsSection results={results} metrics={metrics} selected={selectedResult} onSelect={(id) => { setSelectedResultId(id); if (templateId) onResultSelected(templateId, id); }} templateId={templateId} regrading={busy === "regrade"} onRegrade={regrade} />}
+      {results.length > 0 && metrics && <ResultsSection results={results} metrics={metrics} rubric={rubric ?? undefined} selected={selectedResult} answerImageUrl={selectedResult ? answerImageUrls[selectedResult.id] : undefined} onSelect={(id) => { setSelectedResultId(id); if (templateId) onResultSelected(templateId, id); }} templateId={templateId} regrading={busy === "regrade"} onRegrade={regrade} />}
     </div>
   );
 }
@@ -664,12 +742,12 @@ function RubricReview({ rubric, editingJson, rubricJson, setRubricJson, onEdit, 
     {editingJson ? <div className="json-editor"><textarea value={rubricJson} onChange={(event) => setRubricJson(event.target.value)} spellCheck={false} /><div><button className="button secondary" onClick={onCancelEdit}>取消</button><button className="button dark" onClick={onApplyJson}><Check size={16} />应用修改</button></div></div> : <div className="rubric-content">
       <div className="rubric-summary"><div><span>题目</span><strong>{rubric.title}</strong></div><div><span>总分</span><strong>{rubric.totalScore} 分</strong></div><div><span>小问</span><strong>{rubric.subquestions.length}</strong></div><div><span>评分点</span><strong>{rubric.subquestions.reduce((sum, item) => sum + item.scorePoints.length, 0)}</strong></div></div>
       <div className="recognized-question"><div className="recognized-question-header"><FileText size={16} /><strong>识别到的题目原文</strong><span>锁定前请核对公式、单位和小问编号</span></div>{rubric.recognizedQuestionText ? <MathText value={rubric.recognizedQuestionText} formulaByDefault /> : <p className="empty-recognition">模型未返回题目原文，请编辑 JSON 补充或重新生成。</p>}</div>
-      {rubric.subquestions.map((subquestion) => <div className="subquestion" key={subquestion.id}><div className="subquestion-header"><div><strong>{subquestion.title}</strong><span>{subquestion.id}</span></div><b>{subquestion.maxScore} 分</b></div><div className="answer-rule"><span>最终答案</span><div className="formula-list">{subquestion.finalAnswers.length ? subquestion.finalAnswers.map((item, index) => <span className="formula-option" key={`${item.expression}-${index}`}><FinalAnswerFormula expression={item.expression} unit={item.unit} />{index < subquestion.finalAnswers.length - 1 && <i>/</i>}</span>) : <span>未配置</span>}</div><small>高置信度且有有效卷面证据时直接满分</small></div><div className="rubric-table"><div className="rubric-table-head"><span>评分点</span><span>判定依据</span><span>分值</span></div>{subquestion.scorePoints.map((point) => <div className="rubric-table-row" key={point.id}><span><b>{point.id}</b>{point.title}</span><span>{point.description}<MathText value={point.expected} formulaByDefault /></span><strong>{point.score}</strong></div>)}</div></div>)}
+      {rubric.subquestions.map((subquestion) => <div className="subquestion" key={subquestion.id}><div className="subquestion-header"><div><strong>{subquestion.title}</strong><span>{subquestion.id}</span></div><b>{subquestion.maxScore} 分</b></div><div className="answer-rule"><span>最终答案</span><div className="formula-list">{subquestion.finalAnswers.length ? subquestion.finalAnswers.map((item, index) => <span className="formula-option" key={`${item.expression}-${index}`}><FinalAnswerFormula expression={item.expression} unit={item.unit} />{index < subquestion.finalAnswers.length - 1 && <i>/</i>}</span>) : <span>未配置</span>}</div><small>教师模型判定正确时直接满分；过程审验仅作审计</small></div><div className="rubric-table"><div className="rubric-table-head"><span>评分点</span><span>判定依据</span><span>分值</span></div>{subquestion.scorePoints.map((point) => <div className="rubric-table-row" key={point.id}><span><b>{point.id}</b>{point.title}</span><span>{point.description}<MathText value={point.expected} formulaByDefault /></span><strong>{point.score}</strong></div>)}</div></div>)}
     </div>}
   </section>;
 }
 
-function ResultsSection({ results, metrics, selected, onSelect, templateId, regrading, onRegrade }: { results: GradingResult[]; metrics: { coverage: number; traceability: number; automatic: number; review: number }; selected?: GradingResult; onSelect: (id: string) => void; templateId: string | null; regrading: boolean; onRegrade: (id: string) => Promise<void> }) {
+function ResultsSection({ results, metrics, rubric, selected, answerImageUrl, onSelect, templateId, regrading, onRegrade }: { results: GradingResult[]; metrics: { coverage: number; traceability: number; automatic: number; review: number }; rubric?: Rubric; selected?: GradingResult; answerImageUrl?: string; onSelect: (id: string) => void; templateId: string | null; regrading: boolean; onRegrade: (id: string) => Promise<void> }) {
   const currentResultCount = currentResultVersions(results).length;
   return <section className="workspace-section results-section">
     <div className="section-title-row"><div><span className="section-index">04</span><h2>批改结果与执行数据</h2></div><span className="section-meta">共 {currentResultCount} 份答卷{results.length > currentResultCount ? ` · ${results.length} 个结果版本` : ""}</span></div>
@@ -680,7 +758,7 @@ function ResultsSection({ results, metrics, selected, onSelect, templateId, regr
       <Metric icon={<AlertTriangle size={18} />} label="答卷复核率" value={percent(metrics.review)} detail="包含至少一项风险" tone="amber" />
     </div>
     <div className="result-table"><div className="result-head"><span>学生</span><span>文件</span><span>得分</span><span>处理状态</span><span>耗时</span><span /></div>{results.map((result) => <button className={selected?.id === result.id ? "result-row selected" : "result-row"} key={result.id} onClick={() => onSelect(result.id)}><span><strong>{result.studentId}</strong></span><span>{result.fileName}</span><span><b>{scoreLabel(result.score, result.maximumPossibleScore)}</b> / {result.maxScore}</span><span><i className={`status-chip ${result.status}`}>{result.status === "completed" ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}{statusLabel(result.status)}</i></span><span>{(result.metrics.durationMs / 1000).toFixed(1)} s</span><ChevronRight size={16} /></button>)}</div>
-    {selected && <ResultDetail result={selected} canRegrade={Boolean(templateId)} regrading={regrading} onRegrade={onRegrade} />}
+    {selected && <ResultDetail result={selected} rubric={rubric ?? undefined} answerImageUrl={answerImageUrl} canRegrade={Boolean(templateId)} regrading={regrading} onRegrade={onRegrade} />}
   </section>;
 }
 
@@ -696,19 +774,39 @@ function finalAnswerLabel(status: GradingResult["subquestions"][number]["finalAn
 function decisionAuditLabel(status: GradingResult["subquestions"][number]["decisions"][number]["status"]) {
   if (status === "satisfied") return "审验通过";
   if (status === "not_satisfied") return "审验未满足";
-  if (status === "insufficient_evidence") return "证据不足";
+  if (status === "not_present") return "未提供有效作答";
+  if (status === "unreadable") return "卷面无法辨认";
+  if (status === "insufficient_evidence") return "旧版证据不足";
   return "历史结果未审验";
 }
 
-function scoringDispositionLabel(disposition?: GradingResult["subquestions"][number]["decisions"][number]["scoringDisposition"]) {
+function scoringDispositionLabel(
+  disposition?: GradingResult["subquestions"][number]["decisions"][number]["scoringDisposition"],
+  requiresReview = false,
+  status?: GradingResult["subquestions"][number]["decisions"][number]["status"]
+) {
   if (disposition === "not_deducted_by_final_answer") return "最终答案正确，本项不扣分";
-  if (disposition === "uncertain_no_deduction") return "证据不确定，暂不扣分，待复核";
-  if (disposition === "not_awarded") return "未满足评分点，不得分";
+  if (disposition === "uncertain_no_deduction") return "旧版结果：证据不确定，待复核";
+  if (disposition === "not_awarded") {
+    if (status === "unreadable" || status === "insufficient_evidence") {
+      return requiresReview ? "卷面无法辨认，已达到整卷人工复核阈值" : "卷面无法辨认，当前按 0 分计";
+    }
+    return requiresReview ? "当前不计分，需人工复核" : "未满足评分点，当前不得分";
+  }
   if (disposition === "awarded") return "按评分标准计入得分";
   return "按历史规则记录";
 }
 
-function ResultDetail({ result, canRegrade, regrading, onRegrade }: { result: GradingResult; canRegrade: boolean; regrading: boolean; onRegrade: (id: string) => Promise<void> }) {
+function decisionScoreLabel(decision: GradingResult["subquestions"][number]["decisions"][number]) {
+  return decision.status === "insufficient_evidence" && (decision.uncertainScore ?? 0) > 0
+    ? `?/${decision.maxScore}`
+    : `${decision.awardedScore}/${decision.maxScore}`;
+}
+
+export function ResultDetail({ result, rubric, answerImageUrl, canRegrade, regrading, onRegrade, scoreViewTransitionName }: { result: GradingResult; rubric?: Rubric; answerImageUrl?: string; canRegrade: boolean; regrading: boolean; onRegrade: (id: string) => Promise<void>; scoreViewTransitionName?: string }) {
+  const [activeLineId, setActiveLineId] = useState<string | null>(null);
+  useEffect(() => setActiveLineId(null), [result.id]);
+  const activeRegion = result.evidence.lines.find((line) => line.id === activeLineId)?.region;
   return <div className="result-detail">
     <div className="detail-header">
       <div>
@@ -716,11 +814,13 @@ function ResultDetail({ result, canRegrade, regrading, onRegrade }: { result: Gr
         <h3>{result.studentId}</h3>
         <span>{result.fileName} · 评分标准 v{result.rubricVersion} · {result.modelName}</span>
         {(result.gradingEngineVersion || result.teacherJudgementVersion) && <span className="engine-version">计分引擎 {result.gradingEngineVersion ?? "旧版"} · 教师判定 {result.teacherJudgementVersion ?? "旧版"}</span>}
+        {result.gradingMode && <span className="engine-version">批改方式：{result.gradingMode === "vision_direct" ? "视觉直批" : "提取式兼容流程"}</span>}
+        {result.reviewPolicy && <span className="engine-version">无法辨认影响 {result.reviewPolicy.unreadableAffectedScore} 分 · 人工复核阈值 {result.reviewPolicy.unreadableScoreThreshold} 分</span>}
         {result.regradedAt && <span className="engine-version">历史重判于 {new Date(result.regradedAt).toLocaleString("zh-CN", { hour12: false })}</span>}
       </div>
       <div className="detail-summary-actions">
         {canRegrade && <button className="button secondary" disabled={regrading} onClick={() => void onRegrade(result.id)}>{regrading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}{regrading ? "判定中" : "重新判定"}</button>}
-        <div className="score-block"><strong>{scoreLabel(result.score, result.maximumPossibleScore)}</strong><span>/ {result.maxScore} 分{result.maximumPossibleScore !== undefined && result.maximumPossibleScore > result.score ? "（含待复核分值）" : ""}</span></div>
+        <div className="score-block prism-score-emphasis" key={result.id}><strong style={scoreViewTransitionName ? { viewTransitionName: scoreViewTransitionName } as CSSProperties : undefined}>{scoreLabel(result.score, result.maximumPossibleScore)}</strong><span>/ {result.maxScore} 分{result.maximumPossibleScore !== undefined && result.maximumPossibleScore > result.score ? "（含待复核分值）" : ""}</span></div>
       </div>
     </div>
     {result.reviewReasons.length > 0 && <div className="review-banner"><AlertTriangle size={17} /><div><strong>需要人工复核</strong>{result.reviewReasons.map((reason) => <p key={reason}>{reason}</p>)}</div></div>}
@@ -729,12 +829,13 @@ function ResultDetail({ result, canRegrade, regrading, onRegrade }: { result: Gr
       <p className="teacher-commentary-overall"><MathText value={result.teacherCommentary.overallComment} formulaByDefault /></p>
       {result.teacherCommentary.strengths.length > 0 && <div className="teacher-commentary-group"><strong>表现较好</strong>{result.teacherCommentary.strengths.map((item) => <p key={item}><MathText value={item} formulaByDefault /></p>)}</div>}
       {result.teacherCommentary.lostPoints.length > 0 && <div className="teacher-commentary-group loss"><strong>明确失分点</strong>{result.teacherCommentary.lostPoints.map((item) => <p key={`${item.subquestionId}-${item.pointId}`}><b>{item.pointId}</b>：失 {item.scoreLost} 分，<MathText value={item.reason} formulaByDefault /></p>)}</div>}
-      {result.teacherCommentary.auditConcerns.length > 0 && <div className="teacher-commentary-group concern"><strong>过程审验提醒</strong>{result.teacherCommentary.auditConcerns.map((item, index) => <p key={`${item.subquestionId}-${item.pointId ?? index}`}><b>{item.pointId ?? item.subquestionId}</b>：<MathText value={item.reason} formulaByDefault />{result.subquestions.find((subquestion) => subquestion.id === item.subquestionId)?.finalAnswerStatus === "correct" ? "（最终答案正确，本提醒不影响得分）" : ""}</p>)}</div>}
+      {result.teacherCommentary.auditConcerns.length > 0 && <div className="teacher-commentary-group concern"><strong>过程审验提醒</strong>{result.teacherCommentary.auditConcerns.map((item, index) => <p key={`${item.subquestionId}-${item.pointId ?? index}`}><b>{item.pointId ?? item.subquestionId}</b>：<MathText value={item.reason} formulaByDefault />{result.subquestions.find((subquestion) => subquestion.id === item.subquestionId)?.decisions.every((decision) => decision.scoringDisposition === "not_deducted_by_final_answer") ? "（最终答案触发满分，本提醒不影响得分）" : ""}</p>)}</div>}
     </div>}
     <div className="detail-columns">
       <div className="grading-report">{result.subquestions.map((subquestion) => {
         const teacherDecision = Boolean(subquestion.finalAnswerDecisionSource);
-        const audit = subquestion.localFinalAnswerAudit;
+        const grantsFullCredit = subquestion.decisions.length > 0 && subquestion.decisions.every((decision) => decision.scoringDisposition === "not_deducted_by_final_answer");
+        const rubricSubquestion = rubric?.subquestions.find((candidate) => candidate.id === subquestion.id);
         return <div className="report-question" key={subquestion.id}>
           <div className="report-question-title"><strong>{subquestion.title}</strong><span>{scoreLabel(subquestion.score, subquestion.maximumPossibleScore)}/{subquestion.maxScore} 分</span></div>
           <div className={`final-verdict ${subquestion.finalAnswerStatus}`}>
@@ -748,35 +849,124 @@ function ResultDetail({ result, canRegrade, regrading, onRegrade }: { result: Gr
               <div><span className="answer-label">学生答案</span><MathText value={subquestion.studentFinalAnswer || "未写出"} formulaByDefault /></div>
               <div><span className="answer-label">参考答案</span><MathText value={subquestion.referenceFinalAnswer || "未配置"} formulaByDefault /></div>
             </div>}
-            {audit && <div className={`local-audit ${audit.conflict ? "conflict" : ""}`}>
-              <span>本地规则仅作审计：{audit.status === "equivalent" ? "检测为等价" : audit.status === "not_equivalent" ? "未检测到等价" : "无可用比较数据"}</span>
-              <small>{audit.method}{audit.conflict ? " · 与教师结论冲突，教师结论优先且不扣分" : ""}</small>
-            </div>}
-            {subquestion.finalAnswerStatus === "correct" && teacherDecision && <p className="full-credit-note">最终答案正确，该小问保持满分；过程审验已执行，审验问题仅供人工复核，不影响本小问得分。</p>}
+            {grantsFullCredit && teacherDecision && <p className="full-credit-note">最终答案正确且评分标准允许省略过程，该小问保持满分；过程审验问题仅供查看。</p>}
           </div>
-          {subquestion.processAuditSummary && <div className="process-audit-summary"><span>过程审验 {subquestion.processAuditSummary.totalPoints} 项</span><b>{subquestion.processAuditSummary.satisfied} 项通过</b><b>{subquestion.processAuditSummary.notSatisfied} 项未满足</b><b>{subquestion.processAuditSummary.uncertain} 项证据不足</b>{subquestion.processAuditSummary.reviewRequired > 0 && <strong>{subquestion.processAuditSummary.reviewRequired} 项待复核</strong>}</div>}
-          {subquestion.decisions.map((decision) => <div className="decision-row" key={decision.pointId}>
-             <span className={`decision-icon ${decision.status}`}>{decision.status === "satisfied" ? <Check size={14} /> : decision.status === "not_satisfied" ? <XCircle size={14} /> : <AlertTriangle size={14} />}</span>
-             <div><div className="decision-heading"><strong>{decision.pointId}</strong><span className={`decision-audit-status ${decision.status}`}>{decisionAuditLabel(decision.status)}</span><small className={confidenceClass(decision.confidence)}>置信度 {percent(decision.confidence)}</small></div><p className="decision-reason"><MathText value={decision.reason} formulaByDefault /></p><div className="evidence-formula">{decision.evidenceQuote ? <><span>卷面证据：</span><MathText value={decision.evidenceQuote} formulaByDefault /></> : <span>未找到可引用的卷面证据</span>}</div><small className={`decision-scoring ${decision.scoringDisposition ?? "legacy"}`}>{scoringDispositionLabel(decision.scoringDisposition)}{decision.uncertainScore ? `；待复核 ${decision.uncertainScore} 分` : ""}</small></div>
-             <b>{decision.status === "insufficient_evidence" ? `?/${decision.maxScore}` : `${decision.awardedScore}/${decision.maxScore}`}</b>
-           </div>)}
-          {subquestion.auditDeductions && subquestion.auditDeductions.length > 0 && <div className="audit-deduction-list"><strong>扣分点审验</strong>{subquestion.auditDeductions.map((deduction) => <p key={deduction.ruleId}><b>{deduction.ruleId}</b>：<MathText value={deduction.reason} formulaByDefault />；{deduction.scoringDisposition === "not_deducted_by_final_answer" ? "最终答案正确，本次不扣分" : `扣 ${deduction.deductedScore} 分`}；置信度 {percent(deduction.confidence)}</p>)}</div>}
+          {subquestion.processAuditSummary && <div className="process-audit-summary"><span>过程审验 {subquestion.processAuditSummary.totalPoints} 项</span><b className="audit-passed">{subquestion.processAuditSummary.satisfied} 项通过</b><b className="audit-failed">{subquestion.processAuditSummary.notSatisfied} 项错误</b>{(subquestion.processAuditSummary.notPresent ?? 0) > 0 && <b className="audit-missing">{subquestion.processAuditSummary.notPresent} 项未作答</b>}{(subquestion.processAuditSummary.unreadable ?? subquestion.processAuditSummary.uncertain) > 0 && <b className="audit-unreadable">{subquestion.processAuditSummary.unreadable ?? subquestion.processAuditSummary.uncertain} 项无法辨认</b>}{subquestion.processAuditSummary.reviewRequired > 0 && <strong>{subquestion.processAuditSummary.reviewRequired} 项待复核</strong>}</div>}
+          {subquestion.decisions.map((decision) => {
+            const scorePoint = rubricSubquestion?.scorePoints.find((candidate) => candidate.id === decision.pointId);
+            return <div className="decision-row" key={decision.pointId}>
+              <span className={`decision-icon ${decision.status}`}>{decision.status === "satisfied" ? <Check size={14} /> : decision.status === "not_satisfied" || decision.status === "not_present" ? <XCircle size={14} /> : <AlertTriangle size={14} />}</span>
+              <div>
+                <div className="decision-heading"><strong>{decision.pointId}</strong><span className={`decision-audit-status ${decision.status}`}>{decisionAuditLabel(decision.status)}</span><small className={confidenceClass(decision.confidence)}>置信度 {percent(decision.confidence)}</small></div>
+                <p className="decision-reason"><MathText value={decision.reason} formulaByDefault /></p>
+                <div className="decision-reference-grid">
+                  <div className="decision-reference-card evidence">
+                    <span className="decision-reference-label">卷面证据</span>
+                    {decision.evidenceQuote ? <MathText value={decision.evidenceQuote} formulaByDefault /> : <p>未找到可引用的卷面证据</p>}
+                  </div>
+                  {scorePoint && <div className="decision-reference-card standard">
+                    <span className="decision-reference-label">评分标准 · {scorePoint.score} 分</span>
+                    <strong>{scorePoint.title}</strong>
+                    {scorePoint.description && <MathText value={scorePoint.description} formulaByDefault />}
+                    {scorePoint.expected && <div className="decision-standard-expected"><span>判分依据</span><MathText value={scorePoint.expected} formulaByDefault /></div>}
+                  </div>}
+                </div>
+                <small className={`decision-scoring ${decision.scoringDisposition ?? "legacy"}`}>{scoringDispositionLabel(decision.scoringDisposition, decision.requiresReview, decision.status)}{decision.status === "insufficient_evidence" && decision.uncertainScore ? `；旧版待复核 ${decision.uncertainScore} 分` : ""}</small>
+              </div>
+              <b>{decisionScoreLabel(decision)}</b>
+            </div>;
+          })}
+          {subquestion.auditDeductions && subquestion.auditDeductions.length > 0 && <div className="audit-deduction-list"><strong>扣分点审验</strong>{subquestion.auditDeductions.map((deduction) => <p key={deduction.ruleId}><b>{deduction.ruleId}</b>：<MathText value={deduction.reason} formulaByDefault />；{deduction.scoringDisposition === "not_deducted_by_final_answer" ? "最终答案正确，本次不扣分" : deduction.scoringDisposition === "not_deducted_by_score_floor" ? "当前已无可扣分值，本次不扣分" : `扣 ${deduction.deductedScore} 分`}；置信度 {percent(deduction.confidence)}</p>)}</div>}
         </div>;
       })}</div>
-      <aside className="transcript-panel"><div className="transcript-title"><FileText size={16} /><strong>卷面转录</strong><span>{result.evidence.lines.length} 行</span></div>{result.evidence.lines.map((line) => {
+      <aside className="transcript-panel">
+        <div className="transcript-title answer-sheet-title"><ImagePlus size={16} /><strong>学生答卷</strong><span>{result.fileName}</span></div>
+        <AnswerImageViewer imageUrl={answerImageUrl} fileName={result.fileName} region={activeRegion} />
+        <div className="transcript-subtitle"><FileText size={15} /><strong>卷面转录</strong><span>{result.evidence.lines.length} 行</span></div>
+        {result.evidence.lines.map((line) => {
         const latex = line.latex?.trim();
         const originalText = line.text?.trim() ?? "";
         const showOriginal = Boolean(latex && originalText && latex !== originalText);
-        return <div className={`transcript-line ${line.status} ${line.confidence < 0.6 ? "low-confidence" : ""}`} key={line.id}>
+        const locatable = Boolean(line.region);
+        return <button type="button" className={`transcript-line ${line.status} ${line.confidence < 0.6 ? "low-confidence" : ""} ${locatable ? "locatable" : ""} ${activeLineId === line.id ? "active" : ""}`} key={line.id} onClick={() => locatable && setActiveLineId((current) => current === line.id ? null : line.id)}>
           <span>{line.id}</span>
           <div className="transcript-line-content">
             {showOriginal && <strong className="transcript-original">{line.text}</strong>}
             <MathText value={latex || line.text || "[空白]"} formulaByDefault className="transcript-formula" />
           </div>
           <small className={confidenceClass(line.confidence)}>{percent(line.confidence)}</small>
-        </div>;
+        </button>;
       })}</aside>
     </div>
+  </div>;
+}
+
+function AnswerImageViewer({ imageUrl, fileName, region }: {
+  imageUrl?: string;
+  fileName: string;
+  region?: [number, number, number, number];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [naturalSize, setNaturalSize] = useState({ width: 0, height: 0 });
+  const [loadFailed, setLoadFailed] = useState(false);
+
+  useEffect(() => {
+    setExpanded(false);
+    setZoom(1);
+    setNaturalSize({ width: 0, height: 0 });
+    setLoadFailed(false);
+  }, [imageUrl]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [expanded]);
+
+  const regionStyle = region && naturalSize.width > 0 && naturalSize.height > 0 ? {
+    left: `${Math.max(0, region[0]) / naturalSize.width * 100}%`,
+    top: `${Math.max(0, region[1]) / naturalSize.height * 100}%`,
+    width: `${Math.max(0, region[2]) / naturalSize.width * 100}%`,
+    height: `${Math.max(0, region[3]) / naturalSize.height * 100}%`
+  } : undefined;
+  const handleLoad = (event: React.SyntheticEvent<HTMLImageElement>) => {
+    setNaturalSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight });
+    setLoadFailed(false);
+  };
+
+  return <div className="answer-image-viewer">
+    <div className="answer-image-toolbar"><strong>原始图像</strong>{imageUrl && !loadFailed && <button type="button" className="icon-button" title="放大查看原始答卷" onClick={() => setExpanded(true)}><Maximize2 size={15} /></button>}</div>
+    {!imageUrl || loadFailed ? <div className="answer-image-empty"><ImagePlus size={24} /><span>{loadFailed ? "原始答卷图像加载失败" : "该结果没有可用的原始答卷图像"}</span></div> : <div className="answer-image-scroll">
+      <button type="button" className="answer-image-canvas" title="点击放大查看" onClick={() => setExpanded(true)}>
+        <img src={imageUrl} alt={`${fileName} 原始答卷`} onLoad={handleLoad} onError={() => setLoadFailed(true)} />
+        {regionStyle && <span className="answer-region-highlight" style={regionStyle} />}
+      </button>
+    </div>}
+    {expanded && imageUrl && !loadFailed && <div className="answer-image-modal" role="dialog" aria-modal="true" aria-label={`${fileName} 原始答卷大图`} onClick={(event) => event.target === event.currentTarget && setExpanded(false)}>
+      <div className="answer-image-modal-toolbar">
+        <strong>{fileName}</strong>
+        <span>{Math.round(zoom * 100)}%</span>
+        <button type="button" className="icon-button" title="缩小" disabled={zoom <= 0.5} onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))}><ZoomOut size={18} /></button>
+        <button type="button" className="icon-button" title="放大" disabled={zoom >= 3} onClick={() => setZoom((value) => Math.min(3, value + 0.25))}><ZoomIn size={18} /></button>
+        <button type="button" className="icon-button" title="恢复适应窗口" onClick={() => setZoom(1)}><RefreshCw size={17} /></button>
+        <button type="button" className="icon-button" title="关闭" onClick={() => setExpanded(false)}><X size={19} /></button>
+      </div>
+      <div className="answer-image-modal-scroll">
+        <div className="answer-image-modal-canvas" style={{ width: `${zoom * 100}%` }}>
+          <img src={imageUrl} alt={`${fileName} 原始答卷大图`} onLoad={handleLoad} />
+          {regionStyle && <span className="answer-region-highlight" style={regionStyle} />}
+        </div>
+      </div>
+    </div>}
   </div>;
 }
 
@@ -855,10 +1045,41 @@ function LogsPage({ active }: { active: boolean }) {
     </section>
     <section className="logs-section">
       <div className="logs-toolbar"><div><ScrollText size={16} /><h2>最近事件</h2><span>{entries.length} 条</span></div><label><span>范围</span><select value={scope} onChange={(event) => setScope(event.target.value)}><option value="all">全部</option>{Object.entries(scopeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label></div>
-      <div className="log-table"><div className="log-head"><span>时间</span><span>状态</span><span>范围 / 步骤</span><span>事件</span></div>{entries.map((entry) => <div className={`log-row ${entry.level}`} key={entry.id}><time>{new Date(entry.timestamp).toLocaleTimeString("zh-CN", { hour12: false })}</time><span><i className={`log-status ${entry.status}`}>{entry.status}</i></span><span><strong>{scopeLabels[entry.scope]}</strong><small>{entry.step}</small></span><div><p>{entry.message}</p>{entry.details && <details><summary>查看判断详情</summary><pre>{JSON.stringify(entry.details, null, 2)}</pre></details>}<small className="operation-id">{entry.operationId}</small></div></div>)}</div>
+      <div className="log-table"><div className="log-head"><span>时间</span><span>状态</span><span>范围 / 步骤</span><span>事件</span></div>{entries.map((entry) => <div className={`log-row ${entry.level}`} key={entry.id}><time>{new Date(entry.timestamp).toLocaleTimeString("zh-CN", { hour12: false })}</time><span><i className={`log-status ${entry.status}`}>{entry.status}</i></span><span><strong>{scopeLabels[entry.scope]}</strong><small>{entry.step}</small></span><div><p>{entry.message}</p>{isModelCallLog(entry) ? <ModelCallDetails details={entry.details as unknown as ModelCallLogDetails} /> : entry.details && <details><summary>查看事件详情</summary><pre>{JSON.stringify(entry.details, null, 2)}</pre></details>}<small className="operation-id">{entry.operationId}</small></div></div>)}</div>
       {entries.length === 0 && <div className="empty-state"><ScrollText size={28} /><strong>还没有运行日志</strong><p>生成评分规则或批改答卷后会记录完整步骤。</p></div>}
     </section>
   </div>;
+}
+
+function isModelCallLog(entry: SystemLogEntry): boolean {
+  return entry.scope === "model" && entry.details?.kind === "model_call";
+}
+
+function ModelCallDetails({ details }: { details: ModelCallLogDetails }) {
+  const response = details.response;
+  return <details className="model-call-details">
+    <summary>展开 Prompt 与模型原始返回</summary>
+    <div className="model-call-meta">
+      <span>模型：<b>{details.model}</b></span>
+      {details.configuration && <span>配置：<b>{details.configuration.name}</b></span>}
+      {details.configuration && <span>API：<b>{details.configuration.baseUrl}</b></span>}
+      <span>结构：<b>{details.schemaName}</b></span>
+      <span>模式：<b>{details.outputMode}</b></span>
+      {details.request.reasoningEffort && <span>推理：<b>{details.request.reasoningEffort}</b></span>}
+      <span>尝试：<b>{details.attempt}/{details.maxAttempts}</b></span>
+      {details.durationMs !== undefined && <span>耗时：<b>{details.durationMs} ms</b></span>}
+      {response && <span>HTTP：<b>{response.status}</b></span>}
+    </div>
+    {details.error && <div className="model-call-error"><AlertTriangle size={14} />{details.error}</div>}
+    <div className="model-call-payload-grid">
+      <div className="model-call-payload"><strong>System Prompt</strong><pre>{details.request.systemPrompt}</pre></div>
+      <div className="model-call-payload"><strong>User Prompt</strong><pre>{details.request.userPrompt}</pre></div>
+    </div>
+    {details.request.responseFormat && <div className="model-call-payload"><strong>Response Format / JSON Schema</strong><pre>{JSON.stringify(details.request.responseFormat, null, 2)}</pre></div>}
+    {details.request.images.length > 0 && <div className="model-call-images"><strong>图像输入（正文已省略）</strong>{details.request.images.map((image, index) => <div key={`${image.sha256}-${index}`}><span>{image.label || `图片 ${index + 1}`}</span><small>{image.mimeType} · {image.bytes.toLocaleString("zh-CN")} bytes · SHA-256 {image.sha256}</small></div>)}</div>}
+    <div className="model-call-payload"><strong>模型原始 HTTP 返回</strong><pre>{response?.raw || "请求未收到 HTTP 响应。"}</pre></div>
+    {response?.content && <div className="model-call-payload"><strong>提取出的 message.content</strong><pre>{response.content}</pre></div>}
+  </details>;
 }
 
 export default App;

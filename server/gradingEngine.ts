@@ -1,10 +1,11 @@
 import { evaluate, simplify } from "mathjs";
+import { DEFAULT_UNREADABLE_REVIEW_THRESHOLD } from "../shared/types.js";
 import type {
   AnswerEvidence,
   AppliedDeduction,
   FinalAnswerJudgement,
+  GradingMode,
   GradingResult,
-  LocalFinalAnswerAudit,
   Rubric,
   RubricDecision,
   TeacherCommentary
@@ -14,22 +15,12 @@ import { logEvent } from "./systemLog.js";
 export const AUTO_CONFIDENCE_THRESHOLD = 0.85;
 export const REVIEW_CONFIDENCE_THRESHOLD = 0.6;
 
-const unitAliases: Record<string, string> = {
-  "米/秒": "m/s",
-  "米每秒": "m/s",
-  "米/秒²": "m/s^2",
-  "米每二次方秒": "m/s^2",
-  "牛": "N",
-  "牛顿": "N",
-  "焦": "J",
-  "焦耳": "J"
-};
-
 interface EvidenceReferenceCheck {
   validLineIds: string[];
   missingLineIds: string[];
   crossedOutLineIds: string[];
   uncertainLineIds: string[];
+  lowConfidenceLineIds: string[];
 }
 
 function inspectEvidenceLineIds(evidence: AnswerEvidence, lineIds: string[]): EvidenceReferenceCheck {
@@ -38,6 +29,7 @@ function inspectEvidenceLineIds(evidence: AnswerEvidence, lineIds: string[]): Ev
   const missingLineIds: string[] = [];
   const crossedOutLineIds: string[] = [];
   const uncertainLineIds: string[] = [];
+  const lowConfidenceLineIds: string[] = [];
 
   for (const lineId of [...new Set(lineIds)]) {
     const line = linesById.get(lineId);
@@ -47,14 +39,24 @@ function inspectEvidenceLineIds(evidence: AnswerEvidence, lineIds: string[]): Ev
       crossedOutLineIds.push(lineId);
     } else if (line.status === "uncertain") {
       uncertainLineIds.push(lineId);
-    } else if ((line.text?.trim() || line.latex?.trim())) {
-      validLineIds.push(lineId);
-    } else {
+    } else if (!(line.text?.trim() || line.latex?.trim())) {
       uncertainLineIds.push(lineId);
+    } else if (line.confidence < REVIEW_CONFIDENCE_THRESHOLD) {
+      lowConfidenceLineIds.push(lineId);
+    } else {
+      validLineIds.push(lineId);
     }
   }
 
-  return { validLineIds, missingLineIds, crossedOutLineIds, uncertainLineIds };
+  return { validLineIds, missingLineIds, crossedOutLineIds, uncertainLineIds, lowConfidenceLineIds };
+}
+
+function directVisualEvidenceLineIds(evidence: AnswerEvidence, lineIds: string[]): string[] {
+  const linesById = new Map(evidence.lines.map((line) => [line.id, line]));
+  return [...new Set(lineIds)].filter((lineId) => {
+    const line = linesById.get(lineId);
+    return Boolean(line && line.status === "active" && (line.text.trim() || line.latex?.trim()));
+  });
 }
 
 function evidenceReferenceReason(check: EvidenceReferenceCheck): string {
@@ -62,6 +64,7 @@ function evidenceReferenceReason(check: EvidenceReferenceCheck): string {
   if (check.missingLineIds.length) reasons.push(`引用了不存在的卷面行：${check.missingLineIds.join(", ")}`);
   if (check.crossedOutLineIds.length) reasons.push(`引用了已划掉的卷面行：${check.crossedOutLineIds.join(", ")}`);
   if (check.uncertainLineIds.length) reasons.push(`引用的卷面行存在视觉歧义：${check.uncertainLineIds.join(", ")}`);
+  if (check.lowConfidenceLineIds.length) reasons.push(`引用的卷面行识别置信度过低：${check.lowConfidenceLineIds.join(", ")}`);
   if (!check.validLineIds.length) reasons.push("没有可确认的有效卷面证据");
   return reasons.join("；");
 }
@@ -70,10 +73,19 @@ function canSupportAutomaticDecision(check: EvidenceReferenceCheck, confidence: 
   if (confidence < AUTO_CONFIDENCE_THRESHOLD) {
     return { ok: false, reason: `置信度 ${Math.round(confidence * 100)}% 低于自动判定阈值 ${Math.round(AUTO_CONFIDENCE_THRESHOLD * 100)}%` };
   }
-  if (check.missingLineIds.length || check.crossedOutLineIds.length || check.uncertainLineIds.length || !check.validLineIds.length) {
+  if (check.missingLineIds.length || check.crossedOutLineIds.length || check.uncertainLineIds.length || check.lowConfidenceLineIds.length || !check.validLineIds.length) {
     return { ok: false, reason: evidenceReferenceReason(check) };
   }
   return { ok: true };
+}
+
+function unsupportedDecisionStatus(check: EvidenceReferenceCheck): "not_present" | "unreadable" {
+  return check.validLineIds.length
+    || check.missingLineIds.length
+    || check.uncertainLineIds.length
+    || check.lowConfidenceLineIds.length
+    ? "unreadable"
+    : "not_present";
 }
 
 export function normalizeEvidenceReferences(input: AnswerEvidence): AnswerEvidence {
@@ -101,18 +113,6 @@ export function normalizeEvidenceReferences(input: AnswerEvidence): AnswerEviden
     return true;
   });
   return { ...input, lines, finalAnswers, ambiguities };
-}
-
-function normalizeUnit(unit?: string): string {
-  if (!unit) return "";
-  const compact = unit.replace(/\s+/g, "").replace(/²/g, "^2");
-  return unitAliases[compact] ?? compact;
-}
-
-function hasSymbolicValue(expression: string): boolean {
-  const normalized = normalizeExpression(expression);
-  const value = normalized.includes("=") ? normalized.split("=").slice(1).join("=") : normalized;
-  return /[a-zA-Z]/.test(value.replace(/sqrt|sin|cos|tan|log|exp/g, ""));
 }
 
 function readLatexGroup(source: string, start: number): { content: string; end: number } | null {
@@ -297,13 +297,13 @@ export function answerCollectionsEquivalent(actual: string, expected: string, to
   };
 }
 
-export const GRADING_ENGINE_VERSION = "2.2.0";
-export const TEACHER_JUDGEMENT_VERSION = "final-answer-v2";
-export const TEACHER_COMMENTARY_VERSION = "teacher-commentary-v2";
+export const GRADING_ENGINE_VERSION = "2.4.0";
+export const TEACHER_JUDGEMENT_VERSION = "final-answer-v4";
+export const TEACHER_COMMENTARY_VERSION = "teacher-commentary-v3";
 
 export function createFallbackTeacherCommentary(result: GradingResult): TeacherCommentary {
   const lostPoints = result.subquestions.flatMap((subquestion) => subquestion.decisions
-    .filter((decision) => decision.awardedScore < decision.maxScore && decision.status === "not_satisfied")
+    .filter((decision) => decision.awardedScore < decision.maxScore && (decision.status === "not_satisfied" || decision.status === "not_present"))
     .map((decision) => ({
       subquestionId: subquestion.id,
       pointId: decision.pointId,
@@ -312,11 +312,11 @@ export function createFallbackTeacherCommentary(result: GradingResult): TeacherC
       evidenceLineIds: decision.evidenceLineIds
     })));
   const auditConcerns = result.subquestions.flatMap((subquestion) => subquestion.decisions
-    .filter((decision) => decision.status === "not_satisfied" || decision.status === "insufficient_evidence")
+    .filter((decision) => ["not_satisfied", "not_present", "unreadable", "insufficient_evidence"].includes(decision.status))
     .map((decision) => ({
       subquestionId: subquestion.id,
       pointId: decision.pointId,
-      kind: decision.status === "insufficient_evidence" ? "uncertain_evidence" as const : "confirmed_issue" as const,
+      kind: decision.status === "unreadable" || decision.status === "insufficient_evidence" ? "uncertain_evidence" as const : "confirmed_issue" as const,
       reason: decision.reason,
       evidenceLineIds: decision.evidenceLineIds
     })));
@@ -324,12 +324,11 @@ export function createFallbackTeacherCommentary(result: GradingResult): TeacherC
     .filter((decision) => decision.status === "satisfied")
     .map((decision) => `${subquestion.title}：${decision.pointId}已满足评分要求`));
   const reviewItems = result.reviewReasons;
-  const maximumPossibleScore = result.maximumPossibleScore ?? result.score;
-  const overallComment = maximumPossibleScore !== result.score
-    ? `本次作答已确认得分至少为 ${result.score}/${result.maxScore} 分，待复核项目确认后最高可能为 ${maximumPossibleScore}/${result.maxScore} 分。`
-    : result.score === result.maxScore
+  const overallComment = result.score === result.maxScore
       ? "本次作答最终得分为满分。过程审验已执行，存在的证据不足或过程问题仅作为人工复核提示，不影响最终得分。"
-      : `本次作答得分${result.score}/${result.maxScore}分。主要失分来自已确认未满足的评分点；证据不足的项目已保留并标记为人工复核。`;
+      : result.reviewReasons.length
+        ? `本次作答当前确定得分为 ${result.score}/${result.maxScore} 分。待复核项目当前不计分，复核状态不形成分数区间。`
+        : `本次作答得分${result.score}/${result.maxScore}分。主要失分来自错误、未作答或没有有效卷面证据的评分点。`;
   return {
     overallComment,
     strengths: [...new Set(strengths)].slice(0, 8),
@@ -339,76 +338,6 @@ export function createFallbackTeacherCommentary(result: GradingResult): TeacherC
     basedOnDecisionIds: result.subquestions.flatMap((subquestion) => subquestion.decisions.map((decision) => `${subquestion.id}:${decision.pointId}`)),
     status: "fallback",
     version: TEACHER_COMMENTARY_VERSION
-  };
-}
-
-interface LocalAuditComputation extends LocalFinalAnswerAudit {
-  attempts: Array<Record<string, unknown>>;
-}
-
-function auditFinalAnswer(
-  rubricAnswers: Rubric["subquestions"][number]["finalAnswers"],
-  evidenceItems: AnswerEvidence["finalAnswers"]
-): LocalAuditComputation {
-  const actualAnswers = evidenceItems.map((item) => item.expression);
-  const referenceAnswers = rubricAnswers.map((item) => item.expression);
-  if (!actualAnswers.length || !referenceAnswers.length) {
-    return {
-      status: "not_available",
-      method: !actualAnswers.length ? "student_answer_missing" : "reference_answer_missing",
-      conflict: false,
-      actualAnswers,
-      referenceAnswers,
-      attempts: []
-    };
-  }
-
-  const actualExpression = actualAnswers.join("; ");
-  const expectedCandidates = [
-    ...rubricAnswers.map((item) => ({
-      expression: item.expression,
-      units: item.unit ? [item.unit] : [],
-      tolerance: item.tolerance ?? 0
-    })),
-    ...(rubricAnswers.length > 1 ? [{
-      expression: rubricAnswers.map((item) => item.expression).join("; "),
-      units: rubricAnswers.flatMap((item) => item.unit ? [item.unit] : []),
-      tolerance: Math.max(...rubricAnswers.map((item) => item.tolerance ?? 0))
-    }] : [])
-  ];
-  const attempts: Array<Record<string, unknown>> = [];
-  let matchedMethod = "not_equivalent";
-  const matched = expectedCandidates.some((expected) => {
-    const comparison = answerCollectionsEquivalent(actualExpression, expected.expression, expected.tolerance);
-    const symbolicUnitWaiver = hasSymbolicValue(expected.expression);
-    const unitMatches = symbolicUnitWaiver || expected.units.every((unit) => evidenceItems.some(
-      (item) => normalizeUnit(item.unit) === normalizeUnit(unit)
-    ));
-    attempts.push({
-      expected: expected.expression,
-      actualParts: comparison.actualParts,
-      expectedParts: comparison.expectedParts,
-      comparisons: comparison.comparisons,
-      expressionMatches: comparison.equivalent,
-      unitMatches,
-      expectedUnits: expected.units,
-      actualUnits: evidenceItems.map((item) => item.unit ?? ""),
-      symbolicUnitWaiver
-    });
-    if (comparison.equivalent && unitMatches) {
-      matchedMethod = [...new Set(comparison.comparisons.map((item) => item.method))].join("+") || "collection_match";
-      return true;
-    }
-    return false;
-  });
-
-  return {
-    status: matched ? "equivalent" : "not_equivalent",
-    method: matched ? matchedMethod : "not_equivalent",
-    conflict: false,
-    actualAnswers,
-    referenceAnswers,
-    attempts
   };
 }
 
@@ -428,17 +357,22 @@ export function calculateGrade(input: {
   regradedAt?: string;
   regradeReason?: string;
   teacherJudgementVersion?: string;
+  unreadableReviewThreshold?: number;
+  evidenceValidationMode?: "extracted_text" | "direct_visual";
+  gradingMode?: GradingMode;
 }): GradingResult {
   const reviewReasons = new Set<string>();
   const deductions = input.appliedDeductions ?? [];
+  const configuredThreshold = Number(input.unreadableReviewThreshold);
+  const unreadableScoreThreshold = Number.isFinite(configuredThreshold) && configuredThreshold >= 0.5
+    ? configuredThreshold
+    : DEFAULT_UNREADABLE_REVIEW_THRESHOLD;
 
-  const linesById = new Map(input.evidence.lines.map((line) => [line.id, line]));
   const subquestions = input.rubric.subquestions.map((subquestion) => {
     const finalEvidenceItems = input.evidence.finalAnswers.filter((item) => item.subquestionId === subquestion.id);
-    const activeFinalEvidenceItems = finalEvidenceItems.filter((item) => linesById.get(item.lineId)?.status === "active");
     const modelJudgement = input.finalAnswerJudgements.find((item) => item.subquestionId === subquestion.id);
     const finalAnswerDecisionSource = modelJudgement ? "teacher_model" as const : "missing_teacher_judgement" as const;
-    let finalAnswerJudgement: FinalAnswerJudgement = modelJudgement ?? {
+    const finalAnswerJudgement: FinalAnswerJudgement = modelJudgement ?? {
       subquestionId: subquestion.id,
       status: "uncertain",
       evidenceLineIds: [],
@@ -447,54 +381,30 @@ export function calculateGrade(input: {
       reason: "教师模型未返回该小问的最终答案判定，不能自动发布结果。",
       confidence: 0
     };
-    let finalAnswerStatus = finalAnswerJudgement.status;
+    const finalAnswerStatus = finalAnswerJudgement.status;
     const finalEvidenceCheck = inspectEvidenceLineIds(input.evidence, finalAnswerJudgement.evidenceLineIds);
-    if (modelJudgement && (finalAnswerStatus === "correct" || finalAnswerStatus === "incorrect")) {
-      const automaticDecision = canSupportAutomaticDecision(finalEvidenceCheck, finalAnswerJudgement.confidence);
-      if (!automaticDecision.ok) {
-        finalAnswerJudgement = {
-          ...finalAnswerJudgement,
-          status: "uncertain",
-          reason: `教师模型原始结论为${finalAnswerStatus}，但${automaticDecision.reason}，已转为待复核。`
-        };
-        finalAnswerStatus = "uncertain";
-      }
-    }
-    const localAuditComputation = auditFinalAnswer(subquestion.finalAnswers, activeFinalEvidenceItems);
-    const localAuditConflict = (finalAnswerStatus === "correct" && localAuditComputation.status === "not_equivalent")
-      || (finalAnswerStatus === "incorrect" && localAuditComputation.status === "equivalent");
-    const localFinalAnswerAudit: LocalFinalAnswerAudit = {
-      status: localAuditComputation.status,
-      method: localAuditComputation.method,
-      conflict: localAuditConflict,
-      actualAnswers: localAuditComputation.actualAnswers,
-      referenceAnswers: localAuditComputation.referenceAnswers
-    };
-    if (finalAnswerStatus === "uncertain") {
-      reviewReasons.add(`${subquestion.title}最终答案待复核：${finalAnswerJudgement.reason}`);
-    }
-    if (localAuditConflict) {
-      reviewReasons.add(`${subquestion.title}的教师模型结论与本地等价审计冲突，需要人工复核。`);
+    if (!modelJudgement) {
+      reviewReasons.add(`${subquestion.title}缺少教师模型最终答案判定，需要人工复核。`);
+    } else if (input.evidenceValidationMode === "direct_visual"
+      && (finalAnswerStatus === "correct" || finalAnswerStatus === "incorrect")
+      && directVisualEvidenceLineIds(input.evidence, finalAnswerJudgement.evidenceLineIds).length === 0) {
+      reviewReasons.add(`${subquestion.title}的教师模型最终答案判定缺少可定位的图像证据，需要人工复核。`);
     }
 
-    // A high-confidence teacher-model "correct" decision with valid evidence grants full credit.
-    // Lower-confidence or unsupported judgements are normalized to uncertain above.
+    // The teacher model is the sole authority for final-answer correctness.
+    // Process work is still audited, but cannot reduce a correct final answer.
     const grantsFullCredit = finalAnswerStatus === "correct";
     if (input.operationId) {
-      logEvent(input.operationId, "equivalence", "final_answer_authority_decision", `${subquestion.title}：教师模型判定最终答案为${finalAnswerStatus}`, {
+      logEvent(input.operationId, "grading", "final_answer_authority_decision", `${subquestion.title}：教师模型判定最终答案为${finalAnswerStatus}`, {
         subquestionId: subquestion.id,
         teacherStatus: finalAnswerStatus,
         teacherReason: finalAnswerJudgement.reason,
         teacherConfidence: finalAnswerJudgement.confidence,
         teacherEvidenceLineIds: finalAnswerJudgement.evidenceLineIds,
         decisionSource: finalAnswerDecisionSource,
-        localAuditStatus: localFinalAnswerAudit.status,
-        localAuditMethod: localFinalAnswerAudit.method,
-        localAuditAttempts: localAuditComputation.attempts,
-        conflict: localAuditConflict,
         grantsFullCredit,
-        legacyRubricPolicyIgnored: subquestion.finalAnswerPolicy
-      }, localAuditConflict || finalAnswerStatus === "uncertain" ? "warning" : finalAnswerStatus === "correct" ? "success" : "info");
+        finalAnswerPolicy: subquestion.finalAnswerPolicy
+      }, !modelJudgement || finalAnswerStatus === "uncertain" ? "warning" : finalAnswerStatus === "correct" ? "success" : "info");
     }
 
     const pointDecisions = subquestion.scorePoints.map((point) => {
@@ -506,10 +416,10 @@ export function calculateGrade(input: {
         decision = {
           subquestionId: subquestion.id,
           pointId: point.id,
-          status: "insufficient_evidence" as const,
+          status: "not_present" as const,
           evidenceLineIds: [],
           evidenceQuote: "",
-          reason: "模型未返回该评分点的判断",
+          reason: "模型未返回该评分点的判断，当前按未提供可确认的评分证据计0分。",
           confidence: 0,
           requiresReview: true,
           reviewReason: "评分点缺少判断结果",
@@ -517,48 +427,114 @@ export function calculateGrade(input: {
         };
       } else {
         decision = { ...modelDecision, decisionSource: "model" };
+        if (decision.status === "insufficient_evidence") {
+          decision = {
+            ...decision,
+            status: "unreadable",
+            requiresReview: true,
+            reviewReason: decision.reviewReason || "卷面内容无法可靠辨认",
+            decisionSource: "normalized_uncertain"
+          };
+        }
+        if (decision.status === "not_present" && decision.confidence < AUTO_CONFIDENCE_THRESHOLD) {
+          decision = {
+            ...decision,
+            status: "unreadable",
+            reason: `${decision.reason}；未作答判断置信度 ${Math.round(decision.confidence * 100)}% 低于自动判定阈值 ${Math.round(AUTO_CONFIDENCE_THRESHOLD * 100)}%，当前按无法确认处理。`,
+            requiresReview: true,
+            reviewReason: decision.reviewReason || "未作答判断置信度不足",
+            decisionSource: "normalized_uncertain"
+          };
+        }
         if (decision.status === "satisfied" || decision.status === "not_satisfied") {
-          const evidenceCheck = inspectEvidenceLineIds(input.evidence, decision.evidenceLineIds);
-          const automaticDecision = canSupportAutomaticDecision(evidenceCheck, decision.confidence);
-          if (!automaticDecision.ok) {
-            decision = {
-              ...decision,
-              status: "insufficient_evidence",
-              evidenceLineIds: evidenceCheck.validLineIds,
-              evidenceQuote: evidenceCheck.validLineIds.length ? decision.evidenceQuote : "",
-              reason: `${decision.reason}；${automaticDecision.reason}`,
-              requiresReview: true,
-              reviewReason: automaticDecision.reason,
-              decisionSource: "normalized_uncertain"
-            };
+          if (input.evidenceValidationMode === "direct_visual") {
+            const directEvidenceIds = directVisualEvidenceLineIds(input.evidence, decision.evidenceLineIds);
+            if (directEvidenceIds.length === 0) {
+              decision = {
+                ...decision,
+                status: "unreadable",
+                reason: `${decision.reason}；教师模型未返回可定位的有效图像证据，当前按无法确认处理。`,
+                requiresReview: true,
+                reviewReason: decision.reviewReason || "缺少可定位的图像证据",
+                decisionSource: "normalized_uncertain"
+              };
+            }
+          } else {
+            const evidenceCheck = inspectEvidenceLineIds(input.evidence, decision.evidenceLineIds);
+            const automaticDecision = canSupportAutomaticDecision(evidenceCheck, decision.confidence);
+            if (!automaticDecision.ok) {
+              const normalizedStatus = unsupportedDecisionStatus(evidenceCheck);
+              decision = {
+                ...decision,
+                status: normalizedStatus,
+                reason: `${decision.reason}；${automaticDecision.reason}`,
+                requiresReview: normalizedStatus === "unreadable",
+                reviewReason: normalizedStatus === "unreadable" ? automaticDecision.reason : undefined,
+                decisionSource: "normalized_uncertain"
+              };
+            }
           }
         }
       }
-      const requiresReview = decision.requiresReview || decision.status === "insufficient_evidence";
+      const isUnreadable = decision.status === "unreadable" || decision.status === "insufficient_evidence";
+      // Unreadable points are review candidates. The whole-paper score threshold
+      // is applied after every subquestion has been scored.
+      const requiresReview = isUnreadable ? false : decision.requiresReview;
       const scoringDisposition = grantsFullCredit
         ? "not_deducted_by_final_answer" as const
         : decision.status === "satisfied"
           ? "awarded" as const
-          : decision.status === "not_satisfied"
-            ? "not_awarded" as const
-            : "uncertain_no_deduction" as const;
+          : "not_awarded" as const;
       if (requiresReview) reviewReasons.add(decision.reviewReason || `${point.title}需要复核`);
       return {
         ...decision,
         requiresReview,
         scoringDisposition,
         maxScore: point.score,
-        awardedScore: grantsFullCredit || decision.status === "satisfied" || decision.status === "not_required" ? point.score : 0,
-        uncertainScore: !grantsFullCredit && decision.status === "insufficient_evidence" ? point.score : 0
+        awardedScore: grantsFullCredit || decision.status === "satisfied" ? point.score : 0,
+        uncertainScore: 0
       };
     });
+
+    if (input.operationId) {
+      pointDecisions.forEach((decision) => {
+        const point = subquestion.scorePoints.find((candidate) => candidate.id === decision.pointId);
+        logEvent(
+          input.operationId!,
+          "scoring",
+          "score_point_audit",
+          `${subquestion.title} / ${point?.title ?? decision.pointId}：${decision.awardedScore}/${decision.maxScore}分`,
+          {
+            subquestionId: subquestion.id,
+            subquestionTitle: subquestion.title,
+            pointId: decision.pointId,
+            pointTitle: point?.title,
+            status: decision.status,
+            awardedScore: decision.awardedScore,
+            maxScore: decision.maxScore,
+            reason: decision.reason,
+            evidenceLineIds: decision.evidenceLineIds,
+            evidenceQuote: decision.evidenceQuote,
+            confidence: decision.confidence,
+            requiresReview: decision.requiresReview,
+            reviewReason: decision.reviewReason,
+            decisionSource: decision.decisionSource,
+            scoringDisposition: decision.scoringDisposition
+          },
+          decision.requiresReview || decision.status === "unreadable" ? "warning" : decision.awardedScore > 0 ? "success" : "info"
+        );
+      });
+    }
 
     const uniqueDeductions = deductions
       .filter((item) => item.subquestionId === subquestion.id)
       .reduce<Array<AppliedDeduction & { deductedScore: number }>>((items, deduction) => {
         const rule = subquestion.deductions.find((candidate) => candidate.id === deduction.ruleId);
         const evidenceCheck = inspectEvidenceLineIds(input.evidence, deduction.evidenceLineIds);
-        const automaticDeduction = canSupportAutomaticDecision(evidenceCheck, deduction.confidence);
+        const directEvidenceIds = directVisualEvidenceLineIds(input.evidence, deduction.evidenceLineIds);
+        const automaticDeduction = input.evidenceValidationMode === "direct_visual"
+          ? { ok: directEvidenceIds.length > 0, reason: "教师模型未返回可定位的有效图像证据" }
+          : canSupportAutomaticDecision(evidenceCheck, deduction.confidence);
         if (!automaticDeduction.ok) {
           reviewReasons.add(`${subquestion.title}的扣分规则 ${deduction.ruleId} 证据不足：${automaticDeduction.reason}`);
           return items;
@@ -567,36 +543,43 @@ export function calculateGrade(input: {
           const priorRule = subquestion.deductions.find((candidate) => candidate.id === item.ruleId);
           return priorRule?.exclusiveGroup === rule.exclusiveGroup;
         })) return items;
-        items.push({ ...deduction, evidenceLineIds: evidenceCheck.validLineIds, deductedScore: rule.deduct });
+        items.push({ ...deduction, evidenceLineIds: input.evidenceValidationMode === "direct_visual" ? directEvidenceIds : evidenceCheck.validLineIds, deductedScore: rule.deduct });
         return items;
       }, []);
-    const auditDeductions = uniqueDeductions.map((deduction) => ({
-      ...deduction,
-      deductedScore: grantsFullCredit ? 0 : deduction.deductedScore,
-      scoringDisposition: grantsFullCredit ? "not_deducted_by_final_answer" as const : "awarded" as const
-    }));
-    const subDeductions = grantsFullCredit ? [] : auditDeductions;
-
     const processScore = pointDecisions.reduce((sum, item) => sum + item.awardedScore, 0);
-    const uncertainScore = pointDecisions.reduce((sum, item) => sum + (item.uncertainScore ?? 0), 0);
-    const deductionTotal = subDeductions.reduce((sum, item) => sum + item.deductedScore, 0);
+    const uncertainScore = 0;
     const scoreBeforeDeduction = grantsFullCredit
       ? subquestion.maxScore
       : processScore;
+    let remainingDeductionBudget = Math.max(0, scoreBeforeDeduction);
+    const auditDeductions = uniqueDeductions.map((deduction) => {
+      const deductedScore = grantsFullCredit
+        ? 0
+        : Math.min(deduction.deductedScore, remainingDeductionBudget);
+      remainingDeductionBudget -= deductedScore;
+      return {
+        ...deduction,
+        deductedScore,
+        scoringDisposition: grantsFullCredit
+          ? "not_deducted_by_final_answer" as const
+          : deductedScore > 0
+            ? "awarded" as const
+            : "not_deducted_by_score_floor" as const
+      };
+    });
+    const subDeductions = grantsFullCredit
+      ? []
+      : auditDeductions.filter((deduction) => deduction.deductedScore > 0);
+    const deductionTotal = subDeductions.reduce((sum, item) => sum + item.deductedScore, 0);
     const score = Math.max(0, Math.min(subquestion.maxScore, scoreBeforeDeduction - deductionTotal));
-    const maximumPossibleScore = Math.max(0, Math.min(
-      subquestion.maxScore,
-      grantsFullCredit ? subquestion.maxScore : scoreBeforeDeduction + uncertainScore - deductionTotal
-    ));
+    const maximumPossibleScore = score;
     if (input.operationId) {
-      logEvent(input.operationId, "scoring", "subquestion_score", `${subquestion.title}：${score}${maximumPossibleScore > score ? `-${maximumPossibleScore}` : ""}/${subquestion.maxScore}分`, {
+      logEvent(input.operationId, "scoring", "subquestion_score", `${subquestion.title}：${score}/${subquestion.maxScore}分`, {
         subquestionId: subquestion.id,
         finalAnswerStatus,
         teacherReason: finalAnswerJudgement.reason,
         teacherConfidence: finalAnswerJudgement.confidence,
         decisionSource: finalAnswerDecisionSource,
-        localAuditStatus: localFinalAnswerAudit.status,
-        localAuditConflict,
         grantsFullCredit,
         processScore,
         uncertainScore,
@@ -604,7 +587,8 @@ export function calculateGrade(input: {
         appliedDeduction: deductionTotal,
         processPointsOverridden: grantsFullCredit,
         processAuditExecuted: true,
-        uncertainPoints: pointDecisions.filter((item) => item.status === "insufficient_evidence").length
+        notPresentPoints: pointDecisions.filter((item) => item.status === "not_present").length,
+        unreadablePoints: pointDecisions.filter((item) => item.status === "unreadable" || item.status === "insufficient_evidence").length
       }, "success");
     }
 
@@ -622,12 +606,13 @@ export function calculateGrade(input: {
       finalAnswerEvidenceLineIds: finalEvidenceCheck.validLineIds,
       studentFinalAnswer: finalAnswerJudgement.studentAnswer,
       referenceFinalAnswer: finalAnswerJudgement.referenceAnswer,
-      localFinalAnswerAudit,
       processAuditSummary: {
         totalPoints: pointDecisions.length,
         satisfied: pointDecisions.filter((item) => item.status === "satisfied").length,
         notSatisfied: pointDecisions.filter((item) => item.status === "not_satisfied").length,
-        uncertain: pointDecisions.filter((item) => item.status === "insufficient_evidence").length,
+        uncertain: pointDecisions.filter((item) => item.status === "unreadable" || item.status === "insufficient_evidence").length,
+        notPresent: pointDecisions.filter((item) => item.status === "not_present").length,
+        unreadable: pointDecisions.filter((item) => item.status === "unreadable" || item.status === "insufficient_evidence").length,
         reviewRequired: pointDecisions.filter((item) => item.requiresReview).length
       },
       decisions: pointDecisions,
@@ -636,25 +621,69 @@ export function calculateGrade(input: {
     };
   });
 
+  const unreadableAffectedDecisions = subquestions.flatMap((subquestion) => subquestion.decisions
+    .filter((decision) => (
+      decision.status === "unreadable" || decision.status === "insufficient_evidence"
+    ) && decision.awardedScore < decision.maxScore)
+    .map((decision) => ({ subquestionId: subquestion.id, decision })));
+  const unreadableAffectedScore = Math.round(unreadableAffectedDecisions.reduce(
+    (sum, item) => sum + (item.decision.maxScore - item.decision.awardedScore),
+    0
+  ) * 1000) / 1000;
+  const unreadableReviewTriggered = unreadableAffectedScore > 0
+    && unreadableAffectedScore >= unreadableScoreThreshold;
+
+  if (unreadableReviewTriggered) {
+    const pointIds = unreadableAffectedDecisions.map((item) => `${item.subquestionId}:${item.decision.pointId}`);
+    reviewReasons.add(`卷面无法辨认导致 ${unreadableAffectedScore} 分未计入，达到教师设置的 ${unreadableScoreThreshold} 分人工复核阈值（评分点：${pointIds.join("、")}）。`);
+    for (const item of unreadableAffectedDecisions) item.decision.requiresReview = true;
+  }
+  for (const subquestion of subquestions) {
+    if (subquestion.processAuditSummary) {
+      subquestion.processAuditSummary.reviewRequired = subquestion.decisions.filter((item) => item.requiresReview).length;
+    }
+  }
+  if (input.operationId) {
+    logEvent(input.operationId, "scoring", "unreadable_review_threshold", unreadableReviewTriggered
+      ? `无法辨认影响 ${unreadableAffectedScore} 分，已达到 ${unreadableScoreThreshold} 分人工复核阈值`
+      : `无法辨认影响 ${unreadableAffectedScore} 分，未达到 ${unreadableScoreThreshold} 分人工复核阈值`, {
+      unreadableAffectedScore,
+      unreadableScoreThreshold,
+      unreadableReviewTriggered,
+      affectedPointIds: unreadableAffectedDecisions.map((item) => `${item.subquestionId}:${item.decision.pointId}`)
+    }, unreadableReviewTriggered ? "warning" : "success");
+  }
+
   const allDecisions = subquestions.flatMap((item) => item.decisions);
   const expectedDecisionCount = input.rubric.subquestions.reduce((sum, item) => sum + item.scorePoints.length, 0);
   const executedDecisions = allDecisions.filter((item) => item.decisionSource !== "synthetic_missing");
   const traceable = executedDecisions.filter((item) => {
+    if (input.evidenceValidationMode === "direct_visual") {
+      return directVisualEvidenceLineIds(input.evidence, item.evidenceLineIds).length > 0;
+    }
     const evidenceCheck = inspectEvidenceLineIds(input.evidence, item.evidenceLineIds);
     return evidenceCheck.validLineIds.length > 0
       && evidenceCheck.missingLineIds.length === 0
       && evidenceCheck.crossedOutLineIds.length === 0
-      && evidenceCheck.uncertainLineIds.length === 0;
+      && evidenceCheck.uncertainLineIds.length === 0
+      && evidenceCheck.lowConfidenceLineIds.length === 0;
   }).length;
   const automatic = executedDecisions.filter((item) => {
     const evidenceCheck = inspectEvidenceLineIds(input.evidence, item.evidenceLineIds);
+    const evidenceSupportsStatus = item.status === "not_present"
+      || (input.evidenceValidationMode === "direct_visual"
+        ? directVisualEvidenceLineIds(input.evidence, item.evidenceLineIds).length > 0
+        : evidenceCheck.validLineIds.length > 0
+          && evidenceCheck.missingLineIds.length === 0
+          && evidenceCheck.crossedOutLineIds.length === 0
+          && evidenceCheck.uncertainLineIds.length === 0
+          && evidenceCheck.lowConfidenceLineIds.length === 0);
     return item.decisionSource === "model"
       && !item.requiresReview
+      && item.status !== "unreadable"
+      && item.status !== "insufficient_evidence"
       && item.confidence >= AUTO_CONFIDENCE_THRESHOLD
-      && evidenceCheck.validLineIds.length > 0
-      && evidenceCheck.missingLineIds.length === 0
-      && evidenceCheck.crossedOutLineIds.length === 0
-      && evidenceCheck.uncertainLineIds.length === 0;
+      && evidenceSupportsStatus;
   }).length;
   const ambiguousLineIds = new Set([
     ...input.evidence.lines.filter((line) => line.status === "uncertain").map((line) => line.id),
@@ -663,7 +692,7 @@ export function calculateGrade(input: {
       .map((item) => item.lineId as string)
   ]);
   const score = subquestions.reduce((sum, item) => sum + item.score, 0);
-  const maximumPossibleScore = subquestions.reduce((sum, item) => sum + (item.maximumPossibleScore ?? item.score), 0);
+  const maximumPossibleScore = score;
 
   return {
     id: input.id,
@@ -684,9 +713,15 @@ export function calculateGrade(input: {
       durationMs: input.durationMs
     },
     modelName: input.modelName,
+    gradingMode: input.gradingMode,
     rubricVersion: input.rubric.version,
     gradingEngineVersion: GRADING_ENGINE_VERSION,
     teacherJudgementVersion: input.teacherJudgementVersion ?? TEACHER_JUDGEMENT_VERSION,
+    reviewPolicy: {
+      unreadableScoreThreshold,
+      unreadableAffectedScore,
+      unreadableReviewTriggered
+    },
     previousResultId: input.previousResultId,
     regradedAt: input.regradedAt,
     regradeReason: input.regradeReason

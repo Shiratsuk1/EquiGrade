@@ -8,6 +8,8 @@ import type {
   Rubric,
   SavedAsset
 } from "../shared/types.js";
+import { demoQuestion, demoReference, demoRubric } from "./demoData.js";
+import { pipelineFixtureQuestion, pipelineFixtureReference, pipelineFixtureRubric } from "./pipelineFixtureData.js";
 import { logEvent } from "./systemLog.js";
 
 interface StoredAsset extends SavedAsset {
@@ -22,6 +24,7 @@ interface StoredTemplate {
   id: string;
   title: string;
   totalScore: number;
+  builtIn?: boolean;
   createdAt: string;
   updatedAt: string;
   questionText: string;
@@ -36,10 +39,14 @@ interface HistoryDatabase {
   templates: StoredTemplate[];
 }
 
-const dataDirectory = path.resolve(".data");
+const dataDirectory = process.env.APP_DATA_DIR
+  ? path.resolve(process.env.APP_DATA_DIR)
+  : path.resolve(".data");
 const assetsDirectory = path.join(dataDirectory, "history-assets");
 const databasePath = path.join(dataDirectory, "history.json");
 let mutationQueue: Promise<unknown> = Promise.resolve();
+
+export const PIPELINE_FIXTURE_TEMPLATE_ID = "00000000-0000-4000-8000-000000000001";
 
 export function normalizeUploadedFileName(value: string): string {
   const bytes = Array.from(value, (character) => character.charCodeAt(0));
@@ -97,12 +104,100 @@ function toSummary(template: StoredTemplate): GradingTemplateSummary {
     id: template.id,
     title: template.title,
     totalScore: template.totalScore,
+    builtIn: Boolean(template.builtIn),
     createdAt: template.createdAt,
     updatedAt: template.updatedAt,
     gradingCount: countCurrentGradingResults(template.records.map((record) => record.result)),
     questionImageCount: template.questionImages.length,
     referenceImageCount: template.referenceImages.length
   };
+}
+
+function removeInvalidUnitClaim(value: string): string {
+  return value.replace(/(?:，|,)?\s*且未(?:标注|写)单位(?=[。；,，]|$)/g, "");
+}
+
+function migratePipelineFixtureResult(result: GradingResult): GradingResult {
+  const subquestions = result.subquestions.map((subquestion) => {
+    const score = Math.max(0, Math.min(
+      subquestion.maxScore,
+      subquestion.decisions.reduce((sum, decision) => sum + decision.awardedScore, 0)
+    ));
+    return {
+      ...subquestion,
+      score,
+      maximumPossibleScore: score,
+      finalAnswerReason: subquestion.finalAnswerReason
+        ? removeInvalidUnitClaim(subquestion.finalAnswerReason)
+        : subquestion.finalAnswerReason,
+      deductions: [],
+      auditDeductions: []
+    };
+  });
+  const score = subquestions.reduce((sum, subquestion) => sum + subquestion.score, 0);
+  const teacherCommentary = result.teacherCommentary
+    ? {
+        ...result.teacherCommentary,
+        overallComment: removeInvalidUnitClaim(result.teacherCommentary.overallComment),
+        strengths: result.teacherCommentary.strengths.map(removeInvalidUnitClaim),
+        lostPoints: result.teacherCommentary.lostPoints.map((item) => ({
+          ...item,
+          reason: removeInvalidUnitClaim(item.reason)
+        })),
+        auditConcerns: result.teacherCommentary.auditConcerns.map((item) => ({
+          ...item,
+          reason: removeInvalidUnitClaim(item.reason)
+        })),
+        reviewItems: result.teacherCommentary.reviewItems.map(removeInvalidUnitClaim)
+      }
+    : result.teacherCommentary;
+  return {
+    ...result,
+    score,
+    maximumPossibleScore: score,
+    rubricVersion: demoRubric.version,
+    reviewReasons: result.reviewReasons.map(removeInvalidUnitClaim),
+    subquestions,
+    teacherCommentary
+  };
+}
+
+export async function ensurePipelineFixtureTemplate(): Promise<GradingTemplateSummary> {
+  return mutate(async () => {
+    const database = await readDatabase();
+    const existing = database.templates.find((item) => item.id === PIPELINE_FIXTURE_TEMPLATE_ID);
+    if (existing) {
+      if (!existing.builtIn || existing.rubric.version >= pipelineFixtureRubric.version) return toSummary(existing);
+      existing.title = "网页自动改卷测试 · 竖直圆轨道";
+      existing.totalScore = pipelineFixtureRubric.totalScore;
+      existing.questionText = pipelineFixtureQuestion;
+      existing.referenceText = pipelineFixtureReference;
+      existing.rubric = JSON.parse(JSON.stringify({ ...pipelineFixtureRubric, status: "locked" })) as Rubric;
+      existing.records = [];
+      existing.updatedAt = new Date().toISOString();
+      await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
+      return toSummary(existing);
+    }
+
+    const now = new Date().toISOString();
+    const template: StoredTemplate = {
+      id: PIPELINE_FIXTURE_TEMPLATE_ID,
+      title: "网页自动改卷测试 · 竖直圆轨道",
+      totalScore: pipelineFixtureRubric.totalScore,
+      builtIn: true,
+      createdAt: now,
+      updatedAt: now,
+      questionText: pipelineFixtureQuestion,
+      referenceText: pipelineFixtureReference,
+      rubric: JSON.parse(JSON.stringify({ ...pipelineFixtureRubric, status: "locked" })) as Rubric,
+      questionImages: [],
+      referenceImages: [],
+      records: []
+    };
+    database.templates.push(template);
+    await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
+    return toSummary(template);
+  });
 }
 
 function publicAsset(asset: StoredAsset): SavedAsset {
@@ -128,6 +223,7 @@ export async function saveTemplate(input: {
       id,
       title: input.rubric.title,
       totalScore: input.rubric.totalScore,
+      builtIn: false,
       createdAt: now,
       updatedAt: now,
       questionText: input.questionText,
@@ -179,6 +275,10 @@ export async function saveGradingRecord(input: {
 
 export async function getRegradeContext(templateId: string, resultId: string): Promise<{
   rubric: Rubric;
+  questionText: string;
+  referenceText: string;
+  questionImages: Array<{ fileName: string; mimeType: string; buffer: Buffer }>;
+  referenceImages: Array<{ fileName: string; mimeType: string; buffer: Buffer }>;
   studentId: string;
   fileName: string;
   mimeType: string;
@@ -189,13 +289,46 @@ export async function getRegradeContext(templateId: string, resultId: string): P
   const template = database.templates.find((item) => item.id === templateId);
   const record = template?.records.find((item) => item.result.id === resultId);
   if (!template || !record) return null;
+  const loadTemplateImage = async (asset: StoredAsset) => ({
+    fileName: normalizeUploadedFileName(asset.fileName),
+    mimeType: asset.mimeType,
+    buffer: await readFile(path.join(assetsDirectory, template.id, asset.diskName))
+  });
   return {
     rubric: template.rubric,
+    questionText: template.questionText,
+    referenceText: template.referenceText,
+    questionImages: await Promise.all(template.questionImages.map(loadTemplateImage)),
+    referenceImages: await Promise.all(template.referenceImages.map(loadTemplateImage)),
     studentId: record.result.studentId,
     fileName: normalizeUploadedFileName(record.answerImage.fileName),
     mimeType: record.answerImage.mimeType,
     imageBuffer: await readFile(path.join(assetsDirectory, template.id, record.answerImage.diskName)),
     previousResultId: record.result.id
+  };
+}
+
+export async function getTemplateGradingContext(templateId: string): Promise<{
+  rubric: Rubric;
+  questionText: string;
+  referenceText: string;
+  questionImages: Array<{ fileName: string; mimeType: string; buffer: Buffer }>;
+  referenceImages: Array<{ fileName: string; mimeType: string; buffer: Buffer }>;
+} | null> {
+  const database = await readDatabase();
+  const template = database.templates.find((item) => item.id === templateId);
+  if (!template) return null;
+  const loadImage = async (asset: StoredAsset) => ({
+    fileName: normalizeUploadedFileName(asset.fileName),
+    mimeType: asset.mimeType,
+    buffer: await readFile(path.join(assetsDirectory, template.id, asset.diskName))
+  });
+  return {
+    rubric: template.rubric,
+    questionText: template.questionText,
+    referenceText: template.referenceText,
+    questionImages: await Promise.all(template.questionImages.map(loadImage)),
+    referenceImages: await Promise.all(template.referenceImages.map(loadImage))
   };
 }
 

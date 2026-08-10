@@ -1,7 +1,16 @@
-export type DecisionStatus = "satisfied" | "not_satisfied" | "insufficient_evidence" | "not_required";
+export type DecisionStatus = "satisfied" | "not_satisfied" | "not_present" | "unreadable" | "insufficient_evidence" | "not_required";
 export type FinalAnswerStatus = "correct" | "incorrect" | "missing" | "uncertain";
-export type ScoringDisposition = "awarded" | "not_awarded" | "not_deducted_by_final_answer" | "uncertain_no_deduction";
+export type ScoringDisposition = "awarded" | "not_awarded" | "not_deducted_by_final_answer" | "not_deducted_by_score_floor" | "uncertain_no_deduction";
 export type DecisionSource = "model" | "normalized_uncertain" | "synthetic_missing";
+
+export const DEFAULT_UNREADABLE_REVIEW_THRESHOLD = 2;
+export const DEFAULT_MODEL_TIMEOUT_MS = 300_000;
+export const TEACHER_REASONING_EFFORTS = ["disabled", "low", "medium", "high"] as const;
+export type TeacherReasoningEffort = typeof TEACHER_REASONING_EFFORTS[number];
+export const DEFAULT_TEACHER_REASONING_EFFORT: TeacherReasoningEffort = "disabled";
+export const GRADING_MODES = ["vision_direct", "evidence_pipeline"] as const;
+export type GradingMode = typeof GRADING_MODES[number];
+export const DEFAULT_GRADING_MODE: GradingMode = "vision_direct";
 
 export interface FinalAnswerRule {
   expression: string;
@@ -149,6 +158,8 @@ export interface ProcessAuditSummary {
   satisfied: number;
   notSatisfied: number;
   uncertain: number;
+  notPresent?: number;
+  unreadable?: number;
   reviewRequired: number;
 }
 
@@ -192,9 +203,15 @@ export interface GradingResult {
     durationMs: number;
   };
   modelName: string;
+  gradingMode?: GradingMode;
   rubricVersion: number;
   gradingEngineVersion?: string;
   teacherJudgementVersion?: string;
+  reviewPolicy?: {
+    unreadableScoreThreshold: number;
+    unreadableAffectedScore: number;
+    unreadableReviewTriggered: boolean;
+  };
   teacherCommentary?: TeacherCommentary;
   previousResultId?: string;
   regradedAt?: string;
@@ -211,6 +228,9 @@ export interface ModelConfigInput {
   maxRetries: number;
   maxConcurrency: number;
   maxOutputTokens: number;
+  unreadableReviewThreshold: number;
+  gradingMode?: GradingMode;
+  teacherReasoningEffort?: TeacherReasoningEffort;
   supportsJsonSchema: boolean;
   supportsJsonObject: boolean;
   supportsBase64Images: boolean;
@@ -226,6 +246,38 @@ export interface PublicModelConfig extends Omit<ModelConfigInput, "apiKey"> {
 
 export type SystemLogLevel = "info" | "warning" | "error" | "success";
 export type SystemLogStatus = "started" | "progress" | "completed" | "failed";
+
+export interface ModelCallLogDetails extends Record<string, unknown> {
+  kind: "model_call";
+  model: string;
+  configuration?: {
+    name: string;
+    baseUrl: string;
+  };
+  schemaName: string;
+  outputMode: string;
+  attempt: number;
+  maxAttempts: number;
+  durationMs?: number;
+  request: {
+    systemPrompt: string;
+    userPrompt: string;
+    images: Array<{
+      label?: string;
+      mimeType: string;
+      bytes: number;
+      sha256: string;
+    }>;
+    responseFormat?: Record<string, unknown>;
+    reasoningEffort?: Exclude<TeacherReasoningEffort, "disabled">;
+  };
+  response?: {
+    status: number;
+    raw: string;
+    content?: string;
+  };
+  error?: string;
+}
 
 export interface SystemLogEntry {
   id: string;
@@ -266,6 +318,7 @@ export interface GradingTemplateSummary {
   id: string;
   title: string;
   totalScore: number;
+  builtIn?: boolean;
   createdAt: string;
   updatedAt: string;
   gradingCount: number;
@@ -287,4 +340,21 @@ export interface GradingHistoryRecord {
   createdAt: string;
   answerImage: SavedAsset;
   result: GradingResult;
+}
+
+export interface LocalPipelineAnswer {
+  id: string;
+  studentId: string;
+  fileName: string;
+  mimeType: string;
+  url: string;
+}
+
+export interface LocalPipelineTask {
+  id: string;
+  templateId: string;
+  templateTitle: string;
+  totalScore: number;
+  createdAt: string;
+  answers: LocalPipelineAnswer[];
 }

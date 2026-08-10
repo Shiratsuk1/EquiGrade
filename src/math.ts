@@ -156,8 +156,12 @@ export function normalizeLatex(value: string): string {
   // Convert parenthesized and simple atom fractions to real LaTeX fractions.
   formula = formula.replace(/\(([^()\n]+)\)\s*\/\s*\(([^()\n]+)\)/g, "\\frac{$1}{$2}");
   formula = formula.replace(/(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/g, "\\frac{$1}{$2}");
-  const compoundNumerator = String.raw`[A-Za-z](?:[A-Za-z0-9_{}^]*[A-Za-z0-9])?`;
-  const compoundPattern = new RegExp(`(${compoundNumerator})\\s*/\\s*(${compoundNumerator}|\\d+(?:\\.\\d+)?)`, "g");
+  // Keep the match inside the current mathematical atom. The previous broad
+  // pattern could start at the `s` in `\\sqrt{gR/3}` and turn the command
+  // itself into a fraction. A plain identifier is sufficient here; indexed
+  // and powered atoms are handled by the more specific pattern below.
+  const compoundIdentifier = String.raw`[A-Za-z][A-Za-z0-9]*`;
+  const compoundPattern = new RegExp(`(?<![A-Za-z\\\\])(${compoundIdentifier})\\s*/\\s*(${compoundIdentifier}|\\d+(?:\\.\\d+)?)`, "g");
   formula = formula.replace(compoundPattern, "\\frac{$1}{$2}");
   const fractionSymbol = String.raw`(?:[A-Za-z](?:_\{[^{}]+\}|_[A-Za-z0-9]+|\^\{[^{}]+\}|\^[A-Za-z0-9]+)?|[A-Za-z0-9]+|\d+(?:\.\d+)?)`;
   const fractionAtom = String.raw`(?:\\sqrt\{[^{}]+\}|${fractionSymbol})`;

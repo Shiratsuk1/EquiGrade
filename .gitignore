@@ -1,7 +1,14 @@
 node_modules/
 dist/
+dist-electron/
+dist-server/
+release/
+release2/
 .data/
 .env
+.env.*
+!.env.example
 coverage/
 *.log
 *.tsbuildinfo
+tmp/
