@@ -217,12 +217,30 @@ export class EmbeddedBrowserSession {
 
     const contents = this.view.webContents;
     const publish = () => this.publishState();
-    contents.on("did-start-loading", publish);
+    const resetPluginForNavigation = () => {
+      this.updatePlugin({
+        phase: "preflight",
+        message: "正在重新检查阅卷页面",
+        pageKey: undefined,
+        capabilities: { ...EMPTY_PLUGIN_STATUS.capabilities }
+      });
+    };
+    contents.on("did-start-loading", resetPluginForNavigation);
     contents.on("did-stop-loading", publish);
-    contents.on("did-navigate", publish);
-    contents.on("did-navigate-in-page", publish);
-    contents.on("did-navigate", (_event, url) => this.rememberTargetUrl(url));
-    contents.on("did-navigate-in-page", (_event, url) => this.rememberTargetUrl(url));
+    contents.on("did-navigate", (_event, url) => {
+      resetPluginForNavigation();
+      this.rememberTargetUrl(url);
+      publish();
+    });
+    contents.on("did-navigate-in-page", (_event, url) => {
+      resetPluginForNavigation();
+      this.rememberTargetUrl(url);
+      publish();
+      contents.send("pipeline:page-invalidated");
+      setTimeout(() => {
+        if (!contents.isDestroyed()) contents.send("pipeline:page-ready");
+      }, 120);
+    });
     contents.on("did-stop-loading", () => this.scheduleStorageFlush(700));
     contents.on("did-navigate", () => this.scheduleStorageFlush(700));
     contents.on("page-title-updated", publish);

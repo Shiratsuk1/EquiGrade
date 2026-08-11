@@ -304,6 +304,8 @@ export function createZhixueAdapter(): SiteAdapter {
       const total = doc ? totalScoreInput(doc) : null;
       const submit = doc?.querySelector<HTMLElement>("#bnt_save") ?? null;
       const next = doc?.querySelector<HTMLElement>("a[title='下一份']") ?? null;
+      const pageKey = doc ? pageFingerprint(doc) : undefined;
+      const completed = Boolean(doc && batchComplete(doc));
       const capabilities = {
         answerImage: Boolean(image),
         scoreInput: Boolean(total),
@@ -312,16 +314,17 @@ export function createZhixueAdapter(): SiteAdapter {
       };
       const issues: string[] = [];
       if (!doc) issues.push("未找到智学网阅卷子页面");
+      if (!pageKey && !completed) issues.push("无法生成智学网当前答卷的稳定页面标识");
       if (!capabilities.answerImage) issues.push("未找到智学网学生作答原图");
       if (!capabilities.scoreInput) issues.push(`未找到唯一的智学网最终总分框；${doc ? scoreInputDiagnostics(doc) : "阅卷子页面不可用"}`);
-      if (!capabilities.submit && !(doc && batchComplete(doc))) issues.push("未找到智学网提交分数按钮");
-      if (!capabilities.next && !(doc && batchComplete(doc))) issues.push("未找到智学网下一份控件");
+      if (!capabilities.submit && !completed) issues.push("未找到智学网提交分数按钮");
+      if (!capabilities.next && !completed) issues.push("未找到智学网下一份控件");
       if (doc && autoSubmitState(doc) === true) issues.push("智学网自动提交已开启，请先关闭");
       return {
         ok: issues.length === 0,
         issues,
         capabilities,
-        pageKey: doc ? pageFingerprint(doc) : undefined
+        pageKey
       };
     },
     async inspectSetup() {
@@ -359,6 +362,7 @@ export function createZhixueAdapter(): SiteAdapter {
       if (!card || !imageElement) throw new Error("未找到智学网学生作答原图");
       const image = await extractAnswerImage({ card, image: imageElement });
       const sourcePageKey = pageFingerprint(doc);
+      if (!sourcePageKey) throw new Error("无法生成智学网当前答卷的稳定页面标识，已拒绝提取");
       return {
         pageKey: `sha256:${image.sha256}`,
         sourcePageKey,

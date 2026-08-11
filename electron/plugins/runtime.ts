@@ -25,6 +25,13 @@ import {
   failureRequiresPause,
   type PipelineCommitStage
 } from "./pipelineSafety.js";
+import {
+  emptyPluginCapabilities,
+  hasRequiredPluginCapabilities,
+  samePreflightTarget,
+  sanitizePreflightResult,
+  type PreflightTarget
+} from "./preflightSafety.js";
 import type { ExtractedAnswer, ScoreWritePayload, SiteAdapter } from "./types.js";
 
 type GradingResponse = {
@@ -52,7 +59,9 @@ let running = false;
 let pauseRequested = false;
 let stopRequested = false;
 let skipRequested = false;
-let preflightPromise: Promise<boolean> | null = null;
+let pageGeneration = 0;
+let lastObservedUrl = window.location.href;
+let preflightRun: { target: PreflightTarget; promise: Promise<boolean> } | null = null;
 let pluginPreferences: PluginUiPreferences = {
   accent: "teal",
   visible: true,
@@ -94,6 +103,30 @@ const pluginMonoFontStacks: Record<UiMonoFontFamily, string> = {
 function selectAdapter() {
   const currentUrl = new URL(window.location.href);
   return adapters.find((candidate) => candidate.matches(currentUrl)) ?? adapters.at(-1)!;
+}
+
+function invalidatePage(message = "正在重新检查阅卷页面") {
+  pageGeneration += 1;
+  lastObservedUrl = window.location.href;
+  preflightRun = null;
+  adapter = selectAdapter();
+  phase("preflight", message, {
+    adapterId: adapter.manifest.id,
+    adapterName: adapter.manifest.name,
+    adapterVersion: adapter.manifest.version,
+    capabilities: emptyPluginCapabilities(),
+    pageKey: undefined
+  });
+}
+
+function currentPreflightTarget() {
+  const url = window.location.href;
+  if (url !== lastObservedUrl) invalidatePage();
+  return { generation: pageGeneration, url: window.location.href };
+}
+
+function isCurrentPreflight(target: PreflightTarget) {
+  return samePreflightTarget(target, currentPreflightTarget());
 }
 
 function record(event: Record<string, unknown>) {
@@ -204,25 +237,40 @@ function updateWidget() {
   widget.querySelector("[data-hz-state]")!.textContent = statusLabel(status.phase);
   widget.querySelector("[data-hz-message]")!.textContent = status.message;
   widget.querySelector("[data-hz-score]")!.textContent = status.lastScore === undefined ? "-- / --" : `${status.lastScore} / ${status.maxScore ?? "--"}`;
-  widget.querySelector<HTMLButtonElement>("[data-hz-start]")!.disabled = running;
+  widget.querySelector<HTMLButtonElement>("[data-hz-start]")!.disabled = running
+    || status.phase !== "ready"
+    || !hasRequiredPluginCapabilities(status.capabilities);
   widget.querySelector<HTMLButtonElement>("[data-hz-pause]")!.disabled = !running;
 }
 
 async function runPreflight() {
-  if (preflightPromise) return preflightPromise;
-  preflightPromise = (async () => {
-    adapter = selectAdapter();
-    phase("preflight", "正在检查答卷图片、评分框和翻页控件");
+  const target = currentPreflightTarget();
+  if (preflightRun && samePreflightTarget(preflightRun.target, target)) return preflightRun.promise;
+
+  const candidateAdapter = selectAdapter();
+  adapter = candidateAdapter;
+  const promise = (async () => {
+    phase("preflight", "正在检查答卷图片、评分框和翻页控件", {
+      adapterId: candidateAdapter.manifest.id,
+      adapterName: candidateAdapter.manifest.name,
+      adapterVersion: candidateAdapter.manifest.version,
+      capabilities: emptyPluginCapabilities(),
+      pageKey: undefined
+    });
     const deadline = Date.now() + 12_000;
-    let result = await adapter.preflight();
-    while (!result.ok && Date.now() < deadline) {
+    let rawResult = await candidateAdapter.preflight();
+    while (!rawResult.ok && Date.now() < deadline) {
+      if (!isCurrentPreflight(target)) return false;
       await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
-      result = await adapter.preflight();
+      rawResult = await candidateAdapter.preflight();
     }
+    if (!isCurrentPreflight(target)) return false;
+
+    const result = sanitizePreflightResult(rawResult, candidateAdapter.isBatchComplete());
     publish({
-      adapterId: adapter.manifest.id,
-      adapterName: adapter.manifest.name,
-      adapterVersion: adapter.manifest.version,
+      adapterId: candidateAdapter.manifest.id,
+      adapterName: candidateAdapter.manifest.name,
+      adapterVersion: candidateAdapter.manifest.version,
       capabilities: result.capabilities,
       pageKey: result.pageKey
     });
@@ -235,10 +283,12 @@ async function runPreflight() {
     record({ type: "plugin_preflight_completed", capabilities: result.capabilities, pageKey: result.pageKey });
     return true;
   })();
+  const currentRun = { target, promise };
+  preflightRun = currentRun;
   try {
-    return await preflightPromise;
+    return await promise;
   } finally {
-    preflightPromise = null;
+    if (preflightRun === currentRun) preflightRun = null;
   }
 }
 
@@ -441,7 +491,15 @@ async function runPipeline() {
 async function inspectSetup() {
   if (running) throw new Error("流水线运行中，无法重新检查任务配置");
   adapter = selectAdapter();
-  return adapter.inspectSetup();
+  const preflightOk = await runPreflight();
+  const inspection = await adapter.inspectSetup();
+  if (preflightOk) return inspection;
+  return {
+    ...inspection,
+    ok: false,
+    pageKey: undefined,
+    capabilities: emptyPluginCapabilities()
+  };
 }
 
 async function runDryRun(options: PipelineDryRunOptions): Promise<PipelineDryRunResult> {
@@ -505,6 +563,7 @@ async function runDryRun(options: PipelineDryRunOptions): Promise<PipelineDryRun
 async function runPluginDiagnostic(request: PluginDiagnosticRequest): Promise<PluginDiagnosticTargetResult> {
   if (running) throw new Error("流水线运行中，无法执行插件行为测试");
   adapter = selectAdapter();
+  if (!(await runPreflight())) throw new Error(status.message || "目标页面检查未通过");
   switch (request.action) {
     case "extract-image": {
       phase("extracting", "诊断：正在提取当前学生答卷图像");
@@ -549,6 +608,7 @@ async function runPluginDiagnostic(request: PluginDiagnosticRequest): Promise<Pl
       const label = direction === "previous" ? "上一份" : "下一份";
       phase("navigating_next", `诊断：正在进入${label}`);
       const result = await adapter.navigateForDiagnostic(direction);
+      if (!(await runPreflight())) throw new Error(status.message || "进入下一份后页面检查未通过");
       const message = `插件已控制网页进入${label}；没有填写或提交分数`;
       phase("ready", message, { pageKey: result.pageKey });
       record({ type: "plugin_diagnostic_page_changed", direction, previousPageKey: result.previousPageKey, pageKey: result.pageKey });
@@ -577,6 +637,7 @@ async function handlePluginRequest(request: PluginRequest) {
 }
 
 async function skipWhenIdle() {
+  if (!(await runPreflight())) return;
   const pageKey = adapter.currentPageKey() ?? "unknown";
   try {
     await adapter.goToNext();
@@ -642,7 +703,11 @@ export function bootPluginRuntime() {
       ipcRenderer.send("plugin:response", response);
     })();
   });
+  ipcRenderer.on("pipeline:page-invalidated", () => {
+    invalidatePage();
+  });
   ipcRenderer.on("pipeline:page-ready", () => {
+    invalidatePage();
     if (!running) void runPreflight();
   });
   window.addEventListener("DOMContentLoaded", () => {
