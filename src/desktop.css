@@ -91,6 +91,9 @@ body.electron-host { margin: 0; overflow: hidden; background: var(--prism-window
 .desktop-shell[data-font-size="comfortable"] { --desktop-fs-micro: calc(10px * var(--desktop-font-scale)); --desktop-fs-small: calc(11px * var(--desktop-font-scale)); --desktop-fs-body: calc(12px * var(--desktop-font-scale)); --desktop-fs-control: calc(12px * var(--desktop-font-scale)); --desktop-fs-section: calc(16px * var(--desktop-font-scale)); --desktop-fs-title: calc(24px * var(--desktop-font-scale)); }
 .desktop-shell[data-font-size="large"] { --desktop-fs-micro: calc(11px * var(--desktop-font-scale)); --desktop-fs-small: calc(12px * var(--desktop-font-scale)); --desktop-fs-body: calc(13px * var(--desktop-font-scale)); --desktop-fs-control: calc(13px * var(--desktop-font-scale)); --desktop-fs-section: calc(18px * var(--desktop-font-scale)); --desktop-fs-title: calc(27px * var(--desktop-font-scale)); }
 .desktop-shell[data-accent="blue"] { --desktop-green: #397fe8; --desktop-green-hover: #2868c9; --desktop-green-soft: #edf4ff; --desktop-accent-ring: rgba(57,127,232,.14); }
+.desktop-shell[data-accent="blue"] { --desktop-sidebar-text: #284d80; --desktop-sidebar-icon: #628dc7; --desktop-sidebar-soft: #dce9fb; }
+.desktop-shell[data-accent="green"] { --desktop-sidebar-text: #1f6b4e; --desktop-sidebar-icon: #4d9c7d; --desktop-sidebar-soft: #d8efe5; }
+.desktop-shell[data-accent="graphite"] { --desktop-sidebar-text: #44565f; --desktop-sidebar-icon: #75858e; --desktop-sidebar-soft: #e1e8eb; }
 .desktop-shell[data-accent="green"] { --desktop-green: #2d8b68; --desktop-green-hover: #237255; --desktop-green-soft: #eaf6f0; --desktop-accent-ring: rgba(45,139,104,.14); }
 .desktop-shell[data-accent="graphite"] { --desktop-green: #4f6572; --desktop-green-hover: #394d59; --desktop-green-soft: #edf2f4; --desktop-accent-ring: rgba(79,101,114,.14); }
 .desktop-shell[data-density="compact"] .desktop-page-body { padding-top: 14px; padding-bottom: 22px; }
@@ -107,17 +110,17 @@ body.electron-host { margin: 0; overflow: hidden; background: var(--prism-window
 .desktop-brand strong { font-size: 17px; font-weight: 650; }
 .desktop-brand small { margin-top: 1px; color: var(--desktop-subtle); font-size: 9px; font-weight: 500; }
 .desktop-sidebar nav { display: flex; flex-direction: column; min-height: 0; margin-top: 11px; overflow-y: auto; scrollbar-width: thin; }
-.desktop-nav-group { margin: 16px 10px 6px; color: #a0aab3; font-size: 9px; font-weight: 600; }
+.desktop-nav-group { margin: 16px 10px 6px; color: var(--desktop-sidebar-soft, #a0aab3); font-size: 9px; font-weight: 600; }
 .desktop-nav-group:first-child { margin-top: 4px; }
-.desktop-nav-link { position: relative; display: flex; align-items: center; gap: 10px; min-height: 39px; padding: 0 10px; border-radius: 5px; color: #5e6974; font-size: 12px; font-weight: 500; text-decoration: none; }
-.desktop-nav-link svg { flex: 0 0 auto; color: #8a96a1; }
+.desktop-nav-link { position: relative; display: flex; align-items: center; gap: 10px; min-height: 39px; padding: 0 10px; border-radius: 5px; color: var(--desktop-sidebar-text, #5e6974); font-size: 12px; font-weight: 500; text-decoration: none; }
+.desktop-nav-link svg { flex: 0 0 auto; color: var(--desktop-sidebar-icon, #8a96a1); }
 .desktop-nav-link:hover { background: #f2f7f8; color: var(--desktop-ink); }
-.desktop-nav-link.active { background: var(--desktop-green-soft); color: #0b8580; font-weight: 600; }
+.desktop-nav-link.active { background: var(--desktop-sidebar-soft, var(--desktop-green-soft)); color: var(--desktop-green-hover); font-weight: 600; }
 .desktop-nav-link.active svg { color: var(--desktop-green); }
 .desktop-nav-link.active i { display: none; }
 .desktop-sidebar-status { display: grid; grid-template-columns: 9px minmax(0, 1fr); align-items: start; gap: 9px; margin-top: auto; padding: 13px 9px 2px; border-top: 1px solid #edf1f3; }
 .desktop-sidebar-status strong, .desktop-sidebar-status small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.desktop-sidebar-status strong { color: #46515b; font-size: 10px; }
+.desktop-sidebar-status strong { color: var(--desktop-sidebar-text, #46515b); font-size: 10px; }
 .desktop-sidebar-status small { margin-top: 3px; color: var(--desktop-subtle); font-size: 9px; }
 .desktop-live-dot { display: inline-block; flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: #7b8781; box-shadow: 0 0 0 3px rgba(123,135,129,.12); }
 .desktop-sidebar-status .desktop-live-dot { margin-top: 3px; }
