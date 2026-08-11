@@ -4,7 +4,7 @@ dist-electron/
 dist-server/
 release/
 release2/
-release-v*/
+release-v*/win-unpacked/
 .data/
 .env
 .env.*
