@@ -11,8 +11,7 @@ function query<T extends Element>(selector: string, scope: ParentNode = document
 
 function pageElements(selectors: AdapterSelectors) {
   const card = query<HTMLElement>(selectors.answerCard);
-  const scope: ParentNode = card ?? document;
-  const image = query<HTMLImageElement>(selectors.answerImage, scope) ?? query<HTMLImageElement>(selectors.answerImage);
+  const image = card ? query<HTMLImageElement>(selectors.answerImage, card) : null;
   const scoreInput = query<HTMLInputElement>(selectors.scoreInput);
   const submit = query<HTMLElement>(selectors.submitButton);
   const next = query<HTMLElement>(selectors.nextButton);
@@ -65,6 +64,7 @@ export function createGenericAdapter(manifest: AdapterManifest, selectors: Adapt
     matches: (url) => manifestMatches(manifest, url),
     async preflight() {
       const elements = pageElements(selectors);
+      const pageKey = elements.card?.dataset.pageKey?.trim() || undefined;
       const capabilities = {
         answerImage: Boolean(elements.image || elements.card?.querySelector("canvas")),
         scoreInput: Boolean(elements.scoreInput),
@@ -73,6 +73,7 @@ export function createGenericAdapter(manifest: AdapterManifest, selectors: Adapt
       };
       const issues: string[] = [];
       if (!elements.card) issues.push("未找到当前答卷容器");
+      if (!pageKey) issues.push("当前答卷缺少稳定页面标识");
       if (!capabilities.answerImage) issues.push("未找到学生答卷图片或画布");
       if (!capabilities.scoreInput) issues.push("未找到分数输入框");
       if (!capabilities.submit) issues.push("未找到提交按钮");
@@ -81,7 +82,7 @@ export function createGenericAdapter(manifest: AdapterManifest, selectors: Adapt
         ok: issues.length === 0,
         issues,
         capabilities,
-        pageKey: elements.card?.dataset.pageKey
+        pageKey
       };
     },
     async inspectSetup() {
@@ -110,8 +111,9 @@ export function createGenericAdapter(manifest: AdapterManifest, selectors: Adapt
       const elements = pageElements(selectors);
       if (!elements.card) throw new Error("未找到当前答卷容器");
       if (!elements.image && !elements.card.querySelector("canvas")) throw new Error("未找到可提取的学生作答图片");
+      const sourcePageKey = elements.card.dataset.pageKey?.trim() || undefined;
+      if (!sourcePageKey) throw new Error("当前答卷缺少稳定页面标识，已拒绝提取");
       const image = await extractAnswerImage({ card: elements.card, image: elements.image });
-      const sourcePageKey = elements.card.dataset.pageKey || undefined;
       return {
         pageKey: `sha256:${image.sha256}`,
         sourcePageKey,

@@ -347,6 +347,13 @@ function phaseLabel(phase: PluginPhase) {
   return labels[phase];
 }
 
+function hasCompletePluginCapabilities(capabilities: EmbeddedBrowserState["plugin"]["capabilities"]) {
+  return capabilities.answerImage
+    && capabilities.scoreInput
+    && capabilities.submit
+    && capabilities.next;
+}
+
 function formatTime(value: unknown) {
   if (typeof value !== "string") return "--:--:--";
   const date = new Date(value);
@@ -490,12 +497,42 @@ function useTemplateContext() {
     setTemplate(context);
     return context;
   }, []);
+  const enterTest = useCallback(async () => {
+    const host = getHost();
+    if (!host) throw new Error("当前环境无法打开本地测试页面");
+    const context = await host.selectPipelineTask({ mode: "test" });
+    setTemplate(context);
+    return context;
+  }, []);
   useEffect(reload, [reload]);
-  return { template, error, reload, bind };
+  return { template, error, reload, bind, enterTest };
 }
 
-function DashboardPage({ browser, summary, template }: { browser: EmbeddedBrowserState; summary: PipelineSummary; template: TemplateContext | null }) {
-  const readyCount = [template?.locked, browser.plugin.connected, browser.plugin.capabilities.answerImage, browser.plugin.capabilities.scoreInput].filter(Boolean).length;
+function TestEntryButton({ onEnterTest }: { onEnterTest: () => Promise<unknown> }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const enter = async () => {
+    setPending(true);
+    setError("");
+    try {
+      await onEnterTest();
+      pushRoute("/jobs/current?electron=1");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "本地测试页面打开失败");
+    } finally {
+      setPending(false);
+    }
+  };
+  return <div className="desktop-test-entry-actions">
+    <button className="desktop-test-entry-button" disabled={pending} onClick={() => void enter()}>{pending ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}一键进入本地测试</button>
+    <small>自动打开内置模拟阅卷页，无需填写地址或端口</small>
+    {error && <span className="desktop-test-entry-error" role="status">{error}</span>}
+  </div>;
+}
+
+function DashboardPage({ browser, summary, template, onEnterTest }: { browser: EmbeddedBrowserState; summary: PipelineSummary; template: TemplateContext | null; onEnterTest: () => Promise<unknown> }) {
+  const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities);
+  const readyCount = [template?.locked, browser.plugin.connected, pageReady, pageReady].filter(Boolean).length;
   return <div className="desktop-page-body desktop-dashboard">
     <MetricStrip browser={browser} summary={summary} template={template} />
     <section className="desktop-dashboard-grid">
@@ -505,8 +542,8 @@ function DashboardPage({ browser, summary, template }: { browser: EmbeddedBrowse
         <ul className="desktop-check-list">
           <li className={template?.locked ? "ok" : ""}>{template?.locked ? <Check size={15} /> : <XCircle size={15} />}评分标准已确认<span>{template?.title || "尚未选择评分标准"}</span></li>
           <li className={browser.plugin.connected ? "ok" : ""}>{browser.plugin.connected ? <Check size={15} /> : <XCircle size={15} />}智学网页面已连接<span>{browser.plugin.adapterName || "等待打开阅卷页面"}</span></li>
-          <li className={browser.plugin.capabilities.answerImage ? "ok" : ""}>{browser.plugin.capabilities.answerImage ? <Check size={15} /> : <XCircle size={15} />}学生答卷可以读取<span>将当前答卷图像用于批改</span></li>
-          <li className={browser.plugin.capabilities.scoreInput ? "ok" : ""}>{browser.plugin.capabilities.scoreInput ? <Check size={15} /> : <XCircle size={15} />}最终总分框可以使用<span>提交后自动进入下一份</span></li>
+          <li className={pageReady ? "ok" : ""}>{pageReady ? <Check size={15} /> : <XCircle size={15} />}学生答卷可以读取<span>{pageReady ? "答卷、评分和翻页控件均已确认" : "需同时确认答卷、评分、提交和翻页控件"}</span></li>
+          <li className={pageReady ? "ok" : ""}>{pageReady ? <Check size={15} /> : <XCircle size={15} />}最终总分框可以使用<span>{pageReady ? "提交后自动进入下一份" : "当前页面尚未通过完整检查"}</span></li>
         </ul>
         <a className="desktop-primary-action" href="/jobs/current?electron=1"><CirclePlay size={16} />查看当前批改<ChevronRight size={15} /></a>
       </div>
@@ -514,6 +551,10 @@ function DashboardPage({ browser, summary, template }: { browser: EmbeddedBrowse
         <div className="desktop-section-heading"><div><span>实时事件</span><h2>最近流水线活动</h2></div><a href="/logs?electron=1">完整日志</a></div>
         <RecentEvents events={summary.events} limit={7} />
       </div>
+    </section>
+    <section className="desktop-section desktop-test-entry">
+      <div><span>无需配置端口</span><h2>先用本地模拟阅卷验证流程</h2><p>一键打开与智学网控件结构一致的测试页面，可直接测试图像读取、写入总分和翻页，不会访问真实网站。</p></div>
+      <TestEntryButton onEnterTest={onEnterTest} />
     </section>
     <section className="desktop-section desktop-current-template">
       <div className="desktop-section-heading"><div><span>当前评分标准</span><h2>{template?.title || "当前任务尚未绑定评分标准"}</h2></div><div className="desktop-heading-actions"><a className="desktop-secondary-action" href="/templates?electron=1"><BookOpenCheck size={14} />{template ? "更换评分标准" : "选择评分标准"}</a><span className={template?.locked ? "desktop-status-label locked" : "desktop-status-label"}><Lock size={13} />{template?.locked ? "已锁定" : "未绑定"}</span></div></div>
@@ -631,9 +672,10 @@ function PipelineControls({ browser, confirmBeforeStart }: { browser: EmbeddedBr
     finally { window.setTimeout(() => setPending(null), 280); }
   };
   const active = ["extracting", "grading", "writing_score", "submitting", "verifying", "navigating_next", "preflight"].includes(browser.plugin.phase);
+  const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities) && browser.plugin.phase === "ready";
   return <div className="desktop-pipeline-controls">
     <div><span className={active ? "desktop-live-dot online pulse" : "desktop-live-dot"} /><div><strong>{phaseLabel(browser.plugin.phase)}</strong><small>{browser.plugin.message}</small></div></div>
-    <button className="primary" disabled={active || pending !== null} onClick={() => void send("start")}>{pending === "start" ? <LoaderCircle className="spin" size={15} /> : <CirclePlay size={15} />}开始批改</button>
+    <button className="primary" disabled={active || pending !== null || !pageReady} onClick={() => void send("start")}>{pending === "start" ? <LoaderCircle className="spin" size={15} /> : <CirclePlay size={15} />}开始批改</button>
     <button title="暂停流水线" disabled={!active || pending !== null} onClick={() => void send("pause")}><CirclePause size={16} /></button>
     <button title="停止流水线" disabled={!active || pending !== null} onClick={() => void send("stop")}><Square size={15} /></button>
     <button title="记录异常并跳过当前答卷" disabled={pending !== null} onClick={() => void send("skip")}><SkipForward size={16} /></button>
@@ -721,7 +763,7 @@ function ActiveJobPage({ browser, summary, template, preferences }: { browser: E
   </div>;
 }
 
-function JobsPage({ template, browser }: { template: TemplateContext | null; browser: EmbeddedBrowserState }) {
+function JobsPage({ template, browser, onEnterTest }: { template: TemplateContext | null; browser: EmbeddedBrowserState; onEnterTest: () => Promise<unknown> }) {
   return <div className="desktop-page-body">
     <section className="desktop-section desktop-job-setup">
       <div className="desktop-section-heading"><div><span>当前任务</span><h2>智学网自动批改</h2></div><span className="desktop-status-label active"><Activity size={13} />可启动</span></div>
@@ -733,7 +775,7 @@ function JobsPage({ template, browser }: { template: TemplateContext | null; bro
         <div><span>执行策略</span><strong>自动写分并翻页</strong><small>异常跳过；连续 3 次失败暂停</small></div>
       </div>
       <div className="desktop-callout"><ShieldCheck size={17} /><div><strong>学生数据与模型配置相互隔离</strong><p>系统只读取当前学生的答卷图像，并将模型给出的最终总分写回智学网；模型密钥始终保存在本机。</p></div></div>
-      <a className="desktop-primary-action inline" href="/jobs/new?electron=1"><CirclePlay size={16} />引导配置新任务<ChevronRight size={15} /></a>
+      <div className="desktop-job-actions"><a className="desktop-primary-action inline" href="/jobs/new?electron=1"><CirclePlay size={16} />引导配置新任务<ChevronRight size={15} /></a><TestEntryButton onEnterTest={onEnterTest} /></div>
     </section>
     <section className="desktop-section">
       <div className="desktop-section-heading"><div><span>批改流程</span><h2>每份答卷将依次完成</h2></div></div>
@@ -801,11 +843,33 @@ function GuidedSetupPage({ browser }: { browser: EmbeddedBrowserState }) {
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "模板详情读取失败"));
   }, [templateId]);
 
+  useEffect(() => {
+    if (!inspection) return;
+    const pageChanged = inspectedUrl !== browser.url
+      || (inspection.pageKey !== undefined
+        && browser.plugin.pageKey !== undefined
+        && inspection.pageKey !== browser.plugin.pageKey);
+    if (!pageChanged) return;
+    setInspection(null);
+    setInspectedUrl("");
+    setDryRun(null);
+    setAllowCompletedBatch(false);
+  }, [browser.plugin.pageKey, browser.url, inspectedUrl, inspection]);
+
   const modelReady = Boolean(model?.configured && model.enabled && model.hasApiKey && model.visionModel && modelTest?.ok);
   const templateReady = Boolean(template?.rubric.status === "locked");
   const inspectionIssues = inspection?.issues ?? [];
   const inspectionAccepted = Boolean(inspection?.ok && (!inspection.batchComplete || allowCompletedBatch));
-  const targetReady = Boolean(inspectionAccepted && inspectedUrl === browser.url && inspection?.autoSubmit !== true);
+  const inspectionMatchesCurrentPage = Boolean(inspection?.pageKey && browser.plugin.pageKey && inspection.pageKey === browser.plugin.pageKey);
+  const pageCapabilitiesReady = hasCompletePluginCapabilities(browser.plugin.capabilities)
+    || Boolean(inspection?.batchComplete && allowCompletedBatch);
+  const targetReady = Boolean(
+    inspectionAccepted
+    && inspectedUrl === browser.url
+    && inspectionMatchesCurrentPage
+    && pageCapabilitiesReady
+    && inspection?.autoSubmit !== true
+  );
   const alignment = useMemo<PipelineScoreAlignment | null>(() => (
     template && inspection ? buildPipelineScoreAlignment(template.rubric, inspection.scoreFields) : null
   ), [inspection, template]);
@@ -1213,6 +1277,14 @@ function BrowserDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
   const [records, setRecords] = useState<Array<{ id: string; ok: boolean; title: string; message: string; detail?: string }>>([]);
   const host = getHost();
   const diagnosticsAvailable = typeof host?.runPluginDiagnostic === "function";
+  useEffect(() => {
+    setInspection(null);
+  }, [browser.url]);
+  useEffect(() => {
+    if (!inspection || inspection.pageKey === undefined) return;
+    if (browser.plugin.pageKey === undefined || inspection.pageKey === browser.plugin.pageKey) return;
+    setInspection(null);
+  }, [browser.plugin.pageKey, inspection]);
   const appendRecord = (record: Omit<(typeof records)[number], "id">) => {
     setRecords((current) => [{ ...record, id: `${Date.now()}-${Math.random()}` }, ...current].slice(0, 8));
   };
@@ -1265,7 +1337,11 @@ function BrowserDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
     }
   };
   const busy = pending !== null;
-  const capabilities = inspection?.capabilities ?? browser.plugin.capabilities;
+  const inspectionMatchesCurrentPage = browser.plugin.phase === "ready"
+    && inspection?.pageKey !== undefined
+    && inspection.pageKey === browser.plugin.pageKey;
+  const capabilities = inspectionMatchesCurrentPage && inspection ? inspection.capabilities : browser.plugin.capabilities;
+  const diagnosticsReady = browser.plugin.phase === "ready" && hasCompletePluginCapabilities(capabilities);
   return <div className="desktop-debug-browser-page"><BrowserToolbar browser={browser} /><div className="desktop-debug-browser-layout"><aside className="desktop-browser-diagnostics">
     <div className="desktop-browser-facts"><div><span>页面标题</span><strong>{browser.title || "--"}</strong></div><div><span>连接安全</span><strong>{browser.security}</strong></div><div><span>加载状态</span><strong>{browser.crashed ? "渲染进程异常" : browser.isLoading ? "正在加载" : "加载完成"}</strong></div><div><span>浏览器引擎</span><strong>Electron {host?.version || "--"}</strong></div><div><span>插件适配器</span><strong>{browser.plugin.adapterId}</strong></div><div><span>页面线索（非学生 ID）</span><strong title="由答卷图像地址和当前题目文字生成，只用于判断网页是否切换">{inspection?.pageKey || browser.plugin.pageKey || "--"}</strong></div></div>
     <p className="desktop-browser-fingerprint-note"><AlertTriangle size={13} /><span><b>zhixue:xxxxxxxx</b> 是网页切换线索，不代表学生身份。提取答卷后系统会改用图像内容的 SHA-256 校验，作为真正的答卷唯一标识。</span></p>
@@ -1273,10 +1349,10 @@ function BrowserDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
       <div className="desktop-plugin-test-heading"><div><span>插件行为测试</span><strong>{inspection?.questionLabel || "当前答卷"}</strong></div><button title="重新检测当前页面" disabled={busy} onClick={() => void inspect()}>{pending === "inspect" ? <LoaderCircle className="spin" size={15} /> : <ListChecks size={15} />}</button></div>
       {!diagnosticsAvailable && <p className="desktop-plugin-test-notice"><AlertTriangle size={14} />主程序组件尚未载入本次更新，重启工作台后可执行下列动作。</p>}
       <div className="desktop-plugin-test-actions">
-        <button disabled={busy || !diagnosticsAvailable || !capabilities.answerImage} onClick={() => void runDiagnostic("extract-image")}><ImageDown size={15} />提取并保存图像</button>
-        <div className="desktop-plugin-page-actions"><button disabled={busy || !diagnosticsAvailable} onClick={() => void runDiagnostic("previous-page")}><ArrowLeft size={15} />上一份</button><button disabled={busy || !diagnosticsAvailable || !capabilities.next} onClick={() => void runDiagnostic("next-page")}>下一份<ArrowRight size={15} /></button></div>
+        <button disabled={busy || !diagnosticsAvailable || !diagnosticsReady} onClick={() => void runDiagnostic("extract-image")}><ImageDown size={15} />提取并保存图像</button>
+        <div className="desktop-plugin-page-actions"><button disabled={busy || !diagnosticsAvailable || !diagnosticsReady} onClick={() => void runDiagnostic("previous-page")}><ArrowLeft size={15} />上一份</button><button disabled={busy || !diagnosticsAvailable || !diagnosticsReady} onClick={() => void runDiagnostic("next-page")}>下一份<ArrowRight size={15} /></button></div>
       </div>
-      <div className="desktop-plugin-score-test"><label><span>测试总分{inspection?.fullScore !== undefined ? `（满分 ${inspection.fullScore}）` : ""}</span><input type="number" min={0} max={inspection?.fullScore} step="0.5" value={score} onChange={(event) => setScore(event.target.value)} placeholder="输入分数" /></label><div><button disabled={busy || !diagnosticsAvailable || !capabilities.scoreInput || !score.trim()} onClick={() => void runDiagnostic("write-score")}>写入</button><button title="清空网页最终总分框" disabled={busy || !diagnosticsAvailable || !capabilities.scoreInput} onClick={() => void runDiagnostic("clear-score")}><XCircle size={14} /></button></div><small>只修改最终总分框，不点击提交。</small></div>
+      <div className="desktop-plugin-score-test"><label><span>测试总分{inspection?.fullScore !== undefined ? `（满分 ${inspection.fullScore}）` : ""}</span><input type="number" min={0} max={inspection?.fullScore} step="0.5" value={score} onChange={(event) => setScore(event.target.value)} placeholder="输入分数" /></label><div><button disabled={busy || !diagnosticsAvailable || !diagnosticsReady || !score.trim()} onClick={() => void runDiagnostic("write-score")}>写入</button><button title="清空网页最终总分框" disabled={busy || !diagnosticsAvailable || !diagnosticsReady} onClick={() => void runDiagnostic("clear-score")}><XCircle size={14} /></button></div><small>只修改最终总分框，不点击提交。</small></div>
       <div className="desktop-plugin-test-log"><span>最近操作</span>{records.length ? records.map((record) => <article className={record.ok ? "ok" : "failed"} key={record.id}><div>{record.ok ? <Check size={13} /> : <XCircle size={13} />}<strong>{record.title}</strong></div><p>{record.message}</p>{record.detail && <code>{record.detail}</code>}</article>) : <p className="empty">尚未执行插件行为测试</p>}</div>
     </section>
     <p className="desktop-browser-session-note">目标站点使用独立持久化会话；诊断图像保存到项目的 <code>tmp/plugin-diagnostics</code> 目录。</p>
@@ -1387,7 +1463,7 @@ function DesktopLoading({ label }: { label: string }) {
   return <div className="desktop-page-body"><div className="desktop-loading"><LoaderCircle className="spin" size={20} /><span>{label}</span></div></div>;
 }
 
-function DesktopPage({ route, browser, summary, template, preferences, onPreferencesChange, onBindTemplate }: {
+function DesktopPage({ route, browser, summary, template, preferences, onPreferencesChange, onBindTemplate, onEnterTest }: {
   route: DesktopRoute;
   browser: EmbeddedBrowserState;
   summary: PipelineSummary;
@@ -1395,10 +1471,11 @@ function DesktopPage({ route, browser, summary, template, preferences, onPrefere
   preferences: DesktopPreferences;
   onPreferencesChange: (patch: Partial<DesktopPreferences>) => void;
   onBindTemplate: (templateId: string) => Promise<TemplateContext>;
+  onEnterTest: () => Promise<unknown>;
 }) {
   switch (route.id) {
-    case "dashboard": return <DashboardPage browser={browser} summary={summary} template={template} />;
-    case "jobs": return <JobsPage template={template} browser={browser} />;
+    case "dashboard": return <DashboardPage browser={browser} summary={summary} template={template} onEnterTest={onEnterTest} />;
+    case "jobs": return <JobsPage template={template} browser={browser} onEnterTest={onEnterTest} />;
     case "job": return route.parameter === "new" ? <GuidedSetupPage browser={browser} /> : <ActiveJobPage browser={browser} summary={summary} template={template} preferences={preferences} />;
     case "templates": return <TemplatesPage template={template} onBindTemplate={onBindTemplate} />;
     case "template": return route.parameter === "new" ? <TemplateCreatePage /> : <TemplateDetailPage templateId={route.parameter} />;
@@ -1418,7 +1495,7 @@ export default function DesktopApp() {
   const startupNavigationStarted = useRef(false);
   const systemReducedMotion = useSystemReducedMotion();
   const { browser, summary } = useElectronState();
-  const { template, error: templateError, bind: bindTemplate } = useTemplateContext();
+  const { template, error: templateError, bind: bindTemplate, enterTest } = useTemplateContext();
   useEffect(() => {
     if (startupNavigationStarted.current) return;
     startupNavigationStarted.current = true;
@@ -1510,7 +1587,7 @@ export default function DesktopApp() {
       <PageHeader route={route} browser={browser} />
       {templateError && <div className="desktop-global-error"><AlertTriangle size={15} />评分模板读取失败：{templateError}</div>}
       <div className="desktop-route-stage">
-        <DesktopPage route={route} browser={browser} summary={summary} template={template} preferences={preferences} onPreferencesChange={changePreferences} onBindTemplate={bindTemplate} />
+        <DesktopPage route={route} browser={browser} summary={summary} template={template} preferences={preferences} onPreferencesChange={changePreferences} onBindTemplate={bindTemplate} onEnterTest={enterTest} />
       </div>
     </main>
   </div>;

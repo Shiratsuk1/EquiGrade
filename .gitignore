@@ -4,6 +4,7 @@ dist-electron/
 dist-server/
 release/
 release2/
+release-v*/
 .data/
 .env
 .env.*

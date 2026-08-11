@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -36,6 +36,8 @@ const recentPipelineEvents: Array<Record<string, unknown>> = [];
 
 let serverProcess: ChildProcess | null = null;
 let pipelineLogQueue: Promise<void> = Promise.resolve();
+let startupLogQueue: Promise<void> = Promise.resolve();
+let activeStartupLogPath: string | null = null;
 let hostWindow: BrowserWindow | null = null;
 let browserSession: EmbeddedBrowserSession | null = null;
 let appQuitPending = false;
@@ -45,6 +47,64 @@ let activePipelineTask: {
   targetUrl: string;
   context: PipelineTemplateContext;
 } | null = null;
+
+function startupLogCandidates() {
+  const installDirectory = app.isPackaged
+    ? path.dirname(process.resourcesPath)
+    : path.resolve(currentDirectory, "../..");
+  const candidates = [
+    path.join(installDirectory, "startup.log"),
+    path.join(app.getPath("userData"), "startup.log")
+  ];
+  return candidates.filter((candidate, index) => candidates.indexOf(candidate) === index);
+}
+
+function startupLogPath() {
+  return activeStartupLogPath || startupLogCandidates()[0];
+}
+
+function recordStartupLog(message: string, error?: unknown) {
+  const detail = error instanceof Error ? `${error.message}\n${error.stack || ""}` : error === undefined ? "" : String(error);
+  const line = `[${new Date().toISOString()}] ${message}${detail ? `\n${detail}` : ""}\n`;
+  startupLogQueue = startupLogQueue.then(async () => {
+    const candidates = activeStartupLogPath ? [activeStartupLogPath, ...startupLogCandidates()] : startupLogCandidates();
+    let lastError: unknown;
+    for (const candidate of candidates.filter((value, index) => candidates.indexOf(value) === index)) {
+      try {
+        await mkdir(path.dirname(candidate), { recursive: true });
+        await appendFile(candidate, line, "utf8");
+        activeStartupLogPath = candidate;
+        return;
+      } catch (writeError) {
+        lastError = writeError;
+        if (candidate === activeStartupLogPath) activeStartupLogPath = null;
+      }
+    }
+    if (isDevelopment && lastError) console.error("[electron] 无法写入启动诊断日志", lastError);
+  }).catch(() => undefined);
+  if (isDevelopment) console.error(`[electron] ${message}`, error ?? "");
+}
+
+function describeStartupError(error: unknown) {
+  return error instanceof Error ? error.message : String(error || "未知启动错误");
+}
+
+async function reportStartupFailure(error: unknown) {
+  const message = describeStartupError(error);
+  recordStartupLog("工作台启动失败", error);
+  await startupLogQueue;
+  const logPath = startupLogPath();
+  try {
+    dialog.showErrorBox(
+      "衡准工作台无法启动",
+      `${message}\n\n详细诊断已保存到：\n${logPath}\n\n请将该文件发送给技术支持。`
+    );
+  } catch {
+    // The error is already persisted; showing a dialog can fail during
+    // shutdown on some Windows versions.
+  }
+  app.quit();
+}
 
 function localBaseUrl() {
   return isDevelopment ? `http://127.0.0.1:${devPort}` : `http://127.0.0.1:${apiPort}`;
@@ -139,20 +199,45 @@ function recordPipelineEvent(payload: Record<string, unknown>) {
 async function startPackagedServer() {
   if (isDevelopment) return;
   const packagedRoot = path.join(process.resourcesPath, "app.asar.unpacked");
-  const entry = path.join(packagedRoot, "dist-server/server/index.js");
-  if (!existsSync(entry)) throw new Error("打包版缺少本地 API 服务入口");
-  const child = fork(entry, [], {
+  const asarRoot = path.join(process.resourcesPath, "app.asar");
+  // Keep the server entry inside app.asar whenever possible. Electron's
+  // asar-aware module loader can then resolve dependencies from
+  // app.asar/node_modules. Running the entry from app.asar.unpacked makes
+  // Node walk only the unpacked directory tree, so packages such as express
+  // inside app.asar become invisible in a packaged installation.
+  const candidates = [
+    {
+      entry: path.join(asarRoot, "dist-server/server/index.js"),
+      dist: path.join(asarRoot, "dist")
+    },
+    {
+      entry: path.join(packagedRoot, "dist-server/server/index.js"),
+      dist: path.join(packagedRoot, "dist")
+    }
+  ];
+  const selected = candidates.find((candidate) => existsSync(candidate.entry));
+  if (!selected) {
+    throw new Error(`打包版缺少本地 API 服务入口：${candidates.map((candidate) => candidate.entry).join("；")}`);
+  }
+  recordStartupLog(`准备启动本地 API：${selected.entry}`);
+  const child = fork(selected.entry, [], {
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
       PORT: String(apiPort),
-      APP_DIST_DIR: path.join(packagedRoot, "dist"),
+      APP_DIST_DIR: selected.dist,
       APP_DATA_DIR: app.getPath("userData"),
       HENGZHUN_API_TOKEN: localApiToken
     },
-    stdio: ["inherit", "inherit", "inherit", "ipc"]
+    silent: true
   });
   serverProcess = child;
+  child.stdout?.on("data", (chunk: Buffer | string) => recordStartupLog(`本地 API 输出：${String(chunk).trimEnd()}`));
+  child.stderr?.on("data", (chunk: Buffer | string) => recordStartupLog(`本地 API 错误：${String(chunk).trimEnd()}`));
+  child.once("error", (error) => recordStartupLog("本地 API 子进程错误", error));
+  child.once("exit", (code, signal) => {
+    recordStartupLog(`本地 API 子进程退出：code=${code ?? "unknown"}, signal=${signal ?? "none"}`);
+  });
   apiPort = await new Promise<number>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("本地 API 服务启动超时")), 12_000);
     child.once("error", (error) => {
@@ -177,13 +262,17 @@ async function waitForHostServer() {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     try {
       const response = await fetch(`${localBaseUrl()}/api/health`);
-      if (response.ok) return;
+      if (response.ok) {
+        recordStartupLog(`本地 API 已就绪：${localBaseUrl()}`);
+        return;
+      }
       lastError = new Error(`工作台服务返回 ${response.status}`);
     } catch (error) {
       lastError = error;
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
   }
+  recordStartupLog("等待本地 API 超时", lastError);
   throw lastError instanceof Error ? lastError : new Error("工作台服务启动超时");
 }
 
@@ -530,6 +619,7 @@ ipcMain.on("browser:set-visible", (event, visible: boolean) => {
 });
 
 app.whenReady().then(async () => {
+  recordStartupLog(`开始启动工作台：packaged=${app.isPackaged}, resourcesPath=${process.resourcesPath}`);
   recordPipelineEvent({
     type: "browser_user_data_ready",
     userDataPath: userDataConfiguration.path,
@@ -543,8 +633,15 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 }).catch((error: unknown) => {
-  console.error("[electron] failed to start trusted local services", error);
-  app.quit();
+  void reportStartupFailure(error);
+});
+
+process.on("uncaughtException", (error) => {
+  recordStartupLog("Electron 主进程未捕获异常", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+  recordStartupLog("Electron 主进程未处理 Promise 异常", reason);
 });
 
 app.on("before-quit", (event) => {

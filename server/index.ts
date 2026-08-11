@@ -79,7 +79,7 @@ function asyncRoute(handler: (req: express.Request, res: express.Response) => Pr
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, version: "0.1.0", time: new Date().toISOString() });
+  res.json({ ok: true, version: "0.1.1", time: new Date().toISOString() });
 });
 
 app.get("/api/logs", (req, res) => {

@@ -8,6 +8,15 @@
 !define MUI_FINISHPAGE_TEXT "衡准工作台已安装完成。$\r$\n$\r$\n点击“完成”启动应用。"
 !define MUI_FINISHPAGE_RUN_TEXT "启动衡准工作台"
 
+; Keep the user-facing installation folder stable and independent from the
+; product's Chinese display name. When a user selects a drive root (for
+; example D:\), electron-builder's assisted installer appends APP_FILENAME
+; immediately before installation. EquiGrade is the intended folder name.
+!ifdef APP_FILENAME
+  !undef APP_FILENAME
+!endif
+!define APP_FILENAME "EquiGrade"
+
 BrandingText "衡准工作台"
 
 !macro customWelcomePage
