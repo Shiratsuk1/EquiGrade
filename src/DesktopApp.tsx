@@ -1647,7 +1647,8 @@ function SettingsPage({ preferences, onPreferencesChange }: { preferences: Deskt
     setOpening(true); setOpenMessage("");
     try {
       await host.navigateBrowser(startUrl);
-      setOpenMessage("已打开默认阅卷网站");
+      // 打开阅卷网站后自动进入“当前批改”页。
+      pushRoute("/jobs/current?electron=1");
     } catch (error) {
       setOpenMessage(error instanceof Error ? `打开失败：${error.message}` : "打开失败，请检查地址或网络");
     } finally {
@@ -1774,8 +1775,12 @@ export default function DesktopApp() {
     const host = getHost();
     if (!preferences.autoOpenStartUrl || !host) return;
     void host.getBrowserState().then((state) => {
-      if (state.url && state.url !== "about:blank" && state.url === startUrl) return state;
-      return host.navigateBrowser(startUrl);
+      const alreadyThere = state.url && state.url !== "about:blank" && state.url === startUrl;
+      const navigate = alreadyThere ? Promise.resolve(state) : host.navigateBrowser(startUrl);
+      return navigate.then(() => {
+        // 打开默认阅卷网站后自动进入“当前批改”页。
+        pushRoute("/jobs/current?electron=1");
+      });
     });
   }, [preferences.autoOpenStartUrl]);
   useEffect(() => {
