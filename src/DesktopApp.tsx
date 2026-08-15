@@ -366,6 +366,7 @@ function eventText(event: PipelineEvent) {
     case "page_completed": return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分`;
     case "pipeline_start_rejected": return `启动失败：${reason || "尚未选择批改任务"}`;
     case "page_failed": return `处理失败：${reason || "未知异常"}`;
+    case "page_retry": return `自动重试 ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}：${reason || "正在重试当前答卷"}`;
     case "page_skipped": return `已跳过：${reason || "当前答卷"}`;
     case "pipeline_paused": return `已暂停：${reason || "等待人工处理"}`;
     case "pipeline_paused_stale_answer": return `已暂停：检测到答卷在模型批改期间发生切换`;
