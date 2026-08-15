@@ -16,6 +16,12 @@ import type {
 } from "../../shared/electron.js";
 import { EMPTY_PLUGIN_STATUS } from "../../shared/electron.js";
 import type { GradingResult } from "../../shared/types.js";
+import {
+  pluginFontStacks,
+  pluginMonoFontStacks,
+  pluginPhaseLabels,
+  pluginThemes
+} from "../../shared/uiConstants.js";
 import { createGenericDataAdapter } from "./genericDataAdapter.js";
 import { createMockAdapter } from "./mockAdapter.js";
 import { createZhixueAdapter } from "./zhixueAdapter.js";
@@ -81,27 +87,6 @@ let pluginPreferences: PluginUiPreferences = {
   letterSpacing: 0
 };
 
-const pluginThemes: Record<PluginUiPreferences["accent"], { accent: string; hover: string; soft: string; ring: string }> = {
-  teal: { accent: "#13a8a2", hover: "#0d8c88", soft: "#e8f8f6", ring: "rgba(19,168,162,.14)" },
-  blue: { accent: "#397fe8", hover: "#2868c9", soft: "#edf4ff", ring: "rgba(57,127,232,.14)" },
-  green: { accent: "#2d8b68", hover: "#237255", soft: "#eaf6f0", ring: "rgba(45,139,104,.14)" },
-  graphite: { accent: "#4f6572", hover: "#394d59", soft: "#edf2f4", ring: "rgba(79,101,114,.14)" }
-};
-
-const pluginFontStacks: Record<UiFontFamily, string> = {
-  system: '"Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", Arial, sans-serif',
-  inter: 'Inter, "Segoe UI Variable", "Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", sans-serif',
-  "noto-sans-sc": '"Noto Sans SC", "Noto Sans CJK SC", "Segoe UI", "Microsoft YaHei UI", sans-serif',
-  "source-han-sans": '"Source Han Sans SC", "思源黑体", "Noto Sans SC", "Microsoft YaHei UI", sans-serif',
-  "microsoft-yahei": '"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif'
-};
-
-const pluginMonoFontStacks: Record<UiMonoFontFamily, string> = {
-  cascadia: '"Cascadia Code", "Cascadia Mono", Consolas, monospace',
-  consolas: 'Consolas, "Cascadia Mono", monospace',
-  system: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-};
-
 function selectAdapter() {
   const currentUrl = new URL(window.location.href);
   return adapters.find((candidate) => candidate.matches(currentUrl)) ?? adapters.at(-1)!;
@@ -156,21 +141,7 @@ function phase(next: PluginPhase, message: string, patch: Partial<PluginStatus> 
 }
 
 function statusLabel(value: PluginPhase) {
-  switch (value) {
-    case "handshaking": return "连接中";
-    case "preflight": return "检查中";
-    case "ready": return "已就绪";
-    case "extracting": return "读取答卷";
-    case "grading": return "模型批改";
-    case "writing_score": return "写入分数";
-    case "submitting": return "提交分数";
-    case "verifying": return "校验提交";
-    case "navigating_next": return "进入下一份";
-    case "paused": return "已暂停";
-    case "failed": return "异常";
-    case "completed": return "已完成";
-    default: return "待机";
-  }
+  return pluginPhaseLabels[value];
 }
 
 function ensureWidget() {
@@ -294,10 +265,23 @@ async function runPreflight() {
   }
 }
 
+/** 流水线内部中断信号。使用带 code 的错误类而非魔法字符串，避免错误被包装/改写后控制流失效。 */
+type PipelineInterruptCode = "stopped" | "paused" | "skip" | "review";
+
+class PipelineInterruptError extends Error {
+  readonly code: PipelineInterruptCode;
+
+  constructor(code: PipelineInterruptCode, message: string) {
+    super(message);
+    this.name = "PipelineInterruptError";
+    this.code = code;
+  }
+}
+
 function checkInterruption() {
-  if (stopRequested) throw new Error("__PIPELINE_STOPPED__");
-  if (pauseRequested) throw new Error("__PIPELINE_PAUSED__");
-  if (skipRequested) throw new Error("__PIPELINE_SKIP__");
+  if (stopRequested) throw new PipelineInterruptError("stopped", "流水线已停止");
+  if (pauseRequested) throw new PipelineInterruptError("paused", "流水线已暂停");
+  if (skipRequested) throw new PipelineInterruptError("skip", "用户跳过当前答卷");
 }
 
 function readableRemoteError(error: unknown, fallback: string) {
@@ -393,7 +377,7 @@ async function runPipeline() {
         checkInterruption();
         const grading = await gradeCurrent(answer);
         checkInterruption();
-        if (grading.status !== "completed" || grading.requiresReview) throw new Error("__PIPELINE_REVIEW__");
+        if (grading.status !== "completed" || grading.requiresReview) throw new PipelineInterruptError("review", "教师模型要求人工复核");
         if (!Number.isFinite(grading.score) || !Number.isFinite(grading.maxScore)) throw new Error("教师模型返回的分数无效");
         if (grading.imageHash && grading.imageHash !== answer.imageHash) throw new Error("批改结果与当前答卷图像哈希不一致");
         await confirmCurrentAnswer(answer);
@@ -464,31 +448,37 @@ async function runPipeline() {
           });
           return;
         }
-        if (reason === "__PIPELINE_STOPPED__") {
-          phase("idle", "流水线已停止");
-          record({ type: "pipeline_stopped" });
-          return;
-        }
-        if (reason === "__PIPELINE_PAUSED__") {
-          phase("paused", "流水线已按要求暂停");
-          record({ type: "pipeline_paused", reason: "用户暂停", consecutiveFailures: status.consecutiveFailures });
-          return;
-        }
-        if (reason === "__PIPELINE_REVIEW__") {
-          phase("paused", "教师模型要求人工复核，已停留在当前答卷", { pageKey: answer?.sourcePageKey ?? answer?.pageKey ?? fallbackPageKey });
-          record({
-            type: "pipeline_paused",
-            pageKey: answer?.sourcePageKey ?? answer?.pageKey ?? fallbackPageKey,
-            reason: "教师模型结果需要人工复核",
-            consecutiveFailures: status.consecutiveFailures
-          });
-          return;
+        if (error instanceof PipelineInterruptError) {
+          switch (error.code) {
+            case "stopped":
+              phase("idle", "流水线已停止");
+              record({ type: "pipeline_stopped" });
+              return;
+            case "paused":
+              phase("paused", "流水线已按要求暂停");
+              record({ type: "pipeline_paused", reason: "用户暂停", consecutiveFailures: status.consecutiveFailures });
+              return;
+            case "review": {
+              const reviewKey = answer?.sourcePageKey ?? answer?.pageKey ?? fallbackPageKey;
+              phase("paused", "教师模型要求人工复核，已停留在当前答卷", { pageKey: reviewKey });
+              record({
+                type: "pipeline_paused",
+                pageKey: reviewKey,
+                reason: "教师模型结果需要人工复核",
+                consecutiveFailures: status.consecutiveFailures
+              });
+              return;
+            }
+            case "skip":
+              skipRequested = false;
+              break;
+          }
         }
         const currentKey = answer?.sourcePageKey ?? answer?.pageKey ?? fallbackPageKey;
-        if (reason === "__PIPELINE_SKIP__") skipRequested = false;
-        const failures = reason === "__PIPELINE_SKIP__" ? status.consecutiveFailures : status.consecutiveFailures + 1;
+        const skipped = error instanceof PipelineInterruptError && error.code === "skip";
+        const failures = skipped ? status.consecutiveFailures : status.consecutiveFailures + 1;
         publish({ consecutiveFailures: failures });
-        record({ type: "page_failed", pageKey: currentKey, reason: reason === "__PIPELINE_SKIP__" ? "用户跳过当前答卷" : reason, consecutiveFailures: failures });
+        record({ type: "page_failed", pageKey: currentKey, reason: skipped ? "用户跳过当前答卷" : reason, consecutiveFailures: failures });
         if (failures >= 3) {
           phase("paused", "连续 3 份答卷处理失败，已自动暂停", { pageKey: currentKey });
           record({ type: "pipeline_paused", pageKey: currentKey, reason: "连续 3 次失败", consecutiveFailures: failures });

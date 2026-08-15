@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { GradingResult } from "../shared/types.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import type { GradingResult, Rubric } from "../shared/types.js";
 import { countCurrentGradingResults, matchesStoredRecordId, normalizeLegacyReviewState, normalizeUploadedFileName, shouldDeleteAnswerAsset } from "./historyStore.js";
 
 describe("normalizeUploadedFileName", () => {
@@ -166,5 +169,123 @@ describe("legacy review-state compatibility", () => {
     expect(normalized.status).toBe("needs_review");
     expect(normalized.reviewReasons).toEqual([sharedReason]);
     expect(normalized.subquestions[0].decisions.map((decision) => decision.requiresReview)).toEqual([false, true]);
+  });
+});
+
+describe("aggregated history record queries", () => {
+  // historyStore 在模块加载时读取 APP_DATA_DIR，因此每次用例都用新临时目录重新加载模块。
+  let tempDirectory: string;
+
+  async function loadStore() {
+    const { vi } = await import("vitest");
+    vi.resetModules();
+    return await import("./historyStore.js");
+  }
+
+  async function saveSampleRecord(store: typeof import("./historyStore.js"), overrides: { resultId?: string; rubric?: Rubric }) {
+    const now = new Date().toISOString();
+    const rubric: Rubric = overrides.rubric ?? {
+      title: "测试模板",
+      recognizedQuestionText: "题目",
+      version: 1,
+      status: "saved",
+      totalScore: 2,
+      subquestions: [{
+        id: "Q1", title: "第一问", maxScore: 2, finalAnswerPolicy: "full_credit",
+        finalAnswers: [], scorePoints: [], deductions: []
+      }],
+      warnings: []
+    };
+    const summary = await store.saveTemplate({
+      questionText: "题目文字",
+      referenceText: "参考答案",
+      rubric,
+      questionImages: [],
+      referenceImages: [],
+      operationId: crypto.randomUUID()
+    });
+    const result: GradingResult = {
+      id: overrides.resultId ?? crypto.randomUUID(),
+      studentId: "学生 A",
+      fileName: "answer.png",
+      score: 1,
+      maxScore: 2,
+      status: "completed",
+      reviewReasons: [],
+      evidence: { lines: [], finalAnswers: [], ambiguities: [] },
+      subquestions: [],
+      metrics: { ruleCoverage: 1, evidenceTraceability: 1, autoDecisionRate: 1, ambiguityRate: 0, durationMs: 1 },
+      modelName: "teacher",
+      rubricVersion: 1
+    };
+    const image = {
+      buffer: Buffer.from("fake-png"),
+      originalname: "answer.png",
+      mimetype: "image/png"
+    } as Express.Multer.File;
+    await store.saveGradingRecord({
+      templateId: summary.id,
+      answerImage: image,
+      result,
+      rubricSnapshot: rubric,
+      operationId: crypto.randomUUID()
+    });
+    return { summary, result, createdAt: now };
+  }
+
+  async function withTempStore(operation: (store: typeof import("./historyStore.js")) => Promise<void>) {
+    tempDirectory = await mkdtemp(path.join(os.tmpdir(), "hz-history-"));
+    process.env.APP_DATA_DIR = tempDirectory;
+    try {
+      const store = await loadStore();
+      await operation(store);
+    } finally {
+      delete process.env.APP_DATA_DIR;
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  }
+
+  it("lists records from every template newest-first with rubric fallback", async () => {
+    await withTempStore(async (store) => {
+      const first = await saveSampleRecord(store, { resultId: "result-first" });
+      // 第二个模板保存后其记录应排在更前面。
+      const second = await saveSampleRecord(store, { resultId: "result-second" });
+      const rows = await store.listGradingRecords(100);
+      expect(rows).toHaveLength(2);
+      expect(rows[0].record.result.id).toBe(second.result.id);
+      expect(rows[1].record.result.id).toBe(first.result.id);
+      expect(rows[0].templateTitle).toBe("测试模板");
+      expect(rows[0].rubric.title).toBe("测试模板");
+      expect(rows[0].record.modelCallCount).toBe(0);
+    });
+  });
+
+  it("finds a record by storage id or result id", async () => {
+    await withTempStore(async (store) => {
+      const saved = await saveSampleRecord(store, { resultId: "result-target" });
+      const rows = await store.listGradingRecords(100);
+      const recordId = rows[0].record.id;
+
+      const byResultId = await store.findGradingRecord("result-target");
+      expect(byResultId?.record.id).toBe(recordId);
+      expect(byResultId?.templateId).toBe(saved.summary.id);
+
+      const byRecordId = await store.findGradingRecord(recordId);
+      expect(byRecordId?.record.result.id).toBe("result-target");
+
+      expect(await store.findGradingRecord("missing-id")).toBeNull();
+    });
+  });
+
+  it("respects the limit and sorts by createdAt", async () => {
+    await withTempStore(async (store) => {
+      await saveSampleRecord(store, { resultId: "result-a" });
+      await saveSampleRecord(store, { resultId: "result-b" });
+      await saveSampleRecord(store, { resultId: "result-c" });
+      const rows = await store.listGradingRecords(2);
+      expect(rows).toHaveLength(2);
+      expect(rows[0].record.result.id).toBe("result-c");
+      expect(rows[1].record.result.id).toBe("result-b");
+    });
   });
 });

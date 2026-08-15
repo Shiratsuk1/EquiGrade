@@ -12,6 +12,7 @@ import type {
   ModelConfigInput, ModelCallLogDetails, PublicModelConfig, Rubric, SystemLogEntry, SystemLogSnapshot
 } from "../shared/types";
 import { api, uploadDocument } from "./api";
+import { systemLogScopeLabels } from "../shared/uiConstants";
 import {
   IMAGE_VIEWER_MAX_SCALE, calculateImageFitScale, clampImageOffset, clampImageScale,
   imageOffsetAfterZoom, type ViewerPoint, type ViewerSize
@@ -383,6 +384,8 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
   const [editingJson, setEditingJson] = useState(false);
   const [students, setStudents] = useState<StudentFile[]>([]);
   const [results, setResults] = useState<GradingResult[]>([]);
+  /** 已成功批改的学生 id 集合：批改中断后重试只处理剩余学生，避免重复批改与重复历史记录。 */
+  const [gradedStudentIds, setGradedStudentIds] = useState<Set<string>>(new Set());
   const [answerImageUrls, setAnswerImageUrls] = useState<Record<string, string>>({});
   const [modelCallsByResultId, setModelCallsByResultId] = useState<Record<string, ModelCallHistoryEntry[]>>({});
   const [selectedResultId, setSelectedResultId] = useState<string | null>(null);
@@ -640,18 +643,24 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
       id: crypto.randomUUID(), studentId: `学生 ${String(students.length + index + 1).padStart(2, "0")}`,
       file, preview: URL.createObjectURL(file)
     }));
-    setStudents((previous) => [...previous, ...next]); setResults([]); setAnswerImageUrls({});
+    setStudents((previous) => [...previous, ...next]); setResults([]); setAnswerImageUrls({}); setGradedStudentIds(new Set());
   };
 
   const grade = async () => {
     if (!rubric || rubric.status === "draft" || !students.length) return;
     if (!configReady) { onOpenModels(); return; }
     const priorResults = results;
+    const pending = students.filter((student) => !gradedStudentIds.has(student.id));
+    if (!pending.length) {
+      setError("当前学生作答均已批改完成；如需重新批改请先移除或重新添加答卷。");
+      return;
+    }
     setBusy("grade"); setProgress(0); setError("");
     const completed: GradingResult[] = [];
+    const nextGradedIds = new Set(gradedStudentIds);
     try {
-      for (let index = 0; index < students.length; index += 1) {
-        const student = students[index];
+      for (let index = 0; index < pending.length; index += 1) {
+        const student = pending[index];
         const form = new FormData();
         form.append("image", student.file); form.append("studentId", student.studentId); form.append("rubric", JSON.stringify(rubric));
         form.append("questionText", questionText); form.append("referenceText", referenceText);
@@ -660,8 +669,10 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
         if (templateId) form.append("templateId", templateId);
         const completedResult = await api<GradingResult>("/api/grading/grade", { method: "POST", body: form });
         completed.push(completedResult);
+        nextGradedIds.add(student.id);
+        setGradedStudentIds(new Set(nextGradedIds));
         setAnswerImageUrls((previous) => ({ ...previous, [completedResult.id]: student.preview }));
-        setResults([...completed, ...priorResults]); setProgress((index + 1) / students.length);
+        setResults([...completed, ...priorResults]); setProgress((index + 1) / pending.length);
       }
       setSelectedResultId(completed[0]?.id ?? null);
       if (templateId && completed[0]) onResultSelected(templateId, completed[0].id);
@@ -1230,15 +1241,7 @@ function HistoryPage({ revision, onOpen }: { revision: number; onOpen: (id: stri
   </div>;
 }
 
-const scopeLabels: Record<string, string> = {
-  rubric: "评分标准",
-  grading: "答卷批改",
-  equivalence: "答案判定审计",
-  scoring: "规则计分",
-  storage: "数据保存",
-  model: "模型调用",
-  system: "系统"
-};
+const scopeLabels = systemLogScopeLabels;
 
 function LogsPage({ active }: { active: boolean }) {
   const [snapshot, setSnapshot] = useState<SystemLogSnapshot>({ activeOperations: [], entries: [], serverTime: "" });

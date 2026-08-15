@@ -21,6 +21,16 @@ import type {
   WindowMaterial
 } from "../shared/electron.js";
 import { DEFAULT_START_URL } from "../shared/startUrl.js";
+import {
+  MAX_IMAGE_BYTES,
+  motionIntensities,
+  pluginAccents,
+  pluginPositions,
+  uiFontFamilies,
+  uiFontWeights,
+  uiMonoFontFamilies,
+  windowMaterials
+} from "../shared/uiConstants.js";
 import { EmbeddedBrowserSession } from "./browserSession.js";
 import { configureStableUserData } from "./userData.js";
 
@@ -34,6 +44,8 @@ const localApiToken = process.env.HENGZHUN_API_TOKEN?.trim() || randomBytes(32).
 const nativeWindowsMaterialSupported = process.platform === "win32"
   && Number(process.getSystemVersion().split(".").at(-1)) >= 22621;
 const recentPipelineEvents: Array<Record<string, unknown>> = [];
+/** 与渲染进程 imageExtractor / 主进程 readTargetImage 一致的安全上限。 */
+const MAX_GRADE_IMAGE_BYTES = MAX_IMAGE_BYTES;
 
 let serverProcess: ChildProcess | null = null;
 let pipelineLogQueue: Promise<void> = Promise.resolve();
@@ -515,9 +527,17 @@ ipcMain.handle("pipeline:grade-image", async (event, payload: {
   if (event.sender !== session.view.webContents) throw new Error("非目标网页进程不允许提交答卷图像");
   const task = activePipelineTask;
   if (!task?.context.ready) throw new Error("请先从批改任务或流水线测试入口选择任务");
-  const imageResponse = await fetch(payload.imageDataUrl);
+  const imageController = new AbortController();
+  const imageTimeout = setTimeout(() => imageController.abort(), 30_000);
+  let imageResponse: Response;
+  try {
+    imageResponse = await fetch(payload.imageDataUrl, { signal: imageController.signal });
+  } finally {
+    clearTimeout(imageTimeout);
+  }
   if (!imageResponse.ok) throw new Error("无法读取网页答卷图片");
   const blob = await imageResponse.blob();
+  if (blob.size > MAX_GRADE_IMAGE_BYTES) throw new Error("答卷图片超过 25 MB 安全上限");
   const form = new FormData();
   form.append("templateId", task.context.templateId);
   form.append("pageKey", payload.pageKey);
@@ -569,13 +589,13 @@ ipcMain.handle("browser:action", (event, action: BrowserAction) => {
 });
 ipcMain.handle("plugin:set-preferences", (event, preferences: PluginUiPreferences) => {
   requireHostSender(event);
-  const accents = new Set(["teal", "blue", "green", "graphite"]);
-  const positions = new Set(["bottom-right", "bottom-left"]);
-  const materials = new Set<WindowMaterial>(["solid", "mica", "acrylic"]);
-  const motionIntensities = new Set(["off", "comfortable", "lively"]);
-  const fontFamilies = new Set(["system", "inter", "noto-sans-sc", "source-han-sans", "microsoft-yahei"]);
-  const monoFontFamilies = new Set(["cascadia", "consolas", "system"]);
-  const fontWeights = new Set([400, 500, 600, 700]);
+  const accents = new Set<string>(pluginAccents);
+  const positions = new Set<string>(pluginPositions);
+  const materials = new Set<string>(windowMaterials);
+  const motionValues = new Set<string>(motionIntensities);
+  const fontFamilyValues = new Set<string>(uiFontFamilies);
+  const monoFontFamilyValues = new Set<string>(uiMonoFontFamilies);
+  const fontWeightValues = new Set<number>(uiFontWeights);
   const numericPreference = (value: unknown, fallback: number, min: number, max: number) => {
     const numberValue = typeof value === "number" ? value : Number(value);
     return Number.isFinite(numberValue) ? Math.min(max, Math.max(min, numberValue)) : fallback;
@@ -588,11 +608,11 @@ ipcMain.handle("plugin:set-preferences", (event, preferences: PluginUiPreference
     position: positions.has(preferences?.position) ? preferences.position : "bottom-right",
     confirmBeforeStart: preferences?.confirmBeforeStart !== false,
     material: materials.has(preferences?.material as WindowMaterial) ? preferences.material as WindowMaterial : "mica",
-    motionIntensity: motionIntensities.has(preferences?.motionIntensity as string) ? preferences.motionIntensity : "comfortable",
+    motionIntensity: motionValues.has(preferences?.motionIntensity as string) ? preferences.motionIntensity : "comfortable",
     reduceMotion: preferences?.reduceMotion === true,
-    fontFamily: fontFamilies.has(preferences?.fontFamily as string) ? preferences.fontFamily : "noto-sans-sc",
-    monoFontFamily: monoFontFamilies.has(preferences?.monoFontFamily as string) ? preferences.monoFontFamily : "cascadia",
-    fontWeight: fontWeights.has(requestedFontWeight) ? requestedFontWeight : 500,
+    fontFamily: fontFamilyValues.has(preferences?.fontFamily as string) ? preferences.fontFamily : "noto-sans-sc",
+    monoFontFamily: monoFontFamilyValues.has(preferences?.monoFontFamily as string) ? preferences.monoFontFamily : "cascadia",
+    fontWeight: fontWeightValues.has(requestedFontWeight) ? requestedFontWeight : 500,
     fontScale: numericPreference(preferences?.fontScale, 1.1, 0.9, 1.2),
     lineHeight: numericPreference(preferences?.lineHeight, 1.5, 1.3, 1.9),
     letterSpacing: numericPreference(preferences?.letterSpacing, 0, -0.02, 0.06)

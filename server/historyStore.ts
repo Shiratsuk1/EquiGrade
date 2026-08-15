@@ -519,16 +519,56 @@ export async function getTemplate(id: string): Promise<GradingTemplateDetail | n
     rubric: template.rubric,
     questionImages: template.questionImages.map(publicAsset),
     referenceImages: template.referenceImages.map(publicAsset),
-    records: template.records.map((record) => {
-      const { modelCalls, ...publicRecord } = record;
-      return {
-        ...publicRecord,
-        answerImage: publicAsset(record.answerImage),
-        result: normalizeLegacyReviewState({ ...record.result, fileName: normalizeUploadedFileName(record.result.fileName) }),
-        modelCallCount: modelCalls?.length ?? 0
-      };
-    })
+    records: template.records.map(toPublicHistoryRecord)
   };
+}
+
+function toPublicHistoryRecord(record: StoredHistoryRecord): GradingHistoryRecord {
+  const { modelCalls, ...publicRecord } = record;
+  return {
+    ...publicRecord,
+    answerImage: publicAsset(record.answerImage),
+    result: normalizeLegacyReviewState({ ...record.result, fileName: normalizeUploadedFileName(record.result.fileName) }),
+    modelCallCount: modelCalls?.length ?? 0
+  };
+}
+
+export interface HistoryRecordRow {
+  record: GradingHistoryRecord;
+  templateId: string;
+  templateTitle: string;
+  /** 当次评分标准快照；旧记录缺失时回退到模板当前版本，保证详情页可展示评分依据。 */
+  rubric: Rubric;
+}
+
+function historyRecordRows(database: HistoryDatabase, match?: (record: StoredHistoryRecord) => boolean): HistoryRecordRow[] {
+  const rows: HistoryRecordRow[] = [];
+  for (const template of database.templates) {
+    for (const record of template.records) {
+      if (match && !match(record)) continue;
+      rows.push({
+        record: toPublicHistoryRecord(record),
+        templateId: template.id,
+        templateTitle: template.title,
+        rubric: record.rubricSnapshot ?? template.rubric
+      });
+    }
+  }
+  rows.sort((left, right) => right.record.createdAt.localeCompare(left.record.createdAt));
+  return rows;
+}
+
+/** 聚合历史记录列表（按批改时间倒序），避免前端逐个模板拉取详情的 N+1 请求。 */
+export async function listGradingRecords(limit = 100): Promise<HistoryRecordRow[]> {
+  const database = await readDatabase();
+  return historyRecordRows(database).slice(0, Math.max(1, Math.min(limit, 500)));
+}
+
+/** 按记录 id 或结果 id 精确查找一条历史记录。 */
+export async function findGradingRecord(recordId: string): Promise<HistoryRecordRow | null> {
+  const database = await readDatabase();
+  const rows = historyRecordRows(database, (record) => record.id === recordId || record.result.id === recordId);
+  return rows[0] ?? null;
 }
 
 export async function getGradingRecordModelCalls(recordId: string): Promise<GradingHistoryRecord["modelCalls"] | null> {

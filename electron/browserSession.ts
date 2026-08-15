@@ -23,6 +23,7 @@ import type {
 } from "../shared/electron.js";
 import { EMPTY_PLUGIN_STATUS } from "../shared/electron.js";
 import { DEFAULT_START_URL, isLegacyMockStartUrl } from "../shared/startUrl.js";
+import { MAX_IMAGE_BYTES } from "../shared/uiConstants.js";
 import {
   EncryptedCookieVault,
   selectZhixueCookies,
@@ -48,7 +49,7 @@ type CdpFrameTree = {
   childFrames?: CdpFrameTree[];
 };
 
-const MAX_TARGET_IMAGE_BYTES = 25 * 1024 * 1024;
+const MAX_TARGET_IMAGE_BYTES = MAX_IMAGE_BYTES;
 const DEFAULT_PLUGIN_PREFERENCES: PluginUiPreferences = {
   accent: "teal",
   visible: true,
