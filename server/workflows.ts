@@ -37,6 +37,7 @@ import {
   failOperation,
   isOperationCancelled,
   logProgress,
+  releaseOperationModelCalls,
   throwIfOperationCancelled
 } from "./systemLog.js";
 
@@ -1021,6 +1022,8 @@ ${JSON.stringify(evidence)}`,
     return { result, operationId };
   } catch (error) {
     failOperation(operationId, "grading", "grading_failed", error, { studentId: input.studentId });
+    // 失败路径统一释放模型调用记录，避免调用方无法拿到 operationId 时泄漏（成功路径由保存方释放）。
+    releaseOperationModelCalls(operationId);
     throw error;
   }
 }

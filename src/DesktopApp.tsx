@@ -17,6 +17,7 @@ import type {
 import type { MotionIntensity, WindowMaterial } from "../shared/electron";
 import { EMPTY_PLUGIN_STATUS } from "../shared/electron";
 import { buildPipelineScoreAlignment } from "../shared/pipelineSetup";
+import { pluginFontStacks, pluginMonoFontStacks } from "../shared/uiConstants";
 import {
   DEFAULT_GRADING_MODE, DEFAULT_MODEL_TIMEOUT_MS, DEFAULT_REVIEW_REASONING_EFFORT, DEFAULT_TEACHER_REASONING_EFFORT,
   DEFAULT_UNREADABLE_REVIEW_THRESHOLD
@@ -68,19 +69,8 @@ type DesktopDensity = "comfortable" | "compact";
 const desktopFontWeights = [400, 500, 600, 700] as const;
 type DesktopFontWeight = typeof desktopFontWeights[number];
 
-const fontFamilyStacks: Record<UiFontFamily, string> = {
-  system: '"Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", Arial, sans-serif',
-  inter: 'Inter, "Segoe UI Variable", "Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", sans-serif',
-  "noto-sans-sc": '"Noto Sans SC", "Noto Sans CJK SC", "Segoe UI", "Microsoft YaHei UI", sans-serif',
-  "source-han-sans": '"Source Han Sans SC", "思源黑体", "Noto Sans SC", "Microsoft YaHei UI", sans-serif',
-  "microsoft-yahei": '"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif'
-};
-
-const monoFontStacks: Record<UiMonoFontFamily, string> = {
-  cascadia: '"Cascadia Code", "Cascadia Mono", Consolas, monospace',
-  consolas: 'Consolas, "Cascadia Mono", monospace',
-  system: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-};
+const fontFamilyStacks = pluginFontStacks;
+const monoFontStacks = pluginMonoFontStacks;
 const typographyDefaultsVersionKey = "hengzhun.typographyDefaultsVersion";
 const typographyDefaultsVersion = "noto-sans-sc-110-v1";
 
@@ -548,7 +538,7 @@ function TestEntryButton({ onEnterTest }: { onEnterTest: () => Promise<unknown> 
 
 function DashboardPage({ browser, summary, template, onEnterTest }: { browser: EmbeddedBrowserState; summary: PipelineSummary; template: TemplateContext | null; onEnterTest: () => Promise<unknown> }) {
   const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities);
-  const readyCount = [template?.ready, browser.plugin.connected, pageReady, pageReady].filter(Boolean).length;
+  const readyCount = [template?.ready, browser.plugin.connected, pageReady].filter(Boolean).length;
   return <div className="desktop-page-body desktop-dashboard">
     <MetricStrip browser={browser} summary={summary} template={template} />
     <section className="desktop-dashboard-grid">
@@ -900,7 +890,7 @@ function GuidedSetupPage({ browser }: { browser: EmbeddedBrowserState }) {
   const dryRunReady = Boolean(dryRun
     && dryRun.maxScore === template?.rubric.totalScore
     && (!verifyWrite || dryRun.writeTest?.rolledBack));
-  const readiness = [modelReady, templateReady, targetReady, alignmentReady, dryRunReady, dryRunReady];
+  const readiness = [modelReady, templateReady, targetReady, alignmentReady, dryRunReady];
 
   const runAction = async (name: string, operation: () => Promise<void>) => {
     setPending(name);
@@ -1377,9 +1367,8 @@ function HistoryPage() {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const summaries = await api<GradingTemplateSummary[]>("/api/templates?includeBuiltIn=1");
-      const details = await Promise.all(summaries.map((item) => api<GradingTemplateDetail>(`/api/templates/${encodeURIComponent(item.id)}`)));
-      const nextRows = details.flatMap((detail) => detail.records.map((record) => ({ record, templateId: detail.id, templateTitle: detail.title }))).sort((left, right) => right.record.createdAt.localeCompare(left.record.createdAt));
+      const { records } = await api<{ records: Array<{ record: GradingHistoryRecord; templateId: string; templateTitle: string }> }>("/api/history-records?limit=200");
+      const nextRows = records.map((row) => ({ record: row.record, templateId: row.templateId, templateTitle: row.templateTitle }));
       setRows(nextRows);
       setSelectedIds((current) => new Set([...current].filter((id) => nextRows.some((row) => row.record.id === id))));
       setError("");
@@ -1445,21 +1434,17 @@ function RecordPage({ recordId }: { recordId?: string }) {
     if (!recordId) return;
     void (async () => {
       try {
-        const summaries = await api<GradingTemplateSummary[]>("/api/templates?includeBuiltIn=1");
-        for (const summary of summaries) {
-          const detail = await api<GradingTemplateDetail>(`/api/templates/${encodeURIComponent(summary.id)}`);
-          const found = detail.records.find((item) => item.id === recordId || item.result.id === recordId);
-          if (found) {
-            setRecord(found); setTemplateTitle(detail.title); setRubric(found.rubricSnapshot ?? detail.rubric);
-            try {
-              setModelCalls(await api<ModelCallHistoryEntry[]>(`/api/history-records/${encodeURIComponent(found.id)}/model-calls`));
-            } catch {
-              setModelCalls([]);
-            }
-            return;
-          }
+        const { records } = await api<{ records: Array<{ record: GradingHistoryRecord; templateId: string; templateTitle: string; rubric: Rubric }> }>(
+          `/api/history-records?recordId=${encodeURIComponent(recordId)}`
+        );
+        const found = records[0];
+        if (!found) throw new Error("找不到该批改记录");
+        setRecord(found.record); setTemplateTitle(found.templateTitle); setRubric(found.rubric);
+        try {
+          setModelCalls(await api<ModelCallHistoryEntry[]>(`/api/history-records/${encodeURIComponent(found.record.id)}/model-calls`));
+        } catch {
+          setModelCalls([]);
         }
-        throw new Error("找不到该批改记录");
       } catch (reason) { setError(reason instanceof Error ? reason.message : "记录读取失败"); }
     })();
   }, [recordId]);

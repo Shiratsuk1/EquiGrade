@@ -1,4 +1,5 @@
 import { ipcRenderer } from "electron";
+import { MAX_IMAGE_BYTES as MAX_EXTRACTED_IMAGE_BYTES } from "../../shared/uiConstants.js";
 
 export type AnswerImageContext = {
   card: HTMLElement | null;
@@ -166,6 +167,12 @@ async function sha256Bytes(bytes: Uint8Array) {
   return String(await ipcRenderer.invoke("pipeline:sha256", { bytes: Array.from(bytes) }));
 }
 
+function assertExtractedImageSize(bytes: number) {
+  if (bytes > MAX_EXTRACTED_IMAGE_BYTES) {
+    throw new Error(`答卷图片超过 ${Math.round(MAX_EXTRACTED_IMAGE_BYTES / 1024 / 1024)} MB 安全上限`);
+  }
+}
+
 export async function extractAnswerImage(context: AnswerImageContext): Promise<ExtractedImage> {
   const candidates = collectImageCandidates(context);
   for (const candidate of candidates) {
@@ -177,6 +184,7 @@ export async function extractAnswerImage(context: AnswerImageContext): Promise<E
       }
       const bytes = new Uint8Array(await blob.arrayBuffer());
       if (!bytes.length) throw new Error("提取出的答卷图片为空");
+      assertExtractedImageSize(bytes.byteLength);
       return {
         dataUrl: await blobToDataUrl(blob),
         mimeType: blob.type || "image/png",
@@ -198,6 +206,7 @@ export async function extractAnswerImage(context: AnswerImageContext): Promise<E
   if (canvas) {
     const blob = await canvasToBlob(canvas);
     const bytes = new Uint8Array(await blob.arrayBuffer());
+    assertExtractedImageSize(bytes.byteLength);
     return {
       dataUrl: await blobToDataUrl(blob),
       mimeType: "image/png",

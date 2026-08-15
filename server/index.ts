@@ -1,6 +1,7 @@
 import express from "express";
 import multer from "multer";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -21,11 +22,13 @@ import { gradeStudentAnswer, refineRubric, structureRubric } from "./workflows.j
 import {
   deleteGradingRecords,
   deleteTemplates,
+  findGradingRecord,
   getRegradeContext,
   getTemplate,
   getGradingRecordModelCalls,
   getTemplateGradingContext,
   ensurePipelineFixtureTemplate,
+  listGradingRecords,
   listTemplates,
   normalizeUploadedFileName,
   resolveAssetPath,
@@ -41,7 +44,8 @@ import {
   failOperation,
   forceStopOperation,
   getLogSnapshot,
-  isOperationCancelled
+  isOperationCancelled,
+  releaseOperationModelCalls
 } from "./systemLog.js";
 
 const app = express();
@@ -52,6 +56,18 @@ const upload = multer({
 const port = Number(process.env.PORT ?? 8788);
 const host = "127.0.0.1";
 const configuredApiToken = process.env.HENGZHUN_API_TOKEN?.trim();
+
+// 从 package.json 读取应用版本，避免与 package.json 版本号脱钩。
+// 开发模式：server/../../package.json = 项目根；打包版：dist-server/server/../../package.json = app.asar 根。
+const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+const APP_VERSION = (() => {
+  try {
+    const packageJson = JSON.parse(readFileSync(path.resolve(moduleDirectory, "../../package.json"), "utf8")) as { version?: string };
+    return packageJson.version?.trim() || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 
 if (!configuredApiToken || configuredApiToken.length < 32) {
   throw new Error("本地 API 缺少 HENGZHUN_API_TOKEN，必须通过受支持的启动命令运行工作台");
@@ -91,7 +107,7 @@ function asyncRoute(handler: (req: express.Request, res: express.Response) => Pr
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, version: "0.1.1", time: new Date().toISOString() });
+  res.json({ ok: true, version: APP_VERSION, time: new Date().toISOString() });
 });
 
 app.get("/api/logs", (req, res) => {
@@ -204,6 +220,24 @@ app.delete("/api/templates", asyncRoute(async (req, res) => {
 app.delete("/api/history-records", asyncRoute(async (req, res) => {
   const input = z.object({ ids: z.array(z.string().uuid()).min(1).max(500) }).parse(req.body);
   res.json(await deleteGradingRecords(input.ids));
+}));
+
+// 聚合历史记录列表：按批改时间倒序返回扁平行，避免前端逐个模板拉取详情的 N+1 请求。
+// 支持 ?recordId= 精确查找单条（按记录 id 或结果 id）。
+app.get("/api/history-records", asyncRoute(async (req, res) => {
+  const rawRecordId = req.query.recordId;
+  const recordId = typeof rawRecordId === "string" && rawRecordId.trim() ? rawRecordId.trim() : undefined;
+  if (recordId) {
+    const found = await findGradingRecord(recordId);
+    if (!found) {
+      res.status(404).json({ error: "找不到该批改记录" });
+      return;
+    }
+    res.json({ records: [found] });
+    return;
+  }
+  const limit = Math.max(1, Math.min(200, Number(req.query.limit ?? 100) || 100));
+  res.json({ records: await listGradingRecords(limit) });
 }));
 
 app.get("/api/history-records/:id/model-calls", asyncRoute(async (req, res) => {
@@ -369,8 +403,13 @@ app.post("/api/grading/grade", upload.fields([
     referenceImages: referenceImages.map((file, index) => toModelImage(file, `[参考答案图片 ${index + 1}：${normalizeUploadedFileName(file.originalname)}]`))
   });
   const templateId = String(req.body.templateId || "");
-  if (templateId) {
-    await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: rubric, operationId: grading.operationId });
+  try {
+    if (templateId) {
+      await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: rubric, operationId: grading.operationId });
+    }
+  } finally {
+    // 无模板的临时批改或保存失败时，释放该操作的模型调用记录，避免内存泄漏（幂等）。
+    releaseOperationModelCalls(grading.operationId);
   }
   res.json(grading.result);
 }));
@@ -401,7 +440,11 @@ app.post("/api/templates/:templateId/grade", upload.single("image"), asyncRoute(
     questionImages: context.questionImages.map((file, index) => toModelImage(file, `[题目图片 ${index + 1}：${file.fileName}]`)),
     referenceImages: context.referenceImages.map((file, index) => toModelImage(file, `[参考答案图片 ${index + 1}：${file.fileName}]`))
   });
-  await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: context.rubric, operationId: grading.operationId });
+  try {
+    await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: context.rubric, operationId: grading.operationId });
+  } finally {
+    releaseOperationModelCalls(grading.operationId);
+  }
   res.json(grading.result);
 }));
 
@@ -437,7 +480,11 @@ app.post("/api/pipeline/grade", upload.single("image"), asyncRoute(async (req, r
     questionImages: context.questionImages.map((file, index) => toModelImage(file, `[题目图片 ${index + 1}：${file.fileName}]`)),
     referenceImages: context.referenceImages.map((file, index) => toModelImage(file, `[参考答案图片 ${index + 1}：${file.fileName}]`))
   });
-  await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: context.rubric, operationId: grading.operationId });
+  try {
+    await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: context.rubric, operationId: grading.operationId });
+  } finally {
+    releaseOperationModelCalls(grading.operationId);
+  }
   res.json({
     jobId: grading.result.id,
     pageKey,
@@ -485,12 +532,16 @@ app.post("/api/templates/:templateId/regrade", asyncRoute(async (req, res) => {
     regradedAt: new Date().toISOString(),
     regradeReason: input.reason ?? "采用教师模型最终答案权威判定重新批改"
   });
-  await saveRegradedRecord({
-    templateId,
-    sourceResultId: context.previousResultId,
-    result: grading.result,
-    operationId: grading.operationId
-  });
+  try {
+    await saveRegradedRecord({
+      templateId,
+      sourceResultId: context.previousResultId,
+      result: grading.result,
+      operationId: grading.operationId
+    });
+  } finally {
+    releaseOperationModelCalls(grading.operationId);
+  }
   res.json(grading.result);
 }));
 

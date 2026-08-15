@@ -2,37 +2,12 @@ import { useEffect, useState } from "react";
 import { MathText } from "./Formula";
 import { ScorePointGuidance } from "./ScorePointGuidance";
 import { authorizedFetch } from "./api";
-
-type PipelineEvent = {
-  type?: string;
-  timestamp?: string;
-  score?: number;
-  maxScore?: number;
-  reason?: string;
-  pageKey?: string;
-  sourcePageKey?: string;
-  consecutiveFailures?: number;
-};
+import type { PipelineEvent, PipelineTemplateContext } from "../shared/electron";
 
 type PipelineBridge = {
-  getTemplateContext?: () => Promise<TemplateContext>;
+  getTemplateContext?: () => Promise<PipelineTemplateContext>;
   getPipelineEvents?: () => Promise<PipelineEvent[]>;
   onPipelineEvent?: (callback: (event: PipelineEvent) => void) => () => void;
-};
-
-type TemplateContext = {
-  title?: string;
-  questionText?: string;
-  rubric?: {
-    title?: string;
-    totalScore?: number;
-    subquestions?: Array<{
-      id: string;
-      title: string;
-      maxScore: number;
-      scorePoints?: Array<{ id: string; title: string; description: string; score: number; expected: string; commonResponses?: string[]; alternativeMethods?: string[]; acceptedEquivalents?: string[] }>;
-    }>;
-  };
 };
 
 type ConsoleState = {
@@ -115,7 +90,7 @@ async function loadTemplateContext(host: PipelineBridge) {
       const response = await authorizedFetch("/api/pipeline/fixture", { signal: controller.signal });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body?.error || `评分模板接口返回 ${response.status}`);
-      return body as TemplateContext;
+      return body as PipelineTemplateContext;
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
         throw new Error("评分模板接口连接超时，请确认本地 API 8788 正在运行");
@@ -143,7 +118,7 @@ async function loadTemplateContext(host: PipelineBridge) {
 
 export default function ElectronPipelineConsole() {
   const [summary, setSummary] = useState<ConsoleState>(initialState);
-  const [template, setTemplate] = useState<TemplateContext | null>(null);
+  const [template, setTemplate] = useState<PipelineTemplateContext | null>(null);
   const [templateError, setTemplateError] = useState("");
 
   useEffect(() => {
@@ -211,8 +186,10 @@ export default function ElectronPipelineConsole() {
       <section className="electron-console-panel electron-console-links-panel">
         <div className="electron-console-section-heading"><div><span className="electron-console-index">05</span><div><h2>完整记录</h2><p>历史结果和运行日志在本地网页端查看。</p></div></div></div>
         <nav className="electron-console-links" aria-label="结果查看入口">
-          <a href="http://localhost:5173/history" target="_blank" rel="noreferrer">打开历史记录</a>
-          <a href="http://localhost:5173/logs" target="_blank" rel="noreferrer">打开运行日志</a>
+          {/* 使用同源相对路径：Vite 开发代理与打包版同源 API 均可用，不再硬编码 5173。
+              不设 target="_blank"：Electron 主窗口拒绝新窗口，同标签导航到 web 版页面。 */}
+          <a href="/history">打开历史记录</a>
+          <a href="/logs">打开运行日志</a>
         </nav>
       </section>
     </main>
