@@ -536,6 +536,14 @@ async function runPipeline() {
           record({ type: "pipeline_paused", pageKey: currentKey, reason: "连续 3 次失败", consecutiveFailures: failures });
           return;
         }
+        if (!status.capabilities.skip) {
+          // 当前阅卷页面批完前无法进入下一份（如智学网）：跳过不可行，直接暂停等人工，
+          // 避免一次注定失败的翻页尝试。
+          const message = `当前答卷处理失败且页面不支持跳过，请人工处理：${reason}`;
+          phase("paused", message, { pageKey: currentKey });
+          record({ type: "pipeline_paused", pageKey: currentKey, reason: `处理失败且页面不支持跳过：${reason}`, consecutiveFailures: failures });
+          return;
+        }
         try {
           const transition = await skipAnswer(currentKey);
           record({ type: "page_skipped", pageKey: currentKey, reason });
@@ -708,6 +716,10 @@ async function handlePluginRequest(request: PluginRequest) {
 }
 
 async function skipWhenIdle() {
+  if (!status.capabilities.skip) {
+    record({ type: "pipeline_skip_rejected", reason: "当前阅卷页面批完前无法进入下一份，不支持跳过", pageKey: adapter.currentPageKey() });
+    return;
+  }
   if (!(await runPreflight())) return;
   const pageKey = adapter.currentPageKey() ?? "unknown";
   try {
@@ -745,6 +757,11 @@ async function control(command: PipelineControl) {
       publish({ message: running ? "将在当前原子步骤结束后停止" : "流水线已停止", phase: "idle" });
       break;
     case "skip":
+      if (!status.capabilities.skip) {
+        // 页面不支持跳过：拒绝并记录原因，避免教师误以为已跳过当前答卷。
+        record({ type: "pipeline_skip_rejected", reason: "当前阅卷页面批完前无法进入下一份，不支持跳过", pageKey: adapter.currentPageKey() });
+        break;
+      }
       if (running) skipRequested = true;
       else await skipWhenIdle();
       break;

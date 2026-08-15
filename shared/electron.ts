@@ -24,6 +24,8 @@ export interface PluginCapabilities {
   scoreInput: boolean;
   submit: boolean;
   next: boolean;
+  /** 当前答卷未批完时能否翻页跳过（如智学网"批完才能下一份"则不支持）。 */
+  skip: boolean;
 }
 
 export interface PluginStatus {
@@ -339,7 +341,8 @@ export const EMPTY_PLUGIN_STATUS: PluginStatus = {
     answerImage: false,
     scoreInput: false,
     submit: false,
-    next: false
+    next: false,
+    skip: false
   },
   updatedAt: new Date(0).toISOString()
 };

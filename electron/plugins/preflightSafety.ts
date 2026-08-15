@@ -11,7 +11,8 @@ export function emptyPluginCapabilities(): PluginCapabilities {
     answerImage: false,
     scoreInput: false,
     submit: false,
-    next: false
+    next: false,
+    skip: false
   };
 }
 

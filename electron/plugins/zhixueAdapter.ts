@@ -396,7 +396,9 @@ export function createZhixueAdapter(): SiteAdapter {
         answerImage: Boolean(image),
         scoreInput: Boolean(total),
         submit: Boolean(submit),
-        next: Boolean(next)
+        next: Boolean(next),
+        // 智学网批完当前份之前下一份按钮禁用，无法跳过未批完的答卷。
+        skip: false
       };
       const issues: string[] = [];
       if (!doc) issues.push("未找到智学网阅卷子页面");

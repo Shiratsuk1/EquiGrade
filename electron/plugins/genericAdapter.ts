@@ -151,7 +151,9 @@ export function createGenericAdapter(manifest: AdapterManifest, selectors: Adapt
         answerImage: Boolean(elements.image || elements.card?.querySelector("canvas")),
         scoreInput: Boolean(elements.scoreInput),
         submit: Boolean(elements.submit),
-        next: Boolean(elements.next)
+        next: Boolean(elements.next),
+        // 通用站点假定有下一份控件即可自由翻页跳过（未批完也能进入下一份）。
+        skip: Boolean(elements.next)
       };
       const issues: string[] = [];
       if (!elements.card) issues.push("未找到当前答卷容器");
