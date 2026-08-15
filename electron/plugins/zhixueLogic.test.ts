@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ScoreWritePayload } from "./types.js";
-import { buildZhixueScorePlan, matchesZhixueUrl } from "./zhixueLogic.js";
+import { buildZhixueScorePlan, matchesZhixueUrl, parseMarkingProgress } from "./zhixueLogic.js";
 
 const payload: ScoreWritePayload = {
   score: 7,
@@ -42,6 +42,23 @@ describe("matchesZhixueUrl", () => {
     expect(matchesZhixueUrl(new URL("https://www.zhixue.com/login.html"))).toBe(false);
     expect(matchesZhixueUrl(new URL("https://zhixue.com.evil.example/webmarking/example/"))).toBe(false);
     expect(matchesZhixueUrl(new URL("http://127.0.0.1:38123/mock-grading"))).toBe(false);
+  });
+});
+
+describe("parseMarkingProgress", () => {
+  it("parses the local mock progress format", () => {
+    expect(parseMarkingProgress("初评已阅量 1 / 任务量 4")).toEqual({ completed: 1, total: 4 });
+    expect(parseMarkingProgress("初评已阅量 0 / 任务量 4")).toEqual({ completed: 0, total: 4 });
+    expect(parseMarkingProgress("任务量已全部完成 · 初评已阅量 4 / 任务量 4")).toEqual({ completed: 4, total: 4 });
+  });
+
+  it("parses the legacy zhixue layout with both numbers after the label", () => {
+    expect(parseMarkingProgress("已阅量 / 任务量 1/4")).toEqual({ completed: 1, total: 4 });
+  });
+
+  it("returns undefined when no progress text is present", () => {
+    expect(parseMarkingProgress("")).toBeUndefined();
+    expect(parseMarkingProgress("当前没有进度信息")).toBeUndefined();
   });
 });
 

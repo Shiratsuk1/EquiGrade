@@ -22,6 +22,7 @@ import type {
   TargetPageInspection
 } from "../shared/electron.js";
 import { EMPTY_PLUGIN_STATUS } from "../shared/electron.js";
+import { DEFAULT_START_URL, isLegacyMockStartUrl } from "../shared/startUrl.js";
 import {
   EncryptedCookieVault,
   selectZhixueCookies,
@@ -29,6 +30,7 @@ import {
   toCookieSetDetails,
   type PersistedTargetCookie
 } from "./sessionPersistence.js";
+import { assertAllowedImageResource } from "./targetImagePolicy.js";
 
 type BrowserSessionOptions = {
   window: BrowserWindow;
@@ -99,22 +101,6 @@ function comparableFrameUrl(value: string) {
     return `${url.origin}${url.pathname}`;
   } catch {
     return value;
-  }
-}
-
-function isZhixueHost(hostname: string) {
-  const normalized = hostname.toLowerCase();
-  return normalized === "zhixue.com" || normalized.endsWith(".zhixue.com");
-}
-
-function assertAllowedImageResource(resourceUrl: URL, documentUrl: URL) {
-  const sameOrigin = resourceUrl.origin === documentUrl.origin;
-  const sameTrustedZhixueSite = resourceUrl.protocol === "https:"
-    && documentUrl.protocol === "https:"
-    && isZhixueHost(resourceUrl.hostname)
-    && isZhixueHost(documentUrl.hostname);
-  if (!sameOrigin && !sameTrustedZhixueSite) {
-    throw new Error("答卷图片必须与当前阅卷页面同源或来自受信任的智学网域名");
   }
 }
 
@@ -280,7 +266,12 @@ export class EmbeddedBrowserSession {
       const results = await Promise.allSettled(cookies.map((cookie) => this.targetSession.cookies.set(toCookieSetDetails(cookie))));
       this.restoredCookieCount = results.filter((result) => result.status === "fulfilled").length;
       const lastTargetUrl = await this.navigationStore.load();
-      if (!this.homeUrl && lastTargetUrl) this.homeUrl = lastTargetUrl;
+      if (lastTargetUrl && isLegacyMockStartUrl(lastTargetUrl)) {
+        this.homeUrl = DEFAULT_START_URL;
+        await this.navigationStore.save(DEFAULT_START_URL);
+      } else if (lastTargetUrl) {
+        this.homeUrl = lastTargetUrl;
+      }
     } catch (error) {
       this.persistenceError = error instanceof Error ? error.message : "无法恢复目标网页会话";
     }

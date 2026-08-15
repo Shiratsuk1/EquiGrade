@@ -1,18 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import {
   AlertTriangle, Check, CheckCircle2, ChevronRight, CircleGauge,
   ClipboardCheck, CloudCog, Code2, FileCheck2, FileText, Gauge, ImagePlus,
-  History, KeyRound, LoaderCircle, LockKeyhole, Maximize2, Play, RefreshCw, Save,
-  ScrollText, ShieldCheck, Sparkles, Trash2, Upload, X, XCircle, ZoomIn, ZoomOut
+  History, KeyRound, LoaderCircle, Maximize2, Play, RefreshCw, Save,
+  ScrollText, ShieldCheck, Sparkles, Square, Trash2, Upload, X, XCircle, ZoomIn, ZoomOut
 } from "lucide-react";
-import { DEFAULT_GRADING_MODE, DEFAULT_MODEL_TIMEOUT_MS, DEFAULT_TEACHER_REASONING_EFFORT, DEFAULT_UNREADABLE_REVIEW_THRESHOLD } from "../shared/types";
+import { DEFAULT_GRADING_MODE, DEFAULT_MODEL_TIMEOUT_MS, DEFAULT_REVIEW_REASONING_EFFORT, DEFAULT_TEACHER_REASONING_EFFORT, DEFAULT_UNREADABLE_REVIEW_THRESHOLD } from "../shared/types";
 import type {
-  GradingResult, GradingTemplateDetail, GradingTemplateSummary, ModelConfigInput,
-  ModelCallLogDetails, PublicModelConfig, Rubric, SystemLogEntry, SystemLogSnapshot
+  GradingResult, GradingTemplateDetail, GradingTemplateSummary, ModelCallHistoryEntry,
+  ModelConfigInput, ModelCallLogDetails, PublicModelConfig, Rubric, SystemLogEntry, SystemLogSnapshot
 } from "../shared/types";
 import { api, uploadDocument } from "./api";
+import {
+  IMAGE_VIEWER_MAX_SCALE, calculateImageFitScale, clampImageOffset, clampImageScale,
+  imageOffsetAfterZoom, type ViewerPoint, type ViewerSize
+} from "./answerImageViewer";
 import { MathText } from "./Formula";
 import { directionFromPopState, replaceRoute, runRouteTransition } from "./navigation";
+import { ScorePointGuidance } from "./ScorePointGuidance";
 
 type View = "workspace" | "history" | "logs" | "models";
 type AppRoute = { view: View; templateId?: string; resultId?: string };
@@ -26,6 +32,9 @@ const defaultConfig: ModelConfigInput = {
   apiKey: "",
   visionModel: "",
   textModel: "",
+  reviewBaseUrl: "",
+  reviewApiKey: "",
+  reviewModel: "",
   timeoutMs: DEFAULT_MODEL_TIMEOUT_MS,
   maxRetries: 1,
   maxConcurrency: 2,
@@ -33,6 +42,7 @@ const defaultConfig: ModelConfigInput = {
   unreadableReviewThreshold: DEFAULT_UNREADABLE_REVIEW_THRESHOLD,
   gradingMode: DEFAULT_GRADING_MODE,
   teacherReasoningEffort: DEFAULT_TEACHER_REASONING_EFFORT,
+  reviewReasoningEffort: DEFAULT_REVIEW_REASONING_EFFORT,
   supportsJsonSchema: true,
   supportsJsonObject: true,
   supportsBase64Images: true,
@@ -215,14 +225,15 @@ function App() {
 function ModelSettings({ current, onSaved }: { current: PublicModelConfig | null; onSaved: () => Promise<void> }) {
   const [form, setForm] = useState<ModelConfigInput>(defaultConfig);
   const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState<"text" | "vision" | null>(null);
+  const [testing, setTesting] = useState<"text" | "vision" | "review" | null>(null);
   const [testResult, setTestResult] = useState<{ type: "ok" | "error"; text: string } | null>(null);
 
   useEffect(() => {
     if (!current) return;
     setForm({
       ...current,
-      apiKey: ""
+      apiKey: "",
+      reviewApiKey: ""
     });
   }, [current]);
 
@@ -248,7 +259,7 @@ function ModelSettings({ current, onSaved }: { current: PublicModelConfig | null
     } finally { setSaving(false); }
   };
 
-  const test = async (mode: "text" | "vision") => {
+  const test = async (mode: "text" | "vision" | "review") => {
     setTesting(mode); setTestResult(null);
     let applied = false;
     try {
@@ -269,6 +280,10 @@ function ModelSettings({ current, onSaved }: { current: PublicModelConfig | null
     && form.visionModel.trim()
     && form.textModel.trim()
     && (form.apiKey?.trim() || current?.hasApiKey)
+  );
+  const canTestReview = Boolean(
+    form.reviewModel?.trim()
+    && (form.reviewApiKey?.trim() || current?.hasReviewApiKey)
   );
 
   return (
@@ -310,14 +325,18 @@ function ModelSettings({ current, onSaved }: { current: PublicModelConfig | null
       <section className="settings-section">
         <div className="section-heading"><Sparkles size={18} /><div><h2>模型与调用</h2><p>文字结构化与视觉批改可使用不同模型。</p></div></div>
         <div className="form-grid">
-          <label><span>多模态模型</span><input value={form.visionModel} onChange={(event) => update("visionModel", event.target.value)} placeholder="vision-model-name" /></label>
+          <label><span>多模态教师模型</span><input value={form.visionModel} onChange={(event) => update("visionModel", event.target.value)} placeholder="vision-model-name" /></label>
+          <label><span>局部审验模型</span><input value={form.reviewModel ?? ""} onChange={(event) => update("reviewModel", event.target.value)} placeholder="留空则不启用主动数值审验" /><small>填写支持图像输入的快速小模型。它只独立读取证据框内的最终数值答案；冲突时转人工复核，不直接改判。</small></label>
+          <label className="span-2"><span>审验 API Base URL</span><input value={form.reviewBaseUrl ?? ""} onChange={(event) => update("reviewBaseUrl", event.target.value)} placeholder="留空则复用教师 API Base URL" /><small>只复用服务地址，不复用教师 API Key。</small></label>
+          <label className="span-2"><span>审验 API Key</span><input type="password" value={form.reviewApiKey ?? ""} onChange={(event) => update("reviewApiKey", event.target.value)} placeholder={current?.reviewApiKeyMasked || "输入独立审验 API Key"} /><small>{current?.hasReviewApiKey ? "留空将保留已保存的审验密钥" : "启用审验模型时必须单独填写，不会使用教师密钥代替"}</small></label>
           <label><span>文本模型</span><input value={form.textModel} onChange={(event) => update("textModel", event.target.value)} placeholder="text-model-name" /></label>
           <label><span>超时时间（毫秒）</span><input type="number" value={form.timeoutMs} onChange={(event) => update("timeoutMs", Number(event.target.value))} /></label>
           <label><span>最大输出 Token</span><input type="number" value={form.maxOutputTokens} onChange={(event) => update("maxOutputTokens", Number(event.target.value))} /></label>
           <label><span>失败重试</span><input type="number" value={form.maxRetries} onChange={(event) => update("maxRetries", Number(event.target.value))} /></label>
           <label><span>最大并发</span><input type="number" value={form.maxConcurrency} onChange={(event) => update("maxConcurrency", Number(event.target.value))} /></label>
           <label className="span-2"><span>学生答卷批改方式</span><select value={form.gradingMode ?? DEFAULT_GRADING_MODE} onChange={(event) => update("gradingMode", event.target.value as ModelConfigInput["gradingMode"])}><option value="vision_direct">视觉直批（推荐）</option><option value="evidence_pipeline">先提取卷面证据，再分步评分（兼容模式）</option></select><small>视觉直批会把题目、评分标准和学生答卷原图直接交给教师模型；兼容模式保留旧的分步提取流程。</small></label>
-          <label className="span-2"><span>教师模型推理强度</span><select value={form.teacherReasoningEffort ?? DEFAULT_TEACHER_REASONING_EFFORT} onChange={(event) => update("teacherReasoningEffort", event.target.value as ModelConfigInput["teacherReasoningEffort"])}><option value="disabled">默认，不额外传递推理强度</option><option value="low">低，优先响应速度</option><option value="medium">中，适合常规阅卷</option><option value="high">高，适合复杂等价判断</option></select><small>仅用于最终答案判断和逐点评分审验。仅在服务支持 OpenAI 兼容的 <code>reasoning_effort</code> 参数时启用；不支持时请保持默认。</small></label>
+          <label className="span-2"><span>教师模型推理强度</span><select value={form.teacherReasoningEffort ?? DEFAULT_TEACHER_REASONING_EFFORT} onChange={(event) => update("teacherReasoningEffort", event.target.value as ModelConfigInput["teacherReasoningEffort"])}><option value="disabled">默认，不额外传递推理强度</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select><small>提供六档可选强度；具体模型和兼容服务必须支持所选 <code>reasoning_effort</code>，否则调用会由服务端报错。</small></label>
+          <label className="span-2"><span>审验模型推理强度</span><select value={form.reviewReasoningEffort ?? DEFAULT_REVIEW_REASONING_EFFORT} onChange={(event) => update("reviewReasoningEffort", event.target.value as ModelConfigInput["reviewReasoningEffort"])}><option value="disabled">默认，不额外传递推理强度</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select><small>快速小模型建议使用 low；只有复杂、潦草局部答案才需要提高强度。</small></label>
         </div>
         <div className="toggle-row">
           <Toggle label="JSON Schema" checked={form.supportsJsonSchema} onChange={(value) => update("supportsJsonSchema", value)} />
@@ -335,6 +354,7 @@ function ModelSettings({ current, onSaved }: { current: PublicModelConfig | null
         <div><strong>连接测试会产生一次最小模型调用</strong><small>测试前会先保存并全局应用当前页面中的连接信息、模型和调用参数。</small></div>
         <button className="button secondary" disabled={!canTest || saving || Boolean(testing)} onClick={() => void test("text")}>{testing === "text" ? <LoaderCircle className="spin" size={16} /> : <Code2 size={16} />}测试文本</button>
         <button className="button secondary" disabled={!canTest || saving || Boolean(testing)} onClick={() => void test("vision")}>{testing === "vision" ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}测试多模态</button>
+        <button className="button secondary" disabled={!canTestReview || saving || Boolean(testing)} onClick={() => void test("review")}>{testing === "review" ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}测试审验模型</button>
         <button className="button primary" disabled={saving || Boolean(testing)} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存并全局应用</button>
       </div>
     </div>
@@ -364,8 +384,9 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
   const [students, setStudents] = useState<StudentFile[]>([]);
   const [results, setResults] = useState<GradingResult[]>([]);
   const [answerImageUrls, setAnswerImageUrls] = useState<Record<string, string>>({});
+  const [modelCallsByResultId, setModelCallsByResultId] = useState<Record<string, ModelCallHistoryEntry[]>>({});
   const [selectedResultId, setSelectedResultId] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"document" | "structure" | "grade" | "regrade" | "demo" | "save" | "history" | null>(null);
+  const [busy, setBusy] = useState<"document" | "structure" | "refine" | "grade" | "regrade" | "demo" | "save" | "history" | null>(null);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
@@ -403,7 +424,8 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
     if (busy === "structure") onActivityChange(`正在生成规则 · ${structureElapsed}s`);
     else if (busy === "grade") onActivityChange(`正在批改 · ${Math.round(progress * 100)}%`);
     else if (busy === "regrade") onActivityChange("正在重新判定历史答卷");
-    else if (busy === "save") onActivityChange("正在保存锁定模板");
+    else if (busy === "save") onActivityChange("正在保存评分标准");
+    else if (busy === "refine") onActivityChange("教师模型正在完善评分标准");
     else if (busy === "history") onActivityChange("正在恢复历史场景");
     else onActivityChange(null);
   }, [busy, onActivityChange, progress, structureElapsed]);
@@ -458,6 +480,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
         const restoredResults = detail.records.map((record) => record.result);
         setResults(restoredResults);
         setAnswerImageUrls(Object.fromEntries(detail.records.map((record) => [record.result.id, record.answerImage.url])));
+        setModelCallsByResultId(Object.fromEntries(detail.records.flatMap((record) => record.modelCalls ? [[record.result.id, record.modelCalls]] : [])));
         setSelectedResultId(restoredResults[0]?.id ?? null);
         setStudents([]);
         setStructureLogs([]);
@@ -480,6 +503,19 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
     const matched = results.find((result) => result.id === openResultId);
     if (matched) setSelectedResultId(matched.id);
   }, [openResultId, results]);
+
+  useEffect(() => {
+    if (!templateId || !selectedResultId || modelCallsByResultId[selectedResultId]) return;
+    let cancelled = false;
+    void api<ModelCallHistoryEntry[]>(`/api/history-records/${encodeURIComponent(selectedResultId)}/model-calls`)
+      .then((calls) => {
+        if (!cancelled) setModelCallsByResultId((current) => ({ ...current, [selectedResultId]: calls }));
+      })
+      .catch(() => {
+        if (!cancelled) setModelCallsByResultId((current) => ({ ...current, [selectedResultId]: [] }));
+      });
+    return () => { cancelled = true; };
+  }, [modelCallsByResultId, selectedResultId, templateId]);
 
   const extract = async (file: File, target: "question" | "reference") => {
     setBusy("document"); setError("");
@@ -540,34 +576,59 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
     try {
       const next = JSON.parse(rubricJson) as Rubric;
       next.status = "draft";
-      setRubric(next); setEditingJson(false); setError(""); setTemplateId(null);
+      setRubric(next); setEditingJson(false); setError("");
     } catch { setError("JSON 格式无效，请检查后重试"); }
   };
 
+  const refineRubricDraft = async (instruction: string) => {
+    if (!rubric) return;
+    setBusy("refine"); setError("");
+    try {
+      const next = await api<Rubric>("/api/rubrics/refine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rubric, instruction })
+      });
+      setRubric(next); setRubricJson(JSON.stringify(next, null, 2)); setEditingJson(false);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "评分细节补充失败"); throw cause; }
+    finally { setBusy(null); }
+  };
+
   const lockAndSaveRubric = async () => {
-    if (!rubric || templateId) return;
+    if (!rubric) return;
     setBusy("save"); setError("");
     try {
-      const locked: Rubric = { ...rubric, status: "locked" };
+      const savedRubric: Rubric = { ...rubric, status: "saved" };
+      if (templateId) {
+        const detail = await api<GradingTemplateDetail>(`/api/templates/${encodeURIComponent(templateId)}/rubric`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rubric: savedRubric })
+        });
+        setRubric(detail.rubric);
+        setRubricJson(JSON.stringify(detail.rubric, null, 2));
+        onTemplateSaved();
+        return;
+      }
       const form = new FormData();
       form.append("questionText", questionText);
       form.append("referenceText", referenceText);
-      form.append("rubric", JSON.stringify(locked));
+      form.append("rubric", JSON.stringify(savedRubric));
       questionImages.forEach((image) => form.append("questionImages", image.file, image.file.name));
       referenceImages.forEach((image) => form.append("referenceImages", image.file, image.file.name));
       const saved = await api<GradingTemplateSummary>("/api/templates", { method: "POST", body: form });
-      setRubric(locked);
-      setRubricJson(JSON.stringify(locked, null, 2));
+      setRubric(savedRubric);
+      setRubricJson(JSON.stringify(savedRubric, null, 2));
       setTemplateId(saved.id);
       setStructureLogs((logs) => [...logs, {
         id: crypto.randomUUID(),
         time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
-        message: `评分标准已锁定并自动保存为模板：${saved.title}`,
+        message: `评分标准已保存为可继续修改的模板：${saved.title}`,
         status: "done"
       }]);
       onTemplateSaved();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "模板保存失败，评分标准尚未锁定");
+      setError(cause instanceof Error ? cause.message : "评分标准保存失败");
     } finally {
       setBusy(null);
     }
@@ -583,7 +644,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
   };
 
   const grade = async () => {
-    if (!rubric || rubric.status !== "locked" || !students.length) return;
+    if (!rubric || rubric.status === "draft" || !students.length) return;
     if (!configReady) { onOpenModels(); return; }
     const priorResults = results;
     setBusy("grade"); setProgress(0); setError("");
@@ -636,7 +697,7 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
   return (
     <div className="page">
       <header className="page-header workspace-header">
-        <div><p className="eyebrow">物理计算题 · 首版测试台</p><h1>批改任务</h1><p>先锁定评分标准，再批量提取卷面证据并按规则计分。</p></div>
+        <div><p className="eyebrow">物理计算题 · 首版测试台</p><h1>批改任务</h1><p>先确认并保存评分标准，再批量提取卷面证据并按当前版本计分。</p></div>
         <button className="button secondary" disabled={busy === "demo"} onClick={() => void loadDemo()}>{busy === "demo" ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}载入演示批次</button>
       </header>
 
@@ -660,9 +721,9 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
         {structureLogs.length > 0 && <ActivityConsole logs={structureLogs} elapsed={structureElapsed} running={busy === "structure"} />}
       </section>
 
-      {rubric && <RubricReview rubric={rubric} editingJson={editingJson} rubricJson={rubricJson} setRubricJson={setRubricJson} onEdit={() => setEditingJson(true)} onCancelEdit={() => setEditingJson(false)} onApplyJson={applyJson} onLock={() => void lockAndSaveRubric()} saving={busy === "save"} templateId={templateId} />}
+      {rubric && <RubricReview rubric={rubric} editingJson={editingJson} rubricJson={rubricJson} setRubricJson={setRubricJson} onEdit={() => setEditingJson(true)} onCancelEdit={() => setEditingJson(false)} onApplyJson={applyJson} onRefine={refineRubricDraft} refining={busy === "refine"} onSave={() => void lockAndSaveRubric()} saving={busy === "save"} templateId={templateId} />}
 
-      {rubric?.status === "locked" && <section className="workspace-section">
+      {rubric && <section className="workspace-section">
         <div className="section-title-row"><div><span className="section-index">03</span><h2>学生作答</h2></div><span className="section-meta">JPG、PNG、WEBP，单张不超过 15 MB</span></div>
         <div className="upload-strip" onClick={() => studentInput.current?.click()}><Upload size={22} /><div><strong>选择数张学生作答图片</strong><span>文件名仅作参考，可在上传后修改学生编号</span></div><button className="button secondary">选择图片</button></div>
         <input ref={studentInput} hidden type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={(event) => addStudents(event.target.files)} />
@@ -672,11 +733,11 @@ function GradingWorkspace({ configReady, onOpenModels, onActivityChange, openTem
           <span>{student.file.name}</span><small>{(student.file.size / 1024 / 1024).toFixed(2)} MB</small>
           <button className="icon-button" title="移除这份作答" onClick={() => setStudents((items) => items.filter((item) => item.id !== student.id))}><Trash2 size={16} /></button>
         </div>)}</div>}
-        <div className="inline-action grading-action"><span>{students.length ? `已准备 ${students.length} 份作答，将按顺序处理。` : "尚未添加学生作答。"}</span><button className="button primary" disabled={!students.length || busy === "grade"} onClick={() => void grade()}>{busy === "grade" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{busy === "grade" ? `正在批改 ${Math.round(progress * 100)}%` : "开始批改"}</button></div>
+        <div className="inline-action grading-action"><span>{rubric.status === "draft" ? "请先保存当前评分标准版本，再开始批改。" : students.length ? `已准备 ${students.length} 份作答，将按顺序处理。` : "尚未添加学生作答。"}</span><button className="button primary" disabled={!students.length || rubric.status === "draft" || busy === "grade"} onClick={() => void grade()}>{busy === "grade" ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{busy === "grade" ? `正在批改 ${Math.round(progress * 100)}%` : "开始批改"}</button></div>
         {busy === "grade" && <div className="progress-track"><span style={{ width: `${progress * 100}%` }} /></div>}
       </section>}
 
-      {results.length > 0 && metrics && <ResultsSection results={results} metrics={metrics} rubric={rubric ?? undefined} selected={selectedResult} answerImageUrl={selectedResult ? answerImageUrls[selectedResult.id] : undefined} onSelect={(id) => { setSelectedResultId(id); if (templateId) onResultSelected(templateId, id); }} templateId={templateId} regrading={busy === "regrade"} onRegrade={regrade} />}
+      {results.length > 0 && metrics && <ResultsSection results={results} metrics={metrics} rubric={rubric ?? undefined} selected={selectedResult} answerImageUrl={selectedResult ? answerImageUrls[selectedResult.id] : undefined} modelCalls={selectedResult ? modelCallsByResultId[selectedResult.id] : undefined} onSelect={(id) => { setSelectedResultId(id); if (templateId) onResultSelected(templateId, id); }} templateId={templateId} regrading={busy === "regrade"} onRegrade={regrade} />}
     </div>
   );
 }
@@ -735,19 +796,21 @@ function DocumentBox({ title, icon, text, images, onText, onImages, onUpload, pl
   </div>;
 }
 
-function RubricReview({ rubric, editingJson, rubricJson, setRubricJson, onEdit, onCancelEdit, onApplyJson, onLock, saving, templateId }: { rubric: Rubric; editingJson: boolean; rubricJson: string; setRubricJson: (value: string) => void; onEdit: () => void; onCancelEdit: () => void; onApplyJson: () => void; onLock: () => void; saving: boolean; templateId: string | null }) {
+function RubricReview({ rubric, editingJson, rubricJson, setRubricJson, onEdit, onCancelEdit, onApplyJson, onRefine, refining, onSave, saving, templateId }: { rubric: Rubric; editingJson: boolean; rubricJson: string; setRubricJson: (value: string) => void; onEdit: () => void; onCancelEdit: () => void; onApplyJson: () => void; onRefine: (instruction: string) => Promise<void>; refining: boolean; onSave: () => void; saving: boolean; templateId: string | null }) {
+  const [instruction, setInstruction] = useState("");
   return <section className="workspace-section rubric-section">
-    <div className="section-title-row"><div><span className="section-index">02</span><h2>确认评分标准</h2><span className={`pill ${rubric.status}`}>{rubric.status === "locked" ? <LockKeyhole size={13} /> : <Code2 size={13} />}{rubric.status === "locked" ? `已锁定 v${rubric.version}${templateId ? " · 已保存" : " · 尚未保存"}` : "结构化草稿"}</span></div><div className="header-actions"><button className="button secondary" onClick={onEdit}><Code2 size={16} />编辑 JSON</button>{(rubric.status !== "locked" || !templateId) && <button className="button primary" disabled={saving} onClick={onLock}>{saving ? <LoaderCircle className="spin" size={16} /> : <LockKeyhole size={16} />}{saving ? "保存模板中" : rubric.status === "locked" ? "保存当前模板" : "确认、锁定并保存"}</button>}</div></div>
+    <div className="section-title-row"><div><span className="section-index">02</span><h2>确认评分标准</h2><span className={`pill ${rubric.status}`}><Code2 size={13} />{templateId ? `已保存 v${rubric.version} · 可修改` : "结构化草稿"}</span></div><div className="header-actions"><button className="button secondary" onClick={onEdit}><Code2 size={16} />编辑 JSON</button><button className="button primary" disabled={saving || Boolean(templateId && rubric.status !== "draft")} onClick={onSave}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saving ? "保存模板中" : templateId ? rubric.status === "draft" ? "保存新版本" : "已保存" : "保存评分标准"}</button></div></div>
+    <div className="rubric-refinement"><label htmlFor="rubric-refinement-prompt">补充评分细节</label><p>当前完整 JSON 会交给教师模型修改，分值结构保持不变。</p><textarea id="rubric-refinement-prompt" value={instruction} maxLength={4000} disabled={refining} onChange={(event) => setInstruction(event.target.value)} placeholder="输入需要补充的评分细节、替代解法或等价情况" /><div><span>{instruction.length} / 4000</span><button className="button dark" disabled={!instruction.trim() || refining} onClick={() => void onRefine(instruction.trim()).then(() => setInstruction("")).catch(() => undefined)}>{refining ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}{refining ? "正在修改" : "交给教师模型完善"}</button></div></div>
     {rubric.warnings.length > 0 && <div className="warning-list"><AlertTriangle size={17} /><div><strong>结构校验提示</strong>{rubric.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div></div>}
     {editingJson ? <div className="json-editor"><textarea value={rubricJson} onChange={(event) => setRubricJson(event.target.value)} spellCheck={false} /><div><button className="button secondary" onClick={onCancelEdit}>取消</button><button className="button dark" onClick={onApplyJson}><Check size={16} />应用修改</button></div></div> : <div className="rubric-content">
       <div className="rubric-summary"><div><span>题目</span><strong>{rubric.title}</strong></div><div><span>总分</span><strong>{rubric.totalScore} 分</strong></div><div><span>小问</span><strong>{rubric.subquestions.length}</strong></div><div><span>评分点</span><strong>{rubric.subquestions.reduce((sum, item) => sum + item.scorePoints.length, 0)}</strong></div></div>
-      <div className="recognized-question"><div className="recognized-question-header"><FileText size={16} /><strong>识别到的题目原文</strong><span>锁定前请核对公式、单位和小问编号</span></div>{rubric.recognizedQuestionText ? <MathText value={rubric.recognizedQuestionText} formulaByDefault /> : <p className="empty-recognition">模型未返回题目原文，请编辑 JSON 补充或重新生成。</p>}</div>
-      {rubric.subquestions.map((subquestion) => <div className="subquestion" key={subquestion.id}><div className="subquestion-header"><div><strong>{subquestion.title}</strong><span>{subquestion.id}</span></div><b>{subquestion.maxScore} 分</b></div><div className="answer-rule"><span>最终答案</span><div className="formula-list">{subquestion.finalAnswers.length ? subquestion.finalAnswers.map((item, index) => <span className="formula-option" key={`${item.expression}-${index}`}><FinalAnswerFormula expression={item.expression} unit={item.unit} />{index < subquestion.finalAnswers.length - 1 && <i>/</i>}</span>) : <span>未配置</span>}</div><small>教师模型判定正确时直接满分；过程审验仅作审计</small></div><div className="rubric-table"><div className="rubric-table-head"><span>评分点</span><span>判定依据</span><span>分值</span></div>{subquestion.scorePoints.map((point) => <div className="rubric-table-row" key={point.id}><span><b>{point.id}</b>{point.title}</span><span>{point.description}<MathText value={point.expected} formulaByDefault /></span><strong>{point.score}</strong></div>)}</div></div>)}
+      <div className="recognized-question"><div className="recognized-question-header"><FileText size={16} /><strong>识别到的题目原文</strong><span>保存前请核对公式、单位和小问编号</span></div>{rubric.recognizedQuestionText ? <MathText value={rubric.recognizedQuestionText} formulaByDefault /> : <p className="empty-recognition">模型未返回题目原文，请编辑 JSON 补充或重新生成。</p>}</div>
+      {rubric.subquestions.map((subquestion) => <div className="subquestion" key={subquestion.id}><div className="subquestion-header"><div><strong>{subquestion.title}</strong><span>{subquestion.id}</span></div><b>{subquestion.maxScore} 分</b></div><div className="answer-rule"><span>最终答案</span><div className="formula-list">{subquestion.finalAnswers.length ? subquestion.finalAnswers.map((item, index) => <span className="formula-option" key={`${item.expression}-${index}`}><FinalAnswerFormula expression={item.expression} unit={item.unit} />{index < subquestion.finalAnswers.length - 1 && <i>/</i>}</span>) : <span>未配置</span>}</div><small>教师模型判定正确时直接满分；过程审验仅作审计</small></div><div className="rubric-table"><div className="rubric-table-head"><span>评分点</span><span>判定依据</span><span>分值</span></div>{subquestion.scorePoints.map((point) => <div className="rubric-table-row" key={point.id}><span><b>{point.id}</b>{point.title}</span><span>{point.description}<MathText value={point.expected} formulaByDefault /><ScorePointGuidance point={point} defaultOpen /></span><strong>{point.score}</strong></div>)}</div></div>)}
     </div>}
   </section>;
 }
 
-function ResultsSection({ results, metrics, rubric, selected, answerImageUrl, onSelect, templateId, regrading, onRegrade }: { results: GradingResult[]; metrics: { coverage: number; traceability: number; automatic: number; review: number }; rubric?: Rubric; selected?: GradingResult; answerImageUrl?: string; onSelect: (id: string) => void; templateId: string | null; regrading: boolean; onRegrade: (id: string) => Promise<void> }) {
+function ResultsSection({ results, metrics, rubric, selected, answerImageUrl, modelCalls, onSelect, templateId, regrading, onRegrade }: { results: GradingResult[]; metrics: { coverage: number; traceability: number; automatic: number; review: number }; rubric?: Rubric; selected?: GradingResult; answerImageUrl?: string; modelCalls?: ModelCallHistoryEntry[]; onSelect: (id: string) => void; templateId: string | null; regrading: boolean; onRegrade: (id: string) => Promise<void> }) {
   const currentResultCount = currentResultVersions(results).length;
   return <section className="workspace-section results-section">
     <div className="section-title-row"><div><span className="section-index">04</span><h2>批改结果与执行数据</h2></div><span className="section-meta">共 {currentResultCount} 份答卷{results.length > currentResultCount ? ` · ${results.length} 个结果版本` : ""}</span></div>
@@ -758,7 +821,7 @@ function ResultsSection({ results, metrics, rubric, selected, answerImageUrl, on
       <Metric icon={<AlertTriangle size={18} />} label="答卷复核率" value={percent(metrics.review)} detail="包含至少一项风险" tone="amber" />
     </div>
     <div className="result-table"><div className="result-head"><span>学生</span><span>文件</span><span>得分</span><span>处理状态</span><span>耗时</span><span /></div>{results.map((result) => <button className={selected?.id === result.id ? "result-row selected" : "result-row"} key={result.id} onClick={() => onSelect(result.id)}><span><strong>{result.studentId}</strong></span><span>{result.fileName}</span><span><b>{scoreLabel(result.score, result.maximumPossibleScore)}</b> / {result.maxScore}</span><span><i className={`status-chip ${result.status}`}>{result.status === "completed" ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}{statusLabel(result.status)}</i></span><span>{(result.metrics.durationMs / 1000).toFixed(1)} s</span><ChevronRight size={16} /></button>)}</div>
-    {selected && <ResultDetail result={selected} rubric={rubric ?? undefined} answerImageUrl={answerImageUrl} canRegrade={Boolean(templateId)} regrading={regrading} onRegrade={onRegrade} />}
+    {selected && <><ResultDetail result={selected} rubric={rubric ?? undefined} answerImageUrl={answerImageUrl} canRegrade={Boolean(templateId)} regrading={regrading} onRegrade={onRegrade} />{modelCalls && <ModelCallHistory calls={modelCalls} />}</>}
   </section>;
 }
 
@@ -842,7 +905,7 @@ export function ResultDetail({ result, rubric, answerImageUrl, canRegrade, regra
             <div className="final-verdict-title">
               {subquestion.finalAnswerStatus === "correct" ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
               <strong>{finalAnswerLabel(subquestion.finalAnswerStatus, teacherDecision)}</strong>
-              <span>{subquestion.finalAnswerDecisionSource === "teacher_model" ? `教师模型 · ${percent(subquestion.finalAnswerConfidence ?? 0)}` : subquestion.finalAnswerDecisionSource === "missing_teacher_judgement" ? "教师判定缺失" : "旧版结果"}</span>
+              <span>{subquestion.finalAnswerDecisionSource === "teacher_model" ? `教师模型 · ${percent(subquestion.finalAnswerConfidence ?? 0)}` : subquestion.finalAnswerDecisionSource === "unreadable_local_review" ? `局部视觉复查 · ${percent(subquestion.finalAnswerConfidence ?? 0)}` : subquestion.finalAnswerDecisionSource === "local_numeric_review" ? "审验模型冲突" : subquestion.finalAnswerDecisionSource === "missing_teacher_judgement" ? "教师判定缺失" : "旧版结果"}</span>
             </div>
             {subquestion.finalAnswerReason && <div className="final-verdict-reason"><MathText value={subquestion.finalAnswerReason} formulaByDefault /></div>}
             {(subquestion.studentFinalAnswer || subquestion.referenceFinalAnswer) && <div className="answer-comparison">
@@ -869,6 +932,7 @@ export function ResultDetail({ result, rubric, answerImageUrl, canRegrade, regra
                     <strong>{scorePoint.title}</strong>
                     {scorePoint.description && <MathText value={scorePoint.description} formulaByDefault />}
                     {scorePoint.expected && <div className="decision-standard-expected"><span>判分依据</span><MathText value={scorePoint.expected} formulaByDefault /></div>}
+                    <ScorePointGuidance point={scorePoint} />
                   </div>}
                 </div>
                 <small className={`decision-scoring ${decision.scoringDisposition ?? "legacy"}`}>{scoringDispositionLabel(decision.scoringDisposition, decision.requiresReview, decision.status)}{decision.status === "insufficient_evidence" && decision.uncertainScore ? `；旧版待复核 ${decision.uncertainScore} 分` : ""}</small>
@@ -907,30 +971,69 @@ function AnswerImageViewer({ imageUrl, fileName, region }: {
   region?: [number, number, number, number];
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [zoom, setZoom] = useState(1);
+  const [scale, setScale] = useState(1);
+  const [fitMode, setFitMode] = useState(true);
+  const [offset, setOffset] = useState<ViewerPoint>({ x: 0, y: 0 });
+  const [viewportSize, setViewportSize] = useState<ViewerSize>({ width: 0, height: 0 });
+  const [dragging, setDragging] = useState(false);
   const [naturalSize, setNaturalSize] = useState({ width: 0, height: 0 });
   const [loadFailed, setLoadFailed] = useState(false);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    start: ViewerPoint;
+    origin: ViewerPoint;
+  } | null>(null);
+
+  const fitScale = useMemo(
+    () => calculateImageFitScale(naturalSize, viewportSize),
+    [naturalSize, viewportSize]
+  );
 
   useEffect(() => {
     setExpanded(false);
-    setZoom(1);
+    setScale(1);
+    setFitMode(true);
+    setOffset({ x: 0, y: 0 });
+    setViewportSize({ width: 0, height: 0 });
     setNaturalSize({ width: 0, height: 0 });
     setLoadFailed(false);
   }, [imageUrl]);
 
   useEffect(() => {
     if (!expanded) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setExpanded(false);
-    };
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", onKeyDown);
+    dialogRef.current?.focus();
     return () => {
       document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", onKeyDown);
     };
   }, [expanded]);
+
+  useEffect(() => {
+    if (!expanded || !viewportRef.current) return;
+    const viewport = viewportRef.current;
+    const updateViewportSize = () => {
+      const bounds = viewport.getBoundingClientRect();
+      setViewportSize({ width: bounds.width, height: bounds.height });
+    };
+    updateViewportSize();
+    const observer = new ResizeObserver(updateViewportSize);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [expanded]);
+
+  useEffect(() => {
+    if (!expanded || !fitMode || viewportSize.width <= 0 || naturalSize.width <= 0) return;
+    setScale(fitScale);
+    setOffset({ x: 0, y: 0 });
+  }, [expanded, fitMode, fitScale, naturalSize.width, viewportSize.width]);
+
+  useEffect(() => {
+    if (!expanded || fitMode) return;
+    setOffset((current) => clampImageOffset(current, naturalSize, viewportSize, scale));
+  }, [expanded, fitMode, naturalSize, scale, viewportSize]);
 
   const regionStyle = region && naturalSize.width > 0 && naturalSize.height > 0 ? {
     left: `${Math.max(0, region[0]) / naturalSize.width * 100}%`,
@@ -943,30 +1046,155 @@ function AnswerImageViewer({ imageUrl, fileName, region }: {
     setLoadFailed(false);
   };
 
+  const openExpanded = () => {
+    setFitMode(true);
+    setOffset({ x: 0, y: 0 });
+    setExpanded(true);
+  };
+
+  const fitToWindow = useCallback(() => {
+    setFitMode(true);
+    setScale(fitScale);
+    setOffset({ x: 0, y: 0 });
+  }, [fitScale]);
+
+  const changeScale = useCallback((requestedScale: number, anchor?: ViewerPoint) => {
+    const nextScale = clampImageScale(requestedScale, fitScale);
+    if (Math.abs(nextScale - scale) < 0.0001) return;
+    const nextOffset = anchor
+      ? imageOffsetAfterZoom(offset, scale, nextScale, anchor, viewportSize)
+      : { x: offset.x * nextScale / scale, y: offset.y * nextScale / scale };
+    setScale(nextScale);
+    setFitMode(Math.abs(nextScale - fitScale) < 0.0001);
+    setOffset(clampImageOffset(nextOffset, naturalSize, viewportSize, nextScale));
+  }, [fitScale, naturalSize, offset, scale, viewportSize]);
+
+  const showActualSize = useCallback(() => {
+    changeScale(1);
+  }, [changeScale]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setExpanded(false);
+        return;
+      }
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        changeScale(scale * 1.2);
+      } else if (event.key === "-") {
+        event.preventDefault();
+        changeScale(scale / 1.2);
+      } else if (event.key === "0") {
+        event.preventDefault();
+        showActualSize();
+      } else if (event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        fitToWindow();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [changeScale, expanded, fitToWindow, scale, showActualSize]);
+
+  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const anchor = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+    changeScale(scale * Math.exp(-event.deltaY * 0.0015), anchor);
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const canPan = naturalSize.width * scale > viewportSize.width
+      || naturalSize.height * scale > viewportSize.height;
+    if (!canPan) return;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      start: { x: event.clientX, y: event.clientY },
+      origin: offset
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging(true);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setOffset(clampImageOffset({
+      x: drag.origin.x + event.clientX - drag.start.x,
+      y: drag.origin.y + event.clientY - drag.start.y
+    }, naturalSize, viewportSize, scale));
+  };
+
+  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const toggleActualSize = () => {
+    if (Math.abs(scale - fitScale) < 0.01) showActualSize();
+    else fitToWindow();
+  };
+
+  const modal = expanded && imageUrl && !loadFailed ? <div
+    ref={dialogRef}
+    className="answer-image-modal"
+    role="dialog"
+    aria-modal="true"
+    aria-label={`${fileName} 原始答卷大图`}
+    tabIndex={-1}
+  >
+    <div className="answer-image-modal-toolbar">
+      <strong title={fileName}>{fileName}</strong>
+      <div className="answer-image-modal-actions">
+        <button type="button" className="icon-button" title="缩小" disabled={scale <= Math.min(0.25, fitScale) + 0.001} onClick={() => changeScale(scale / 1.2)}><ZoomOut size={18} /></button>
+        <output aria-label="当前缩放比例">{Math.round(scale * 100)}%</output>
+        <button type="button" className="icon-button" title="放大" disabled={scale >= IMAGE_VIEWER_MAX_SCALE - 0.001} onClick={() => changeScale(scale * 1.2)}><ZoomIn size={18} /></button>
+        <span className="answer-image-modal-divider" />
+        <button type="button" className={`icon-button ${fitMode ? "active" : ""}`} title="适应窗口 (F)" onClick={fitToWindow}><Maximize2 size={17} /></button>
+        <button type="button" className="answer-image-actual-button" title="按原始像素显示 (0)" onClick={showActualSize}>100%</button>
+        <button type="button" className="icon-button answer-image-close-button" title="关闭 (Esc)" onClick={() => setExpanded(false)}><X size={19} /></button>
+      </div>
+    </div>
+    <div
+      ref={viewportRef}
+      className={`answer-image-modal-viewport ${dragging ? "dragging" : ""}`}
+      onWheel={handleWheel}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onDoubleClick={toggleActualSize}
+    >
+      <div
+        className="answer-image-modal-canvas"
+        style={{
+          width: `${naturalSize.width * scale}px`,
+          height: `${naturalSize.height * scale}px`,
+          transform: `translate(-50%, -50%) translate(${offset.x}px, ${offset.y}px)`
+        }}
+      >
+        <img src={imageUrl} alt={`${fileName} 原始答卷大图`} onLoad={handleLoad} draggable={false} />
+        {regionStyle && <span className="answer-region-highlight" style={regionStyle} />}
+      </div>
+    </div>
+  </div> : null;
+
   return <div className="answer-image-viewer">
-    <div className="answer-image-toolbar"><strong>原始图像</strong>{imageUrl && !loadFailed && <button type="button" className="icon-button" title="放大查看原始答卷" onClick={() => setExpanded(true)}><Maximize2 size={15} /></button>}</div>
+    <div className="answer-image-toolbar"><strong>原始图像</strong>{imageUrl && !loadFailed && <button type="button" className="icon-button" title="放大查看原始答卷" onClick={openExpanded}><Maximize2 size={15} /></button>}</div>
     {!imageUrl || loadFailed ? <div className="answer-image-empty"><ImagePlus size={24} /><span>{loadFailed ? "原始答卷图像加载失败" : "该结果没有可用的原始答卷图像"}</span></div> : <div className="answer-image-scroll">
-      <button type="button" className="answer-image-canvas" title="点击放大查看" onClick={() => setExpanded(true)}>
+      <button type="button" className="answer-image-canvas" title="点击放大查看" onClick={openExpanded}>
         <img src={imageUrl} alt={`${fileName} 原始答卷`} onLoad={handleLoad} onError={() => setLoadFailed(true)} />
         {regionStyle && <span className="answer-region-highlight" style={regionStyle} />}
       </button>
     </div>}
-    {expanded && imageUrl && !loadFailed && <div className="answer-image-modal" role="dialog" aria-modal="true" aria-label={`${fileName} 原始答卷大图`} onClick={(event) => event.target === event.currentTarget && setExpanded(false)}>
-      <div className="answer-image-modal-toolbar">
-        <strong>{fileName}</strong>
-        <span>{Math.round(zoom * 100)}%</span>
-        <button type="button" className="icon-button" title="缩小" disabled={zoom <= 0.5} onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))}><ZoomOut size={18} /></button>
-        <button type="button" className="icon-button" title="放大" disabled={zoom >= 3} onClick={() => setZoom((value) => Math.min(3, value + 0.25))}><ZoomIn size={18} /></button>
-        <button type="button" className="icon-button" title="恢复适应窗口" onClick={() => setZoom(1)}><RefreshCw size={17} /></button>
-        <button type="button" className="icon-button" title="关闭" onClick={() => setExpanded(false)}><X size={19} /></button>
-      </div>
-      <div className="answer-image-modal-scroll">
-        <div className="answer-image-modal-canvas" style={{ width: `${zoom * 100}%` }}>
-          <img src={imageUrl} alt={`${fileName} 原始答卷大图`} onLoad={handleLoad} />
-          {regionStyle && <span className="answer-region-highlight" style={regionStyle} />}
-        </div>
-      </div>
-    </div>}
+    {modal && createPortal(modal, document.body)}
   </div>;
 }
 
@@ -977,7 +1205,7 @@ function HistoryPage({ revision, onOpen }: { revision: number; onOpen: (id: stri
 
   const refresh = useCallback(async () => {
     setLoading(true); setError("");
-    try { setTemplates(await api<GradingTemplateSummary[]>("/api/templates")); }
+    try { setTemplates(await api<GradingTemplateSummary[]>("/api/templates?includeBuiltIn=1")); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "历史记录读取失败"); }
     finally { setLoading(false); }
   }, []);
@@ -985,7 +1213,7 @@ function HistoryPage({ revision, onOpen }: { revision: number; onOpen: (id: stri
   useEffect(() => { void refresh(); }, [refresh, revision]);
 
   return <div className="page history-page">
-    <header className="page-header"><div><p className="eyebrow">本机持久化记录</p><h1>历史记录</h1><p>重新打开已锁定模板，查看过往结果或继续批改新答卷。</p></div><button className="button secondary" disabled={loading} onClick={() => void refresh()}>{loading ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}刷新</button></header>
+    <header className="page-header"><div><p className="eyebrow">本机持久化记录</p><h1>历史记录</h1><p>重新打开已保存评分标准，查看过往结果或继续批改新答卷。</p></div><button className="button secondary" disabled={loading} onClick={() => void refresh()}>{loading ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}刷新</button></header>
     {error && <div className="error-banner"><AlertTriangle size={17} /><span>{error}</span></div>}
     <section className="history-section">
       <div className="history-head"><span>题目模板</span><span>满分</span><span>题图</span><span>已批改</span><span>最近使用</span><span /></div>
@@ -997,7 +1225,7 @@ function HistoryPage({ revision, onOpen }: { revision: number; onOpen: (id: stri
         <time>{new Date(template.updatedAt).toLocaleString("zh-CN", { hour12: false })}</time>
         <ChevronRight size={17} />
       </button>)}
-      {!loading && templates.length === 0 && <div className="empty-state"><History size={28} /><strong>还没有历史模板</strong><p>确认并锁定评分标准后会自动出现在这里。</p></div>}
+      {!loading && templates.length === 0 && <div className="empty-state"><History size={28} /><strong>还没有历史模板</strong><p>确认并保存评分标准后会自动出现在这里。</p></div>}
     </section>
   </div>;
 }
@@ -1016,6 +1244,7 @@ function LogsPage({ active }: { active: boolean }) {
   const [snapshot, setSnapshot] = useState<SystemLogSnapshot>({ activeOperations: [], entries: [], serverTime: "" });
   const [scope, setScope] = useState("all");
   const [error, setError] = useState("");
+  const [stoppingId, setStoppingId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try { setSnapshot(await api<SystemLogSnapshot>("/api/logs?limit=500")); setError(""); }
@@ -1036,12 +1265,25 @@ function LogsPage({ active }: { active: boolean }) {
     await refresh();
   };
 
+  const forceStop = async (operationId: string, label: string) => {
+    if (!window.confirm(`确定强制停止“${label}”吗？当前模型请求会立即中断。`)) return;
+    setStoppingId(operationId);
+    try {
+      await api(`/api/operations/${encodeURIComponent(operationId)}/force-stop`, { method: "POST" });
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "强制停止失败");
+    } finally {
+      setStoppingId(null);
+    }
+  };
+
   return <div className="page logs-page">
-    <header className="page-header"><div><p className="eyebrow">可审计运行轨迹</p><h1>运行日志</h1><p>查看模型调用、答案等价检查、规则计分和数据保存停在哪一步。</p></div><div className="header-actions"><button className="button secondary" onClick={() => void refresh()}><RefreshCw size={16} />立即刷新</button><button className="icon-button bordered" title="清空已完成日志" onClick={() => void clear()}><Trash2 size={16} /></button></div></header>
+    <header className="page-header"><div><p className="eyebrow">可审计运行轨迹</p><h1>运行日志</h1><p>查看模型调用、模型判分、分数汇总和数据保存停在哪一步。</p></div><div className="header-actions"><button className="button secondary" onClick={() => void refresh()}><RefreshCw size={16} />立即刷新</button><button className="icon-button bordered" title="清空已完成日志" onClick={() => void clear()}><Trash2 size={16} /></button></div></header>
     {error && <div className="error-banner"><AlertTriangle size={17} /><span>{error}</span></div>}
     <section className="operations-section">
       <div className="logs-section-heading"><div><LoaderCircle className={snapshot.activeOperations.length ? "spin" : ""} size={17} /><h2>当前运行状态</h2></div><span>{snapshot.activeOperations.length ? `${snapshot.activeOperations.length} 个操作进行中` : "系统空闲"}</span></div>
-      {snapshot.activeOperations.length > 0 ? <div className="active-operation-grid">{snapshot.activeOperations.map((operation) => <div className="active-operation" key={operation.id}><div><span>{scopeLabels[operation.scope]}</span><time>已运行 {Math.max(0, Math.floor((Date.now() - new Date(operation.startedAt).getTime()) / 1000))}s</time></div><strong>{operation.label}</strong><p>当前步骤：{operation.step}</p><small>操作 ID：{operation.id}</small></div>)}</div> : <div className="idle-state"><CheckCircle2 size={18} /><span>当前没有阻塞或等待中的后台操作</span></div>}
+      {snapshot.activeOperations.length > 0 ? <div className="active-operation-grid">{snapshot.activeOperations.map((operation) => <div className="active-operation" key={operation.id}><div><span>{scopeLabels[operation.scope]}</span><time>已运行 {Math.max(0, Math.floor((Date.now() - new Date(operation.startedAt).getTime()) / 1000))}s</time></div><strong>{operation.label}</strong><p>当前步骤：{operation.step}</p><small>操作 ID：{operation.id}</small>{operation.cancellable && <button className="force-stop-operation" disabled={stoppingId !== null} onClick={() => void forceStop(operation.id, operation.label)}>{stoppingId === operation.id ? <LoaderCircle className="spin" size={13} /> : <Square size={12} />}{stoppingId === operation.id ? "正在停止" : "强制停止"}</button>}</div>)}</div> : <div className="idle-state"><CheckCircle2 size={18} /><span>当前没有阻塞或等待中的后台操作</span></div>}
     </section>
     <section className="logs-section">
       <div className="logs-toolbar"><div><ScrollText size={16} /><h2>最近事件</h2><span>{entries.length} 条</span></div><label><span>范围</span><select value={scope} onChange={(event) => setScope(event.target.value)}><option value="all">全部</option>{Object.entries(scopeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label></div>
@@ -1055,7 +1297,7 @@ function isModelCallLog(entry: SystemLogEntry): boolean {
   return entry.scope === "model" && entry.details?.kind === "model_call";
 }
 
-function ModelCallDetails({ details }: { details: ModelCallLogDetails }) {
+export function ModelCallDetails({ details }: { details: ModelCallLogDetails }) {
   const response = details.response;
   return <details className="model-call-details">
     <summary>展开 Prompt 与模型原始返回</summary>
@@ -1080,6 +1322,16 @@ function ModelCallDetails({ details }: { details: ModelCallLogDetails }) {
     <div className="model-call-payload"><strong>模型原始 HTTP 返回</strong><pre>{response?.raw || "请求未收到 HTTP 响应。"}</pre></div>
     {response?.content && <div className="model-call-payload"><strong>提取出的 message.content</strong><pre>{response.content}</pre></div>}
   </details>;
+}
+
+export function ModelCallHistory({ calls }: { calls: ModelCallHistoryEntry[] }) {
+  return <section className="model-call-history">
+    <div className="model-call-history-heading"><div><Code2 size={16} /><strong>本题模型原始调用</strong></div><span>{calls.length} 次</span></div>
+    {calls.length > 0 ? calls.map((call, index) => <article key={call.id} className={`model-call-history-entry ${call.level}`}>
+      <div><span>调用 {index + 1}</span><strong>{call.message}</strong><small>{new Date(call.timestamp).toLocaleString("zh-CN", { hour12: false })} · {call.details.schemaName}</small></div>
+      <ModelCallDetails details={call.details} />
+    </article>) : <div className="model-call-history-empty">该历史记录创建时尚未保存模型调用原始数据。</div>}
+  </section>;
 }
 
 export default App;

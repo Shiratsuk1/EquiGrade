@@ -8,14 +8,16 @@ const scorePointSchema = z.object({
   score: z.number().nonnegative(),
   type: z.enum(["formula", "substitution", "result", "text"]),
   expected: z.string(),
-  equivalents: z.array(z.string()).optional().default([])
+  commonResponses: z.array(z.string()).default([]),
+  alternativeMethods: z.array(z.string()).default([]),
+  acceptedEquivalents: z.array(z.string()).default([])
 });
 
 export const rubricSchema = z.object({
   title: z.string().trim().min(1),
   recognizedQuestionText: z.string().default(""),
   version: z.number().int().positive().default(1),
-  status: z.enum(["draft", "locked"]).default("draft"),
+  status: z.enum(["draft", "saved", "locked"]).default("draft"),
   totalScore: z.number().nonnegative(),
   subquestions: z.array(z.object({
     id: z.string().trim().min(1),
@@ -25,7 +27,6 @@ export const rubricSchema = z.object({
     finalAnswers: z.array(z.object({
       expression: z.string(),
       unit: z.string().optional(),
-      tolerance: z.number().nonnegative().optional().default(0),
       label: z.string().optional()
     })),
     scorePoints: z.array(scorePointSchema),
@@ -70,7 +71,8 @@ const finalAnswerJudgementItemSchema = z.object({
   studentAnswer: z.string(),
   referenceAnswer: z.string(),
   reason: z.string(),
-  confidence: z.number().min(0).max(1)
+  confidence: z.number().min(0).max(1),
+  decisionSource: z.enum(["teacher_model", "unreadable_local_review", "local_numeric_review"]).optional()
 });
 
 export const finalAnswerJudgementsSchema = z.object({
@@ -137,6 +139,109 @@ export const directVisionGradeSchema = directVisionGradeCoreSchema.extend({
 export const processJudgementWithCommentarySchema = processJudgementSchema.extend({
   teacherCommentary: teacherCommentarySchema
 });
+
+const unreadableLocalReviewItemSchema = z.object({
+  subquestionId: z.string(),
+  pointId: z.string(),
+  status: z.enum(["satisfied", "not_satisfied", "not_present", "unreadable"]),
+  evidenceLineIds: z.array(z.string()).default([]),
+  evidenceQuote: z.string(),
+  reason: z.string(),
+  confidence: z.number().min(0).max(1),
+  requiresReview: z.boolean()
+});
+
+export const unreadableLocalReviewSchema = z.object({
+  reviews: z.array(unreadableLocalReviewItemSchema).default([]),
+  finalAnswers: z.array(z.object({
+    subquestionId: z.string(),
+    status: z.enum(["correct", "incorrect", "missing", "uncertain"]),
+    evidenceLineIds: z.array(z.string()).default([]),
+    studentAnswer: z.string(),
+    reason: z.string(),
+    confidence: z.number().min(0).max(1),
+    requiresReview: z.boolean(),
+    decisionSource: z.literal("unreadable_local_review").optional()
+  })).default([])
+});
+
+export const unreadableLocalReviewJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["reviews", "finalAnswers"],
+  properties: {
+    reviews: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["subquestionId", "pointId", "status", "evidenceLineIds", "evidenceQuote", "reason", "confidence", "requiresReview"],
+        properties: {
+          subquestionId: { type: "string" },
+          pointId: { type: "string" },
+          status: { type: "string", enum: ["satisfied", "not_satisfied", "not_present", "unreadable"] },
+          evidenceLineIds: { type: "array", items: { type: "string" } },
+          evidenceQuote: { type: "string" },
+          reason: { type: "string" },
+          confidence: { type: "number" },
+          requiresReview: { type: "boolean" }
+        }
+      }
+    },
+    finalAnswers: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["subquestionId", "status", "evidenceLineIds", "studentAnswer", "reason", "confidence", "requiresReview"],
+        properties: {
+          subquestionId: { type: "string" },
+          status: { type: "string", enum: ["correct", "incorrect", "missing", "uncertain"] },
+          evidenceLineIds: { type: "array", items: { type: "string" } },
+          studentAnswer: { type: "string" },
+          reason: { type: "string" },
+          confidence: { type: "number" },
+          requiresReview: { type: "boolean" }
+        }
+      }
+    }
+  }
+} as const;
+
+export const localNumericAnswerReviewSchema = z.object({
+  reviews: z.array(z.object({
+    subquestionId: z.string(),
+    observedAnswer: z.string(),
+    numericTokens: z.array(z.string()).default([]),
+    status: z.enum(["readable", "unreadable"]),
+    confidence: z.number().min(0).max(1),
+    reason: z.string()
+  })).default([])
+});
+
+export const localNumericAnswerReviewJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["reviews"],
+  properties: {
+    reviews: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["subquestionId", "observedAnswer", "numericTokens", "status", "confidence", "reason"],
+        properties: {
+          subquestionId: { type: "string" },
+          observedAnswer: { type: "string" },
+          numericTokens: { type: "array", items: { type: "string" } },
+          status: { type: "string", enum: ["readable", "unreadable"] },
+          confidence: { type: "number" },
+          reason: { type: "string" }
+        }
+      }
+    }
+  }
+} as const;
 
 export function validateRubricTotals<T extends z.infer<typeof rubricSchema>>(rubric: T): T {
   const warnings = [...rubric.warnings];
@@ -220,8 +325,8 @@ export const rubricJsonSchema = {
         properties: {
           id: { type: "string" }, title: { type: "string" }, maxScore: { type: "number" },
           finalAnswerPolicy: { type: "string", enum: ["full_credit", "process_required"] },
-          finalAnswers: { type: "array", items: { type: "object", additionalProperties: false, required: ["expression", "unit", "tolerance", "label"], properties: { expression: { type: "string" }, unit: { type: "string" }, tolerance: { type: "number" }, label: { type: "string" } } } },
-          scorePoints: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "title", "description", "score", "type", "expected", "equivalents"], properties: { id: { type: "string" }, title: { type: "string" }, description: { type: "string" }, score: { type: "number" }, type: { type: "string", enum: ["formula", "substitution", "result", "text"] }, expected: { type: "string" }, equivalents: { type: "array", items: { type: "string" } } } } },
+          finalAnswers: { type: "array", items: { type: "object", additionalProperties: false, required: ["expression", "unit", "label"], properties: { expression: { type: "string" }, unit: { type: "string" }, label: { type: "string" } } } },
+          scorePoints: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "title", "description", "score", "type", "expected", "commonResponses", "alternativeMethods", "acceptedEquivalents"], properties: { id: { type: "string" }, title: { type: "string" }, description: { type: "string" }, score: { type: "number" }, type: { type: "string", enum: ["formula", "substitution", "result", "text"] }, expected: { type: "string" }, commonResponses: { type: "array", items: { type: "string" } }, alternativeMethods: { type: "array", items: { type: "string" } }, acceptedEquivalents: { type: "array", items: { type: "string" } } } } },
           deductions: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "reason", "deduct", "exclusiveGroup"], properties: { id: { type: "string" }, reason: { type: "string" }, deduct: { type: "number" }, exclusiveGroup: { type: "string" } } } }
         }
       }

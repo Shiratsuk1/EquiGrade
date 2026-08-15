@@ -1,7 +1,8 @@
 import { extractAnswerImage } from "./imageExtractor.js";
 import { ZHIXUE_ADAPTER_MANIFEST } from "./manifests.js";
+import { StaleAnswerError } from "./pipelineSafety.js";
 import type { ScoreWritePayload, SiteAdapter } from "./types.js";
-import { buildZhixueScorePlan, matchesZhixueUrl, type ZhixueScoreField } from "./zhixueLogic.js";
+import { buildZhixueScorePlan, matchesZhixueUrl, parseMarkingProgress, type ZhixueScoreField } from "./zhixueLogic.js";
 
 type SubmissionSignal = "acknowledged" | "changed" | "progressed";
 
@@ -153,9 +154,7 @@ function markingProgress(doc: Document) {
   const text = Array.from(doc.querySelectorAll<HTMLElement>(".marking_left_title, .nvatool, #topicImgContent"))
     .map((element) => element.textContent ?? "")
     .join(" ");
-  const match = text.match(/(?:已阅量\s*\/\s*任务量|初评已阅量\s*\/\s*任务量)[^\d]*(\d+)\s*\/\s*(\d+)/);
-  if (!match) return undefined;
-  return { completed: Number(match[1]), total: Number(match[2]) };
+  return parseMarkingProgress(text);
 }
 
 function batchComplete(doc: Document) {
@@ -242,17 +241,104 @@ function submissionProbe(previousPageKey: string | undefined, previousProgress: 
 }
 
 export function createZhixueAdapter(): SiteAdapter {
+  const pageTokens = new WeakMap<object, string>();
+  const observedControls = new WeakSet<HTMLElement>();
+  let pageTokenSequence = 0;
+  let pageEpoch = 0;
+  const pageTokenFor = (card: Element) => {
+    const existing = pageTokens.get(card);
+    if (existing) return existing;
+    const token = `zhixue-page-${++pageTokenSequence}`;
+    pageTokens.set(card, token);
+    return token;
+  };
+  const observePageControls = (doc: Document) => {
+    ["上一份", "下一份"].forEach((title) => {
+      const control = doc.querySelector<HTMLElement>(`a[title='${title}']`);
+      if (!control || typeof control.addEventListener !== "function" || observedControls.has(control)) return;
+      observedControls.add(control);
+      control.addEventListener("click", () => { pageEpoch += 1; }, { capture: true });
+    });
+  };
+  const currentPageToken = (doc = gradingDocument()) => {
+    const card = doc ? answerCard(doc) : null;
+    if (doc) observePageControls(doc);
+    return card ? `${pageTokenFor(card)}@${pageEpoch}` : undefined;
+  };
+  const readCurrentAnswer = async () => {
+    const doc = gradingDocument();
+    if (!doc) throw new Error("未找到智学网阅卷子页面");
+    const card = answerCard(doc);
+    const imageElement = answerImage(doc);
+    if (!card || !imageElement) throw new Error("未找到智学网学生作答原图");
+    const pageToken = currentPageToken(doc);
+    const image = await extractAnswerImage({ card, image: imageElement });
+    const sourcePageKey = pageFingerprint(doc);
+    if (!sourcePageKey) throw new Error("无法生成智学网当前答卷的稳定页面标识，已拒绝提取");
+    const settledDoc = gradingDocument();
+    if (!settledDoc
+      || answerCard(settledDoc) !== card
+      || pageFingerprint(settledDoc) !== sourcePageKey
+      || currentPageToken(settledDoc) !== pageToken) {
+      throw new StaleAnswerError("读取答卷期间智学网页面已经切换，已拒绝继续处理旧答卷");
+    }
+    return {
+      pageKey: `sha256:${image.sha256}`,
+      sourcePageKey,
+      pageToken,
+      imageDataUrl: image.dataUrl,
+      imageHash: image.sha256,
+      imageMimeType: image.mimeType,
+      imageBytes: image.bytes,
+      imageSource: image.source
+    };
+  };
+  const assertCurrentTarget = async (payload: ScoreWritePayload) => {
+    let doc = gradingDocument();
+    if (!doc) throw new StaleAnswerError("写分前智学网阅卷子页面已经离线，已拒绝写入");
+    const initialPageKey = pageFingerprint(doc);
+    const initialPageToken = currentPageToken(doc);
+    if (payload.expectedPageKey && initialPageKey !== payload.expectedPageKey) {
+      throw new StaleAnswerError("写分前检测到智学网页面已经切换，已拒绝写入旧答卷分数");
+    }
+    if (payload.expectedPageToken && initialPageToken !== payload.expectedPageToken) {
+      throw new StaleAnswerError("写分前检测到智学网当前答卷实例已经变化，已拒绝写入旧答卷分数");
+    }
+    if (payload.expectedImageHash) {
+      const current = await readCurrentAnswer();
+      doc = gradingDocument();
+      if (!doc) throw new StaleAnswerError("写分前智学网阅卷子页面已经离线，已拒绝写入");
+      if (payload.expectedPageKey && current.sourcePageKey !== payload.expectedPageKey) {
+        throw new StaleAnswerError("写分前检测到智学网页面已经切换，已拒绝写入旧答卷分数");
+      }
+      if (payload.expectedPageToken && current.pageToken !== payload.expectedPageToken) {
+        throw new StaleAnswerError("写分前检测到智学网当前答卷实例已经变化，已拒绝写入旧答卷分数");
+      }
+      if (current.imageHash !== payload.expectedImageHash) {
+        throw new StaleAnswerError("写分前检测到智学网答卷图像已经变化，已拒绝写入旧答卷分数");
+      }
+    }
+    // These checks are deliberately the last synchronous guard before the
+    // score input is selected. There is no await after them until the value
+    // is dispatched to the validated input element.
+    const finalDoc = gradingDocument();
+    const finalPageKey = finalDoc ? pageFingerprint(finalDoc) : undefined;
+    const finalPageToken = currentPageToken(finalDoc);
+    if (payload.expectedPageKey && finalPageKey !== payload.expectedPageKey) {
+      throw new StaleAnswerError("写分前检测到智学网页面已经切换，已拒绝写入旧答卷分数");
+    }
+    if (payload.expectedPageToken && finalPageToken !== payload.expectedPageToken) {
+      throw new StaleAnswerError("写分前检测到智学网当前答卷实例已经变化，已拒绝写入旧答卷分数");
+    }
+    if (!finalDoc) throw new StaleAnswerError("写分前智学网阅卷子页面已经离线，已拒绝写入");
+    return finalDoc;
+  };
   let writtenPayload: ScoreWritePayload | undefined;
   let submittedPageKey: string | undefined;
   let pendingSubmission: SubmissionProbe | undefined;
 
   const applyScorePayload = async (payload: ScoreWritePayload, rollbackAfter: boolean) => {
-    const doc = gradingDocument();
-    if (!doc) throw new Error("智学网阅卷子页面已离线");
-    const currentKey = pageFingerprint(doc);
-    if (payload.expectedPageKey && currentKey !== payload.expectedPageKey) {
-      throw new Error("写分前智学网页面标识已变化");
-    }
+    const doc = await assertCurrentTarget(payload);
     if (autoSubmitState(doc) === true) throw new Error("智学网自动提交已开启，请先关闭后再写入分数");
     const total = totalScoreInput(doc);
     if (!total) throw new Error("未找到可写入的智学网最终总分框");
@@ -355,23 +441,7 @@ export function createZhixueAdapter(): SiteAdapter {
       };
     },
     async getCurrentAnswer() {
-      const doc = gradingDocument();
-      if (!doc) throw new Error("未找到智学网阅卷子页面");
-      const card = answerCard(doc);
-      const imageElement = answerImage(doc);
-      if (!card || !imageElement) throw new Error("未找到智学网学生作答原图");
-      const image = await extractAnswerImage({ card, image: imageElement });
-      const sourcePageKey = pageFingerprint(doc);
-      if (!sourcePageKey) throw new Error("无法生成智学网当前答卷的稳定页面标识，已拒绝提取");
-      return {
-        pageKey: `sha256:${image.sha256}`,
-        sourcePageKey,
-        imageDataUrl: image.dataUrl,
-        imageHash: image.sha256,
-        imageMimeType: image.mimeType,
-        imageBytes: image.bytes,
-        imageSource: image.source
-      };
+      return readCurrentAnswer();
     },
     async setDiagnosticScore(score) {
       const doc = gradingDocument();
@@ -420,8 +490,8 @@ export function createZhixueAdapter(): SiteAdapter {
     async testScoreWrite(payload) {
       return applyScorePayload(payload, true);
     },
-    async submitScore() {
-      const doc = gradingDocument();
+    async submitScore(payload) {
+      const doc = await assertCurrentTarget(payload);
       const submit = doc?.querySelector<HTMLButtonElement>("#bnt_save");
       if (!doc || !submit) throw new Error("未找到智学网提交分数按钮");
       if (!writtenPayload) throw new Error("提交前尚未完成智学网分数写入校验");

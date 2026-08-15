@@ -1,8 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SAFE_LATEX_BACKSLASH_TOKEN } from "../shared/formulaProtocol.js";
 import type { ModelCallLogDetails, ModelConfigInput } from "../shared/types.js";
-import { callStructured } from "./modelClient.js";
-import { clearCompletedLogs, getLogSnapshot } from "./systemLog.js";
+import { callStructured, testModelConnection } from "./modelClient.js";
+import {
+  beginOperation,
+  clearCompletedLogs,
+  forceStopOperation,
+  getLogSnapshot,
+  getOperationModelCalls,
+  releaseOperationModelCalls
+} from "./systemLog.js";
 
 const config: ModelConfigInput = {
   name: "test",
@@ -70,6 +77,104 @@ describe("model call audit logging", () => {
     expect(JSON.stringify(details)).not.toContain(config.apiKey);
     expect(JSON.stringify(details)).not.toContain(imageBase64);
     expect(JSON.stringify(details)).not.toContain("sk-prompt-secret");
+    const historyCalls = getOperationModelCalls("operation-audit-test");
+    expect(historyCalls).toHaveLength(1);
+    expect(historyCalls[0].details.response?.raw).toBe(rawResponse);
+    expect(historyCalls[0].details.request.images[0].sha256).toBe(details.request.images[0].sha256);
+    clearCompletedLogs();
+    expect(getOperationModelCalls("operation-audit-test")).toHaveLength(1);
+    releaseOperationModelCalls("operation-audit-test");
+    expect(getOperationModelCalls("operation-audit-test")).toHaveLength(0);
+  });
+
+  it("captures every failed retry and the eventual successful raw response", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("temporary failure", { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ finish_reason: "stop", message: { content: "{\"status\":\"ok\"}" } }]
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callStructured<{ status: string }>({ ...config, maxRetries: 1 }, {
+      model: config.textModel,
+      system: "Return JSON.",
+      prompt: "Return status.",
+      schemaName: "retry_history_test",
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { status: { type: "string" } },
+        required: ["status"]
+      },
+      operationId: "operation-retry-history"
+    });
+
+    const calls = getOperationModelCalls("operation-retry-history");
+    expect(calls).toHaveLength(2);
+    expect(calls.map((call) => call.status)).toEqual(["failed", "completed"]);
+    expect(calls[0].details.response?.raw).toBe("temporary failure");
+    expect(calls[1].details.response?.content).toBe("{\"status\":\"ok\"}");
+    releaseOperationModelCalls("operation-retry-history");
+  });
+
+  it("passes all six configured reasoning efforts through to the provider and audit log", async () => {
+    const efforts = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
+    const operationId = "operation-reasoning-efforts";
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { content: "{\"status\":\"ok\"}" } }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    for (const reasoningEffort of efforts) {
+      await callStructured<{ status: string }>(config, {
+        model: config.textModel,
+        system: "Return JSON.",
+        prompt: "Return status.",
+        schemaName: `reasoning_${reasoningEffort}`,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: { status: { type: "string" } },
+          required: ["status"]
+        },
+        reasoningEffort,
+        operationId
+      });
+    }
+
+    const requestBodies = fetchMock.mock.calls.map((call) => JSON.parse(String(call[1]?.body)));
+    expect(requestBodies.map((body) => body.reasoning_effort)).toEqual(efforts);
+    expect(getOperationModelCalls(operationId).map((call) => call.details.request.reasoningEffort)).toEqual(efforts);
+    releaseOperationModelCalls(operationId);
+  });
+
+  it("uses the review model's independent endpoint and API key for its connection test", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { content: "{\"status\":\"ok\"}" } }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await testModelConnection({
+      ...config,
+      reviewBaseUrl: "https://review.example.test/v1",
+      reviewApiKey: "review-secret",
+      reviewModel: "fast-review"
+    }, "review");
+
+    expect(result.model).toBe("fast-review");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("https://review.example.test/v1/chat/completions");
+    const headers = fetchMock.mock.calls[0][1]?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer review-secret");
+    expect(headers.Authorization).not.toContain(config.apiKey);
+  });
+
+  it("rejects review calls without falling back to the teacher API key", async () => {
+    await expect(testModelConnection({
+      ...config,
+      reviewModel: "fast-review",
+      reviewApiKey: ""
+    }, "review")).rejects.toThrow("不会使用教师模型密钥代替");
   });
 
   it("decodes the safe LaTeX token only after the model JSON is complete", async () => {
@@ -155,5 +260,33 @@ describe("model call audit logging", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+  });
+
+  it("aborts an in-flight model request immediately without retrying", async () => {
+    const operationId = beginOperation("grading", "开始批改待停止答卷", "vision_direct_grade");
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request = callStructured<{ status: string }>({ ...config, maxRetries: 2 }, {
+      model: config.textModel,
+      system: "Return JSON.",
+      prompt: "Return status.",
+      schemaName: "force_stop_test",
+      schema: { type: "object" },
+      operationId
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(forceStopOperation(operationId)).not.toBeNull();
+
+    await expect(request).rejects.toThrow("任务已被用户强制停止");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(getLogSnapshot(20).activeOperations.some((operation) => operation.id === operationId)).toBe(false);
   });
 });

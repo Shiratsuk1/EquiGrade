@@ -17,11 +17,11 @@ export const demoRubric: Rubric = {
     title: "求滑块C点对圆弧槽的压力",
     maxScore: 8,
     finalAnswerPolicy: "full_credit",
-    finalAnswers: [{ expression: "N=3*m*g", tolerance: 0, label: "压力大小" }],
+    finalAnswers: [{ expression: "N=3*m*g", label: "压力大小" }],
     scorePoints: [
-      { id: "P1", title: "机械能守恒", description: "正确列出机械能守恒关系", score: 3, type: "formula", expected: "m*g*R=1/2*m*v^2", equivalents: ["v^2=2*g*R"] },
-      { id: "P2", title: "径向牛顿第二定律", description: "最低点正确列出径向动力学方程", score: 3, type: "formula", expected: "N-m*g=m*v^2/R", equivalents: [] },
-      { id: "P3", title: "最终结果", description: "计算得到压力大小", score: 2, type: "result", expected: "N=3*m*g", equivalents: [] }
+      { id: "P1", title: "机械能守恒", description: "正确列出机械能守恒关系", score: 3, type: "formula", expected: "m*g*R=1/2*m*v^2" },
+      { id: "P2", title: "径向牛顿第二定律", description: "最低点正确列出径向动力学方程", score: 3, type: "formula", expected: "N-m*g=m*v^2/R" },
+      { id: "P3", title: "最终结果", description: "计算得到压力大小", score: 2, type: "result", expected: "N=3*m*g" }
     ],
     deductions: []
   }]

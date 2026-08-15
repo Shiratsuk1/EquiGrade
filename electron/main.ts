@@ -20,6 +20,7 @@ import type {
   PluginUiPreferences,
   WindowMaterial
 } from "../shared/electron.js";
+import { DEFAULT_START_URL } from "../shared/startUrl.js";
 import { EmbeddedBrowserSession } from "./browserSession.js";
 import { configureStableUserData } from "./userData.js";
 
@@ -171,11 +172,10 @@ async function loadPipelineTemplate(selection: PipelineTaskSelection): Promise<P
     rubric: PipelineTemplateContext["rubric"];
   }>(`/api/templates/${encodeURIComponent(templateId)}`);
   if (detail.builtIn) throw new Error("内置测试模板只能从流水线测试入口使用");
-  if (detail.rubric.status !== "locked") throw new Error("评分模板尚未锁定");
   return {
     templateId: detail.id,
     title: detail.title,
-    locked: true,
+    ready: true,
     questionText: detail.questionText,
     referenceText: detail.referenceText,
     rubric: detail.rubric
@@ -298,7 +298,7 @@ function createWindow() {
   browserSession = new EmbeddedBrowserSession({
     window,
     preloadPath: path.join(currentDirectory, "targetPreload.cjs"),
-    homeUrl: ""
+    homeUrl: DEFAULT_START_URL
   });
   browserSession.view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
 
@@ -454,7 +454,7 @@ ipcMain.handle("pipeline:plugin-diagnostic", async (event, request: PluginDiagno
 
 ipcMain.handle("pipeline:dry-run", async (event, options: PipelineDryRunOptions) => {
   requireHostSender(event);
-  if (!activePipelineTask?.context.locked) throw new Error("请先选择并锁定真实评分模板");
+  if (!activePipelineTask?.context.ready) throw new Error("请先选择真实评分标准");
   return requireBrowserSession().dryRunCurrentAnswer({ verifyWrite: Boolean(options?.verifyWrite) });
 });
 
@@ -492,6 +492,17 @@ ipcMain.handle("pipeline:template-context", (event) => {
   return activePipelineTask?.context ?? null;
 });
 
+ipcMain.handle("pipeline:assert-task", (event) => {
+  const session = requireBrowserSession();
+  if (event.sender !== session.view.webContents) throw new Error("非目标网页进程不允许启动批改任务");
+  if (!activePipelineTask?.context.ready) throw new Error("尚未选择批改任务，请先在工作台绑定评分标准");
+  return {
+    templateId: activePipelineTask.context.templateId,
+    templateTitle: activePipelineTask.context.title,
+    mode: activePipelineTask.mode
+  };
+});
+
 ipcMain.handle("pipeline:grade-image", async (event, payload: {
   pageKey: string;
   imageHash: string;
@@ -503,7 +514,7 @@ ipcMain.handle("pipeline:grade-image", async (event, payload: {
   const session = requireBrowserSession();
   if (event.sender !== session.view.webContents) throw new Error("非目标网页进程不允许提交答卷图像");
   const task = activePipelineTask;
-  if (!task?.context.locked) throw new Error("请先从批改任务或流水线测试入口选择任务");
+  if (!task?.context.ready) throw new Error("请先从批改任务或流水线测试入口选择任务");
   const imageResponse = await fetch(payload.imageDataUrl);
   if (!imageResponse.ok) throw new Error("无法读取网页答卷图片");
   const blob = await imageResponse.blob();
@@ -604,7 +615,11 @@ ipcMain.handle("window:set-material", (event, material: WindowMaterial) => {
 });
 ipcMain.handle("pipeline:control", (event, control: PipelineControl) => {
   requireHostSender(event);
-  if (control === "start" && !activePipelineTask) throw new Error("请先选择真实批改任务或流水线测试任务");
+  if (control === "start" && !activePipelineTask) {
+    const reason = "尚未选择批改任务，请先在工作台绑定评分标准";
+    recordPipelineEvent({ type: "pipeline_start_rejected", phase: "failed", reason });
+    throw new Error(reason);
+  }
   return requireBrowserSession().controlPipeline(control);
 });
 

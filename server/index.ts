@@ -17,10 +17,13 @@ import {
   resolveLocalPipelineTaskAssetPath
 } from "./localPipelineTaskStore.js";
 import { assertRubricIntegrity, rubricSchema } from "./schemas.js";
-import { gradeStudentAnswer, structureRubric } from "./workflows.js";
+import { gradeStudentAnswer, refineRubric, structureRubric } from "./workflows.js";
 import {
+  deleteGradingRecords,
+  deleteTemplates,
   getRegradeContext,
   getTemplate,
+  getGradingRecordModelCalls,
   getTemplateGradingContext,
   ensurePipelineFixtureTemplate,
   listTemplates,
@@ -28,9 +31,18 @@ import {
   resolveAssetPath,
   saveGradingRecord,
   saveRegradedRecord,
-  saveTemplate
+  saveTemplate,
+  updateTemplateRubric
 } from "./historyStore.js";
-import { beginOperation, clearCompletedLogs, completeOperation, failOperation, getLogSnapshot } from "./systemLog.js";
+import {
+  beginOperation,
+  clearCompletedLogs,
+  completeOperation,
+  failOperation,
+  forceStopOperation,
+  getLogSnapshot,
+  isOperationCancelled
+} from "./systemLog.js";
 
 const app = express();
 const upload = multer({
@@ -92,6 +104,16 @@ app.delete("/api/logs", (_req, res) => {
   res.status(204).end();
 });
 
+app.post("/api/operations/:id/force-stop", (req, res) => {
+  const operationId = z.string().uuid().parse(req.params.id);
+  const operation = forceStopOperation(operationId);
+  if (!operation) {
+    res.status(404).json({ error: "任务已结束或不存在" });
+    return;
+  }
+  res.json({ ok: true, operationId, label: operation.label, scope: operation.scope });
+});
+
 app.get("/api/model-config", asyncRoute(async (_req, res) => {
   const config = await readModelConfig();
   res.json(config ? toPublicConfig(config) : null);
@@ -101,21 +123,25 @@ app.put("/api/model-config", asyncRoute(async (req, res) => {
   const schema = z.object({
     name: z.string().min(1), baseUrl: z.string().url(), apiKey: z.string().optional(),
     visionModel: z.string().min(1), textModel: z.string().min(1),
+    reviewBaseUrl: z.union([z.string().url(), z.literal("")]).optional().default(""),
+    reviewApiKey: z.string().optional(), reviewModel: z.string().optional().default(""),
     timeoutMs: z.number().int().min(1000).max(300000), maxRetries: z.number().int().min(0).max(5),
     maxConcurrency: z.number().int().min(1).max(20), maxOutputTokens: z.number().int().min(256).max(65536),
     unreadableReviewThreshold: z.number().min(0.5).max(100).multipleOf(0.5).default(DEFAULT_UNREADABLE_REVIEW_THRESHOLD),
     gradingMode: z.enum(["vision_direct", "evidence_pipeline"]).default(DEFAULT_GRADING_MODE),
-    teacherReasoningEffort: z.enum(["disabled", "low", "medium", "high"]).default(DEFAULT_TEACHER_REASONING_EFFORT),
+    teacherReasoningEffort: z.enum(["disabled", "low", "medium", "high", "xhigh", "max", "ultra"]).default(DEFAULT_TEACHER_REASONING_EFFORT),
+    reviewReasoningEffort: z.enum(["disabled", "low", "medium", "high", "xhigh", "max", "ultra"]).default("low"),
     supportsJsonSchema: z.boolean(), supportsJsonObject: z.boolean(), supportsBase64Images: z.boolean(), enabled: z.boolean()
   });
   const config = schema.parse(req.body);
   await assertSafeModelBaseUrl(config.baseUrl);
+  if (config.reviewBaseUrl) await assertSafeModelBaseUrl(config.reviewBaseUrl);
   res.json(await saveModelConfig(config));
 }));
 
 app.post("/api/model-config/test", asyncRoute(async (req, res) => {
-  const mode = z.enum(["text", "vision"]).parse(req.body.mode);
-  const modeLabel = mode === "vision" ? "多模态" : "文本";
+  const mode = z.enum(["text", "vision", "review"]).parse(req.body.mode);
+  const modeLabel = mode === "vision" ? "多模态" : mode === "review" ? "审验" : "文本";
   const operationId = beginOperation("model", `开始测试${modeLabel}模型连接`, "connection_test", { mode });
   try {
     const config = await requireModelConfig();
@@ -147,6 +173,14 @@ app.post("/api/rubrics/structure", upload.fields([
   res.json(await structureRubric(await requireModelConfig(), { ...input, questionImages, referenceImages }));
 }));
 
+app.post("/api/rubrics/refine", asyncRoute(async (req, res) => {
+  const input = z.object({
+    rubric: rubricSchema,
+    instruction: z.string().trim().min(1).max(4000)
+  }).parse(req.body);
+  res.json(await refineRubric(await requireModelConfig(), input.rubric, input.instruction));
+}));
+
 app.get("/api/templates", asyncRoute(async (req, res) => {
   const includeBuiltIn = req.query.includeBuiltIn === "1";
   const templates = await listTemplates();
@@ -162,6 +196,25 @@ app.get("/api/templates/:id", asyncRoute(async (req, res) => {
   res.json(template);
 }));
 
+app.delete("/api/templates", asyncRoute(async (req, res) => {
+  const input = z.object({ ids: z.array(z.string().uuid()).min(1).max(200) }).parse(req.body);
+  res.json(await deleteTemplates(input.ids));
+}));
+
+app.delete("/api/history-records", asyncRoute(async (req, res) => {
+  const input = z.object({ ids: z.array(z.string().uuid()).min(1).max(500) }).parse(req.body);
+  res.json(await deleteGradingRecords(input.ids));
+}));
+
+app.get("/api/history-records/:id/model-calls", asyncRoute(async (req, res) => {
+  const modelCalls = await getGradingRecordModelCalls(String(req.params.id));
+  if (!modelCalls) {
+    res.status(404).json({ error: "找不到该批改记录" });
+    return;
+  }
+  res.json(modelCalls);
+}));
+
 app.get("/api/pipeline/fixture", asyncRoute(async (_req, res) => {
   const summary = await ensurePipelineFixtureTemplate();
   const template = await getTemplate(summary.id);
@@ -169,7 +222,7 @@ app.get("/api/pipeline/fixture", asyncRoute(async (_req, res) => {
   res.json({
     templateId: template.id,
     title: template.title,
-    locked: template.rubric.status === "locked",
+    ready: true,
     questionText: template.questionText,
     referenceText: template.referenceText,
     rubric: template.rubric
@@ -182,8 +235,8 @@ app.post("/api/pipeline/tasks", upload.array("images", 30), asyncRoute(async (re
     studentIds: z.string().optional()
   }).parse(req.body);
   const template = await getTemplate(input.templateId);
-  if (!template || template.rubric.status !== "locked" || template.builtIn) {
-    res.status(404).json({ error: "找不到可用于真实任务的锁定评分模板" });
+  if (!template || template.builtIn) {
+    res.status(404).json({ error: "找不到可用于真实任务的评分标准" });
     return;
   }
   const files = (req.files ?? []) as Express.Multer.File[];
@@ -239,7 +292,7 @@ app.post("/api/templates", upload.fields([
   { name: "questionImages", maxCount: 10 },
   { name: "referenceImages", maxCount: 10 }
 ]), asyncRoute(async (req, res) => {
-  const operationId = beginOperation("storage", "正在保存锁定模板", "save_template");
+  const operationId = beginOperation("storage", "正在保存评分标准", "save_template");
   try {
     const input = z.object({
       questionText: z.string(),
@@ -252,15 +305,34 @@ app.post("/api/templates", upload.fields([
     const summary = await saveTemplate({
       questionText: input.questionText,
       referenceText: input.referenceText,
-      rubric: { ...rubric, status: "locked" },
+      rubric: { ...rubric, status: "saved" },
       questionImages: files.questionImages ?? [],
       referenceImages: files.referenceImages ?? [],
       operationId
     });
-    completeOperation(operationId, "storage", "template_ready", "锁定模板已保存，可从历史记录重新打开", { templateId: summary.id });
+    completeOperation(operationId, "storage", "template_ready", "评分标准已保存，可随时继续修改", { templateId: summary.id });
     res.status(201).json(summary);
   } catch (error) {
     failOperation(operationId, "storage", "template_save_failed", error);
+    throw error;
+  }
+}));
+
+app.put("/api/templates/:id/rubric", asyncRoute(async (req, res) => {
+  const operationId = beginOperation("storage", "正在保存评分标准修改", "update_template");
+  try {
+    const templateId = z.string().uuid().parse(req.params.id);
+    const rubric = rubricSchema.parse(req.body.rubric);
+    assertRubricIntegrity(rubric);
+    const summary = await updateTemplateRubric({ templateId, rubric, operationId });
+    const detail = await getTemplate(summary.id);
+    completeOperation(operationId, "storage", "template_updated", "评分标准新版本已保存", {
+      templateId: summary.id,
+      version: detail?.rubric.version
+    });
+    res.json(detail);
+  } catch (error) {
+    failOperation(operationId, "storage", "template_update_failed", error);
     throw error;
   }
 }));
@@ -285,7 +357,7 @@ app.post("/api/grading/grade", upload.fields([
     label
   });
   const rubric: Rubric = rubricSchema.parse(JSON.parse(String(req.body.rubric)));
-  if (rubric.status !== "locked") throw new Error("评分标准尚未锁定");
+  if (rubric.status === "draft") throw new Error("请先保存当前评分标准版本，再开始批改");
   assertRubricIntegrity(rubric);
   const studentId = String(req.body.studentId || answerImage.originalname);
   const grading = await gradeStudentAnswer(await requireModelConfig(), {
@@ -298,8 +370,38 @@ app.post("/api/grading/grade", upload.fields([
   });
   const templateId = String(req.body.templateId || "");
   if (templateId) {
-    await saveGradingRecord({ templateId, answerImage, result: grading.result, operationId: grading.operationId });
+    await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: rubric, operationId: grading.operationId });
   }
+  res.json(grading.result);
+}));
+
+app.post("/api/templates/:templateId/grade", upload.single("image"), asyncRoute(async (req, res) => {
+  const templateId = z.string().min(1).parse(req.params.templateId);
+  const studentId = z.string().trim().min(1).max(100).optional().parse(req.body.studentId);
+  const answerImage = req.file;
+  if (!answerImage || !answerImage.mimetype.startsWith("image/")) {
+    throw new Error("请选择 JPG、PNG 或 WEBP 格式的学生答卷图片");
+  }
+  const context = await getTemplateGradingContext(templateId);
+  if (!context) throw new Error("找不到用于评分的评分标准");
+  const toModelImage = (file: { fileName: string; mimeType: string; buffer: Buffer }, label: string) => ({
+    mimeType: file.mimeType,
+    base64: file.buffer.toString("base64"),
+    label
+  });
+  const grading = await gradeStudentAnswer(await requireModelConfig(), {
+    id: crypto.randomUUID(),
+    studentId: studentId || `手动上传 ${normalizeUploadedFileName(answerImage.originalname)}`,
+    fileName: normalizeUploadedFileName(answerImage.originalname),
+    mimeType: answerImage.mimetype,
+    imageBuffer: answerImage.buffer,
+    rubric: context.rubric,
+    questionText: context.questionText,
+    referenceText: context.referenceText,
+    questionImages: context.questionImages.map((file, index) => toModelImage(file, `[题目图片 ${index + 1}：${file.fileName}]`)),
+    referenceImages: context.referenceImages.map((file, index) => toModelImage(file, `[参考答案图片 ${index + 1}：${file.fileName}]`))
+  });
+  await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: context.rubric, operationId: grading.operationId });
   res.json(grading.result);
 }));
 
@@ -317,7 +419,7 @@ app.post("/api/pipeline/grade", upload.single("image"), asyncRoute(async (req, r
     throw new Error("网页答卷图片哈希校验失败");
   }
   const context = await getTemplateGradingContext(templateId);
-  if (!context) throw new Error("找不到流水线使用的锁定评分模板");
+  if (!context) throw new Error("找不到流水线使用的评分标准");
   const toModelImage = (file: { fileName: string; mimeType: string; buffer: Buffer }, label: string) => ({
     mimeType: file.mimeType,
     base64: file.buffer.toString("base64"),
@@ -335,7 +437,7 @@ app.post("/api/pipeline/grade", upload.single("image"), asyncRoute(async (req, r
     questionImages: context.questionImages.map((file, index) => toModelImage(file, `[题目图片 ${index + 1}：${file.fileName}]`)),
     referenceImages: context.referenceImages.map((file, index) => toModelImage(file, `[参考答案图片 ${index + 1}：${file.fileName}]`))
   });
-  await saveGradingRecord({ templateId, answerImage, result: grading.result, operationId: grading.operationId });
+  await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: context.rubric, operationId: grading.operationId });
   res.json({
     jobId: grading.result.id,
     pageKey,
@@ -409,7 +511,7 @@ app.get("/{*path}", (req, res, next) => {
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = error instanceof Error ? error.message : "未知错误";
   console.error(`[api] ${message}`);
-  res.status(error instanceof z.ZodError ? 400 : 500).json({ error: message });
+  res.status(error instanceof z.ZodError ? 400 : isOperationCancelled(error) ? 409 : 500).json({ error: message });
 });
 
 async function startServer() {

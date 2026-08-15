@@ -1,13 +1,29 @@
 import type { ExtractedAnswer } from "./types.js";
 
+export class StaleAnswerError extends Error {
+  readonly code = "STALE_ANSWER" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "StaleAnswerError";
+  }
+}
+
+export function isStaleAnswerError(error: unknown): error is StaleAnswerError {
+  return error instanceof StaleAnswerError;
+}
+
 export type PipelineCommitStage = "untouched" | "write_started" | "score_written" | "submit_started" | "verified";
 
 export function assertSameAnswer(expected: ExtractedAnswer, current: ExtractedAnswer) {
   if (expected.imageHash !== current.imageHash) {
-    throw new Error("模型批改期间答卷图像已经变化，已拒绝写入旧答卷分数");
+    throw new StaleAnswerError("模型批改期间答卷图像已经变化，已拒绝写入旧答卷分数");
   }
-  if (expected.sourcePageKey && current.sourcePageKey && expected.sourcePageKey !== current.sourcePageKey) {
-    throw new Error("模型批改期间阅卷页面已经切换，已拒绝写入旧答卷分数");
+  if (expected.sourcePageKey && expected.sourcePageKey !== current.sourcePageKey) {
+    throw new StaleAnswerError("模型批改期间阅卷页面已经切换，已拒绝写入旧答卷分数");
+  }
+  if (expected.pageToken && expected.pageToken !== current.pageToken) {
+    throw new StaleAnswerError("模型批改期间当前答卷实例已经变化，已拒绝写入旧答卷分数");
   }
 }
 

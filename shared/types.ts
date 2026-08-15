@@ -1,13 +1,14 @@
 export type DecisionStatus = "satisfied" | "not_satisfied" | "not_present" | "unreadable" | "insufficient_evidence" | "not_required";
 export type FinalAnswerStatus = "correct" | "incorrect" | "missing" | "uncertain";
 export type ScoringDisposition = "awarded" | "not_awarded" | "not_deducted_by_final_answer" | "not_deducted_by_score_floor" | "uncertain_no_deduction";
-export type DecisionSource = "model" | "normalized_uncertain" | "synthetic_missing";
+export type DecisionSource = "model" | "normalized_uncertain" | "synthetic_missing" | "unreadable_local_review" | "local_numeric_review";
 
 export const DEFAULT_UNREADABLE_REVIEW_THRESHOLD = 2;
 export const DEFAULT_MODEL_TIMEOUT_MS = 300_000;
-export const TEACHER_REASONING_EFFORTS = ["disabled", "low", "medium", "high"] as const;
+export const TEACHER_REASONING_EFFORTS = ["disabled", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type TeacherReasoningEffort = typeof TEACHER_REASONING_EFFORTS[number];
 export const DEFAULT_TEACHER_REASONING_EFFORT: TeacherReasoningEffort = "disabled";
+export const DEFAULT_REVIEW_REASONING_EFFORT: TeacherReasoningEffort = "low";
 export const GRADING_MODES = ["vision_direct", "evidence_pipeline"] as const;
 export type GradingMode = typeof GRADING_MODES[number];
 export const DEFAULT_GRADING_MODE: GradingMode = "vision_direct";
@@ -15,7 +16,6 @@ export const DEFAULT_GRADING_MODE: GradingMode = "vision_direct";
 export interface FinalAnswerRule {
   expression: string;
   unit?: string;
-  tolerance?: number;
   label?: string;
 }
 
@@ -26,7 +26,9 @@ export interface ScorePoint {
   score: number;
   type: "formula" | "substitution" | "result" | "text";
   expected: string;
-  equivalents?: string[];
+  commonResponses?: string[];
+  alternativeMethods?: string[];
+  acceptedEquivalents?: string[];
 }
 
 export interface DeductionRule {
@@ -50,7 +52,8 @@ export interface Rubric {
   title: string;
   recognizedQuestionText: string;
   version: number;
-  status: "draft" | "locked";
+  /** `locked` is accepted only for templates created by older releases. */
+  status: "draft" | "saved" | "locked";
   totalScore: number;
   subquestions: SubquestionRubric[];
   warnings: string[];
@@ -115,14 +118,7 @@ export interface FinalAnswerJudgement {
   referenceAnswer: string;
   reason: string;
   confidence: number;
-}
-
-export interface LocalFinalAnswerAudit {
-  status: "equivalent" | "not_equivalent" | "not_available";
-  method: string;
-  conflict: boolean;
-  actualAnswers: string[];
-  referenceAnswers: string[];
+  decisionSource?: "teacher_model" | "unreadable_local_review" | "local_numeric_review";
 }
 
 export interface TeacherCommentaryLossPoint {
@@ -173,11 +169,10 @@ export interface SubquestionResult {
   finalAnswerStatus: FinalAnswerStatus;
   finalAnswerReason?: string;
   finalAnswerConfidence?: number;
-  finalAnswerDecisionSource?: "teacher_model" | "missing_teacher_judgement";
+  finalAnswerDecisionSource?: "teacher_model" | "missing_teacher_judgement" | "unreadable_local_review" | "local_numeric_review";
   finalAnswerEvidenceLineIds?: string[];
   studentFinalAnswer?: string;
   referenceFinalAnswer?: string;
-  localFinalAnswerAudit?: LocalFinalAnswerAudit;
   processAuditSummary?: ProcessAuditSummary;
   decisions: Array<RubricDecision & { awardedScore: number; maxScore: number }>;
   deductions: Array<AppliedDeduction & { deductedScore: number; scoringDisposition?: ScoringDisposition }>;
@@ -224,6 +219,9 @@ export interface ModelConfigInput {
   apiKey?: string;
   visionModel: string;
   textModel: string;
+  reviewBaseUrl?: string;
+  reviewApiKey?: string;
+  reviewModel?: string;
   timeoutMs: number;
   maxRetries: number;
   maxConcurrency: number;
@@ -231,16 +229,19 @@ export interface ModelConfigInput {
   unreadableReviewThreshold: number;
   gradingMode?: GradingMode;
   teacherReasoningEffort?: TeacherReasoningEffort;
+  reviewReasoningEffort?: TeacherReasoningEffort;
   supportsJsonSchema: boolean;
   supportsJsonObject: boolean;
   supportsBase64Images: boolean;
   enabled: boolean;
 }
 
-export interface PublicModelConfig extends Omit<ModelConfigInput, "apiKey"> {
+export interface PublicModelConfig extends Omit<ModelConfigInput, "apiKey" | "reviewApiKey"> {
   id: string;
   apiKeyMasked: string;
   hasApiKey: boolean;
+  reviewApiKeyMasked: string;
+  hasReviewApiKey: boolean;
   updatedAt: string;
 }
 
@@ -291,9 +292,16 @@ export interface SystemLogEntry {
   details?: Record<string, unknown>;
 }
 
+export type ModelCallHistoryEntry = Omit<SystemLogEntry, "scope" | "step" | "details"> & {
+  scope: "model";
+  step: "model_call";
+  details: ModelCallLogDetails;
+};
+
 export interface ActiveOperation {
   id: string;
   scope: SystemLogEntry["scope"];
+  cancellable: boolean;
   label: string;
   step: string;
   startedAt: string;
@@ -340,6 +348,9 @@ export interface GradingHistoryRecord {
   createdAt: string;
   answerImage: SavedAsset;
   result: GradingResult;
+  rubricSnapshot?: Rubric;
+  modelCallCount: number;
+  modelCalls?: ModelCallHistoryEntry[];
 }
 
 export interface LocalPipelineAnswer {

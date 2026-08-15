@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { MathText } from "./Formula";
+import { ScorePointGuidance } from "./ScorePointGuidance";
 import { authorizedFetch } from "./api";
 
 type PipelineEvent = {
@@ -29,7 +30,7 @@ type TemplateContext = {
       id: string;
       title: string;
       maxScore: number;
-      scorePoints?: Array<{ id: string; title: string; description: string; score: number; expected: string }>;
+      scorePoints?: Array<{ id: string; title: string; description: string; score: number; expected: string; commonResponses?: string[]; alternativeMethods?: string[]; acceptedEquivalents?: string[] }>;
     }>;
   };
 };
@@ -65,6 +66,7 @@ function eventLabel(event: PipelineEvent) {
     case "pipeline_completed": return "本批次已完成";
     case "pipeline_completed_after_skip": return "跳过异常答卷后批次完成";
     case "pipeline_paused": return `流水线已暂停：${event.reason || "需要处理异常"}`;
+    case "pipeline_paused_stale_answer": return "流水线已暂停：检测到模型等待期间答卷发生切换";
     default: return event.type || "流水线事件";
   }
 }
@@ -88,6 +90,8 @@ function applyEvent(previous: ConsoleState, event: PipelineEvent): ConsoleState 
       return { ...next, state: "completed", current: "本批次答卷", message: event.type === "pipeline_completed_after_skip" ? "跳过异常答卷后，本批次已完成" : "本批次答卷已全部提交" };
     case "pipeline_paused":
       return { ...next, state: "paused", consecutiveFailures: event.consecutiveFailures ?? previous.consecutiveFailures, message: event.reason || "流水线已暂停" };
+    case "pipeline_paused_stale_answer":
+      return { ...next, state: "paused", message: "检测到模型等待期间答卷发生切换，已停止写分" };
     default:
       return next;
   }
@@ -166,11 +170,11 @@ export default function ElectronPipelineConsole() {
       </header>
 
       <section className="electron-console-panel electron-console-template-panel">
-        <div className="electron-console-section-heading"><div><span className="electron-console-index">01</span><div><h2>当前批改模板</h2><p>{template?.title || "正在读取锁定模板"}</p></div></div><span className="electron-console-template-score">满分 {template?.rubric?.totalScore ?? "--"}</span></div>
+        <div className="electron-console-section-heading"><div><span className="electron-console-index">01</span><div><h2>当前批改模板</h2><p>{template?.title || "正在读取评分标准"}</p></div></div><span className="electron-console-template-score">满分 {template?.rubric?.totalScore ?? "--"}</span></div>
         {templateError ? <p className="electron-console-load-error">{templateError}</p> : template ? <div className="electron-console-template-content">
           <div className="electron-console-material"><h3>题目原文</h3><div className="electron-console-question"><MathText value={template.questionText || "暂无题目原文"} formulaByDefault /></div></div>
           <div className="electron-console-material"><h3>评分标准</h3><div className="electron-console-rubric-list">
-            {(template.rubric?.subquestions || []).map((question) => <details key={question.id} open><summary><strong>{question.id} {question.title}</strong><span>{question.maxScore} 分</span></summary><ol>{(question.scorePoints || []).map((point) => <li key={point.id}><div><b>{point.id}</b><span>{point.title}</span></div><MathText value={point.description || point.expected} formulaByDefault /><em>{point.score} 分</em></li>)}</ol></details>)}
+            {(template.rubric?.subquestions || []).map((question) => <details key={question.id} open><summary><strong>{question.id} {question.title}</strong><span>{question.maxScore} 分</span></summary><ol>{(question.scorePoints || []).map((point) => <li key={point.id}><div><b>{point.id}</b><span>{point.title}</span></div><MathText value={point.description || point.expected} formulaByDefault /><ScorePointGuidance point={point} /><em>{point.score} 分</em></li>)}</ol></details>)}
           </div></div>
         </div> : <div className="electron-console-template-loading">正在读取题目与评分标准…</div>}
       </section>
@@ -193,7 +197,7 @@ export default function ElectronPipelineConsole() {
 
       <section className="electron-console-panel">
         <div className="electron-console-section-heading"><div><span className="electron-console-index">03</span><div><h2>流水线范围</h2><p>当前 Electron 会话使用固定的本地测试入口。</p></div></div></div>
-        <div className="electron-console-lock"><span className="electron-console-lock-mark">锁定</span><div><strong>内置评分模板已锁定</strong><p>目标页：右侧嵌入的 `/zhixue-mock` 智学网专用模拟阅卷页面。</p></div></div>
+        <div className="electron-console-lock"><span className="electron-console-lock-mark">测试</span><div><strong>内置评分标准仅用于流水线测试</strong><p>目标页：右侧嵌入的 `/zhixue-mock` 智学网专用模拟阅卷页面。</p></div></div>
         <p className="electron-console-note">右侧页面保留现有目标页悬浮控件；跳过、异常记录和连续三次失败暂停仍由目标页脚本负责。</p>
       </section>
 
