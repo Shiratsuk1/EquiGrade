@@ -278,6 +278,23 @@ class PipelineInterruptError extends Error {
   }
 }
 
+/**
+ * 无副作用阶段（提取答卷图、模型调用、分数/哈希校验、写分前确认）失败时的前端自动重试次数。
+ * 大模型瞬时失败（网络抖动、超时、限流）是常态，先自动重试再考虑暂停；
+ * 有副作用阶段（写分/提交/验证/翻页）的失败不在此列，仍必须人工核对。
+ */
+const MAX_UNSAFE_RETRIES = 2;
+
+/** 重试前等待（退避），分段轮询以便及时响应用户暂停/停止请求。返回 false 表示等待期间用户请求中断。 */
+async function waitBeforeRetry(totalMs: number): Promise<boolean> {
+  const deadline = Date.now() + totalMs;
+  while (Date.now() < deadline) {
+    if (pauseRequested || stopRequested) return false;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 200));
+  }
+  return true;
+}
+
 function checkInterruption() {
   if (stopRequested) throw new PipelineInterruptError("stopped", "流水线已停止");
   if (pauseRequested) throw new PipelineInterruptError("paused", "流水线已暂停");
@@ -350,6 +367,7 @@ async function runPipeline() {
 
   try {
     if (!(await runPreflight())) return;
+    let unsafeRetryAttempt = 0;
     while (!stopRequested && !pauseRequested) {
       if (adapter.isBatchComplete()) {
         phase("completed", "本批次答卷已全部提交");
@@ -364,6 +382,7 @@ async function runPipeline() {
         checkInterruption();
         phase("extracting", "正在读取当前学生答卷原始图像", { pageKey: fallbackPageKey });
         answer = await adapter.getCurrentAnswer();
+        unsafeRetryAttempt = 0;
         const transitionKey = answer.sourcePageKey ?? answer.pageKey;
         record({
           type: "image_extracted",
@@ -474,6 +493,39 @@ async function runPipeline() {
               break;
           }
         }
+        // 无副作用阶段失败（提取/模型调用/校验/写分前确认）：自动重试，避免模型瞬时抖动中断整批。
+        // 有副作用失败（写分/提交/验证/翻页）已在 failureRequiresPause 分支处理，不会到达这里。
+        if (unsafeRetryAttempt < MAX_UNSAFE_RETRIES) {
+          const expectedKey = answer?.sourcePageKey ?? answer?.pageKey;
+          const currentPageKey = adapter.currentPageKey();
+          const samePage = expectedKey === undefined || currentPageKey === undefined || currentPageKey === expectedKey;
+          if (samePage && await waitBeforeRetry(3000 + unsafeRetryAttempt * 1000)) {
+            unsafeRetryAttempt += 1;
+            record({
+              type: "page_retry",
+              pageKey: expectedKey ?? currentPageKey ?? fallbackPageKey,
+              attempt: unsafeRetryAttempt,
+              maxAttempts: MAX_UNSAFE_RETRIES,
+              reason
+            });
+            continue;
+          }
+          if (pauseRequested || stopRequested) {
+            // 等待退避期间用户请求暂停/停止：直接按对应状态收尾。
+            if (pauseRequested) {
+              phase("paused", "流水线已按要求暂停");
+              record({ type: "pipeline_paused", reason: "用户暂停", consecutiveFailures: status.consecutiveFailures });
+            } else {
+              phase("idle", "流水线已停止");
+              record({ type: "pipeline_stopped" });
+            }
+            return;
+          }
+          // 等待退避期间页面已切换：不重试旧卷，重置计数后按新答卷正常继续。
+          unsafeRetryAttempt = 0;
+          continue;
+        }
+        unsafeRetryAttempt = 0;
         const currentKey = answer?.sourcePageKey ?? answer?.pageKey ?? fallbackPageKey;
         const skipped = error instanceof PipelineInterruptError && error.code === "skip";
         const failures = skipped ? status.consecutiveFailures : status.consecutiveFailures + 1;
