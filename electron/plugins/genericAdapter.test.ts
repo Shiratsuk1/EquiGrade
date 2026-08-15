@@ -94,7 +94,7 @@ describe("generic adapter answer-page safety", () => {
     expect(result).toEqual({
       ok: true,
       issues: [],
-      capabilities: { answerImage: true, scoreInput: true, submit: true, next: true },
+      capabilities: { answerImage: true, scoreInput: true, submit: true, next: true, skip: true },
       pageKey: "student-001"
     });
   });
@@ -119,7 +119,7 @@ describe("generic adapter answer-page safety", () => {
     const result = await adapter().preflight();
 
     expect(result.ok).toBe(false);
-    expect(result.capabilities).toEqual({ answerImage: true, scoreInput: true, submit: false, next: true });
+    expect(result.capabilities).toEqual({ answerImage: true, scoreInput: true, submit: false, next: true, skip: true });
     expect(result.issues).toContain("未找到提交按钮");
   });
 });

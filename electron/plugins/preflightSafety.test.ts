@@ -10,14 +10,15 @@ const completeCapabilities = {
   answerImage: true,
   scoreInput: true,
   submit: true,
-  next: true
+  next: true,
+  skip: true
 };
 
 describe("preflight safety gate", () => {
   it("requires all four grading capabilities", () => {
     expect(hasRequiredPluginCapabilities(completeCapabilities)).toBe(true);
     expect(hasRequiredPluginCapabilities({ ...completeCapabilities, next: false })).toBe(false);
-    expect(emptyPluginCapabilities()).toEqual({ answerImage: false, scoreInput: false, submit: false, next: false });
+    expect(emptyPluginCapabilities()).toEqual({ answerImage: false, scoreInput: false, submit: false, next: false, skip: false });
   });
 
   it("clears partial capabilities when a preflight fails", () => {
