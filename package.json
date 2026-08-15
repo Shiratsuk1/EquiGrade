@@ -20,15 +20,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@types/katex": "^0.16.8",
     "express": "^5.1.0",
     "katex": "^0.18.1",
-    "lucide-react": "^0.468.0",
     "mammoth": "^1.10.0",
     "multer": "^2.0.2",
     "pdf-parse": "^1.1.1",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1",
     "sharp": "^0.35.3",
     "zod": "^4.0.0"
   },
@@ -37,6 +33,7 @@
     "productName": "衡准自动改卷工作台",
     "artifactName": "${productName}-${version}-Windows-x64-Setup.${ext}",
     "electronDist": "node_modules/electron/dist",
+    "compression": "maximum",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -45,7 +42,12 @@
       "dist/**/*",
       "dist-server/**/*",
       "dist-electron/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/pdf-parse/lib/**/*.map",
+      "!node_modules/pdf-parse/lib/pdf.js/v1.10.88/**",
+      "!node_modules/pdf-parse/lib/pdf.js/v1.9.426/**",
+      "!node_modules/pdf-parse/lib/pdf.js/v2.0.550/**",
+      "!node_modules/@img/sharp-wasm32/**"
     ],
     "asarUnpack": [
       "dist/**/*",
@@ -77,6 +79,7 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
+    "@types/katex": "^0.16.8",
     "@types/multer": "^2.0.0",
     "@types/node": "^24.0.0",
     "@types/pdf-parse": "^1.1.5",
@@ -87,6 +90,9 @@
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
     "tsx": "^4.20.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.0",
