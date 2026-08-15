@@ -27,6 +27,7 @@ import type {
   ModelCallHistoryEntry, ModelCallLogDetails, PublicModelConfig, Rubric, SystemLogEntry, SystemLogSnapshot
 } from "../shared/types";
 import { api, uploadDocument } from "./api";
+import { cleanPipelineError, pipelineEventLabel, pipelineEventTone } from "../shared/pipelineEvents";
 import { ModelCallDetails, ModelCallHistory, ResultDetail } from "./App";
 import { MathText } from "./Formula";
 import { ScorePointGuidance } from "./ScorePointGuidance";
@@ -178,13 +179,6 @@ function useSystemReducedMotion() {
   }, []);
 
   return reduced;
-}
-
-function pipelineEventTone(event: PipelineEvent) {
-  if (["pipeline_start_rejected", "page_failed", "plugin_preflight_failed", "browser_load_failed"].includes(event.type)) return "error";
-  if (["page_skipped", "pipeline_paused", "pipeline_paused_stale_answer", "pipeline_force_stopped"].includes(event.type)) return "warning";
-  if (["page_completed", "pipeline_completed", "pipeline_completed_after_skip"].includes(event.type)) return "success";
-  return "active";
 }
 
 const routeTitles: Record<DesktopRoute["id"], { eyebrow: string; title: string; description: string }> = {
@@ -355,37 +349,6 @@ function formatTime(value: unknown) {
   return Number.isNaN(date.getTime()) ? "--:--:--" : date.toLocaleTimeString("zh-CN", { hour12: false });
 }
 
-function eventText(event: PipelineEvent) {
-  const reason = cleanPipelineError(event.reason);
-  switch (event.type) {
-    case "pipeline_started": return "流水线已启动";
-    case "pipeline_template_bound": return "评分标准已绑定到当前任务";
-    case "plugin_preflight_completed": return "站点控件检查通过";
-    case "plugin_preflight_failed": return "站点控件检查失败";
-    case "image_extracted": return `已提取答卷 ${event.sourcePageKey || event.pageKey || "当前页"}`;
-    case "page_completed": return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分`;
-    case "pipeline_start_rejected": return `启动失败：${reason || "尚未选择批改任务"}`;
-    case "page_failed": return `处理失败：${reason || "未知异常"}`;
-    case "page_retry": return `自动重试 ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}：${reason || "正在重试当前答卷"}`;
-    case "page_skipped": return `已跳过：${reason || "当前答卷"}`;
-    case "pipeline_paused": return `已暂停：${reason || "等待人工处理"}`;
-    case "pipeline_paused_stale_answer": return `已暂停：检测到答卷在模型批改期间发生切换`;
-    case "pipeline_force_stopped": return "流水线已被用户强制停止";
-    case "pipeline_completed": return "当前批次已完成";
-    case "pipeline_completed_after_skip": return "跳过异常答卷后批次完成";
-    case "browser_load_failed": return `网页加载失败：${reason || "未知异常"}`;
-    default: return String(event.message || event.type || "流水线事件");
-  }
-}
-
-function cleanPipelineError(value: unknown) {
-  if (typeof value !== "string") return "";
-  return value
-    .replace(/^Error invoking remote method '[^']+':\s*/i, "")
-    .replace(/^Error:\s*/i, "")
-    .trim();
-}
-
 function useElectronState() {
   const [browser, setBrowser] = useState(defaultBrowserState);
   const [summary, setSummary] = useState<PipelineSummary>({ processed: 0, skipped: 0, failures: 0, events: [] });
@@ -468,7 +431,7 @@ function RecentEvents({ events, limit = 8 }: { events: PipelineEvent[]; limit?: 
   const visible = events.slice(-limit).reverse();
   return <ol className="desktop-event-list">
     {visible.length === 0 ? <li className="empty"><span>--:--:--</span><div><strong>等待批改记录</strong><p>打开实时批改并检查智学网页面。</p></div></li> : visible.map((event, index) => <li key={`${event.timestamp || "event"}-${index}`}>
-      <span>{formatTime(event.timestamp)}</span><div><strong>{eventText(event)}</strong><p>{event.phase ? phaseLabel(event.phase) : String(event.adapterId || "系统")}</p></div>
+      <span>{formatTime(event.timestamp)}</span><div><strong>{pipelineEventLabel(event)}</strong><p>{event.phase ? phaseLabel(event.phase) : String(event.adapterId || "系统")}</p></div>
     </li>)}
   </ol>;
 }
@@ -733,7 +696,7 @@ function PipelineMessageFeed({ browser, events }: { browser: EmbeddedBrowserStat
     <div className="desktop-live-message-list">
       {visible.length ? visible.map((event, index) => <article className={pipelineEventTone(event)} style={{ animationDelay: `${Math.min(index, 7) * 20}ms` }} key={`${event.timestamp || "event"}-${index}`}>
         <span className="desktop-live-message-dot" />
-        <div><strong>{eventText(event)}</strong><small>{event.phase ? phaseLabel(event.phase) : browser.plugin.adapterName}</small></div>
+        <div><strong>{pipelineEventLabel(event)}</strong><small>{event.phase ? phaseLabel(event.phase) : browser.plugin.adapterName}</small></div>
         <time>{formatTime(event.timestamp)}</time>
       </article>) : <article className="active"><span className="desktop-live-message-dot" /><div><strong>{browser.plugin.message || "等待开始批改"}</strong><small>{phaseLabel(browser.plugin.phase)}</small></div><time>--:--</time></article>}
     </div>
@@ -1530,7 +1493,7 @@ function pipelineEventLogEntry(event: PipelineEvent, index: number): SystemLogEn
     status: tone === "error" ? "failed" : tone === "success" ? "completed" : "progress",
     scope: "system",
     step: `pipeline:${event.type}`,
-    message: eventText(event),
+    message: pipelineEventLabel(event),
     details: { ...event, reason: cleanPipelineError(event.reason) || event.reason }
   };
 }

@@ -13,9 +13,9 @@ npm run dev
 
 ## Windows 用户端
 
-项目提供 Electron 用户端：左侧加载评分控制台，右侧加载独立的内嵌改卷网页。服务端首次启动时会自动保存一份仅用于测试的“模拟网页改卷演练 · 圆周运动”模板。
+项目提供 Electron 用户端（衡准自动改卷工作台）：左侧为工作台导航与批改控制，右侧为内嵌的目标阅卷网页。浏览器直接访问服务时仅显示桌面端引导页，并保留 `/mock-grading`（通用 `data-grading-*` 控件测试页）与 `/zhixue-mock`（智学网专用适配器模拟页）两个测试入口。服务端首次启动时会自动保存一份仅用于测试的“模拟网页改卷演练 · 圆周运动”模板。
 
-本地测试站有两个入口：`/mock-grading` 是通用 `data-grading-*` 控件测试页；`/zhixue-mock` 是智学网专用适配器模拟页，复刻 `#topicImgContent`、`.scorearea`、`#txt_marking_all`、`#bnt_save`、`a[title="上一份"]` 和 `a[title="下一份"]` 等真实结构。模拟页提供 JSON 测试用例导入/导出、答卷图像、最终总分保存、自动提交开关、上一份/下一份和任务量进度，不连接真实智学网。
+本地测试站有两个入口：`/mock-grading` 是通用 `data-grading-*` 控件测试页；`/zhixue-mock` 是智学网专用适配器模拟页，复刻 `#topicImgContent`、`.scorearea`、`#txt_marking_all`、`#bnt_save`、`a[title="上一份"]` 和 `a[title="下一份"]` 等真实结构。模拟页提供 JSON 测试用例导入/导出、答卷图像、最终总分保存、自动提交开关、上一份/下一份和任务量进度；为对齐真实智学网约束，当前份未保存时“下一份”按钮禁用，不连接真实智学网。
 
 JSON 测试用例格式如下，`imageDataUrl` 可选；没有图片时会根据 `lines` 生成本地 SVG 答卷图：
 

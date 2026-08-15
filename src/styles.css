@@ -572,3 +572,13 @@ html[data-reduce-motion="true"] .prism-route-fallback .desktop-route-stage { ani
 .prism-score-emphasis { animation: prism-score-pop 220ms cubic-bezier(.22,1,.36,1) both; transform-origin: right center; }
 @media (prefers-reduced-motion: reduce) { .prism-score-emphasis { animation: none; } }
 html[data-reduce-motion="true"] .prism-score-emphasis { animation: none; }
+
+/* 桌面端引导页（Web 版下线后的入口提示） */
+.desktop-only-notice { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(160deg, #eef6f4 0%, #f7faf9 55%, #eaf3f1 100%); padding: 24px; }
+.desktop-only-notice-card { width: min(520px, 100%); background: #fff; border: 1px solid #dfe9e6; border-radius: 16px; padding: 40px 36px; text-align: center; box-shadow: 0 18px 44px rgba(23, 42, 38, .10); }
+.desktop-only-notice-mark { display: inline-block; padding: 4px 10px; border-radius: 6px; background: #13a8a2; color: #fff; font-size: 13px; font-weight: 800; letter-spacing: .08em; }
+.desktop-only-notice-card h1 { margin: 18px 0 10px; font-size: 24px; color: #16231f; }
+.desktop-only-notice-card p { margin: 0 0 26px; font-size: 14px; line-height: 1.8; color: #5b6b66; }
+.desktop-only-notice-card nav { display: flex; gap: 12px; justify-content: center; }
+.desktop-only-notice-card nav a { padding: 10px 18px; border: 1px solid #cfe0db; border-radius: 8px; color: #137d78; font-size: 13px; font-weight: 600; text-decoration: none; transition: border-color .15s, background .15s; }
+.desktop-only-notice-card nav a:hover { border-color: #13a8a2; background: #f0faf8; }
