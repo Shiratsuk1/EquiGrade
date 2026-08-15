@@ -9,9 +9,11 @@
   --prism-glass-edge: rgba(255,255,255,.72);
   --prism-window-bg: var(--prism-canvas);
   --prism-nav-surface: rgba(246,250,250,var(--prism-surface-opacity, .78));
-  --prism-content-surface: rgba(255,255,255,.94);
+  /* 内容区（卡片/表格/纸张）跟随同一透明度变量，整页玻璃透明度由滑块统一控制。 */
+  --prism-content-surface: rgba(255,255,255,var(--prism-surface-opacity, .94));
   --prism-float-surface: rgba(255,255,255,.86);
   --prism-nav-filter: blur(var(--prism-blur, 20px)) saturate(125%);
+  --prism-content-filter: blur(var(--prism-blur, 20px)) saturate(118%);
   --prism-ease: cubic-bezier(.22,1,.36,1);
   --prism-motion-factor: 1;
   --desktop-ink: var(--prism-graphite);
@@ -122,9 +124,9 @@ body.electron-host { margin: 0; overflow: hidden; background: var(--prism-window
   linear-gradient(180deg, rgba(255,255,255,.42), transparent 34%);
 }
 .desktop-shell > * { position: relative; z-index: 1; }
-.desktop-shell[data-material="solid"] { --prism-window-bg: #f5f8f8; --prism-nav-surface: #eef3f3; --prism-nav-filter: none; --prism-content-surface: rgba(255,255,255,.98); --prism-float-surface: #fff; }
+.desktop-shell[data-material="solid"] { --prism-window-bg: #f5f8f8; --prism-nav-surface: #eef3f3; --prism-nav-filter: none; --prism-content-surface: rgba(255,255,255,.98); --prism-content-filter: none; --prism-float-surface: #fff; }
 .desktop-shell[data-material="mica"] { --prism-nav-surface: rgba(246,250,250,var(--prism-surface-opacity, .78)); --prism-nav-filter: blur(var(--prism-blur, 20px)) saturate(125%); }
-.desktop-shell[data-material="acrylic"] { --prism-nav-surface: rgba(246,250,250,var(--prism-surface-opacity, .72)); --prism-nav-filter: blur(var(--prism-blur, 20px)) saturate(135%); --prism-content-surface: rgba(255,255,255,.95); }
+.desktop-shell[data-material="acrylic"] { --prism-nav-surface: rgba(246,250,250,var(--prism-surface-opacity, .72)); --prism-nav-filter: blur(var(--prism-blur, 20px)) saturate(135%); }
 .desktop-shell[data-font-size="compact"] { --desktop-fs-micro: calc(9px * var(--desktop-font-scale)); --desktop-fs-small: calc(10px * var(--desktop-font-scale)); --desktop-fs-body: calc(11px * var(--desktop-font-scale)); --desktop-fs-control: calc(11px * var(--desktop-font-scale)); --desktop-fs-section: calc(15px * var(--desktop-font-scale)); --desktop-fs-title: calc(22px * var(--desktop-font-scale)); }
 .desktop-shell[data-font-size="comfortable"] { --desktop-fs-micro: calc(10px * var(--desktop-font-scale)); --desktop-fs-small: calc(11px * var(--desktop-font-scale)); --desktop-fs-body: calc(12px * var(--desktop-font-scale)); --desktop-fs-control: calc(12px * var(--desktop-font-scale)); --desktop-fs-section: calc(16px * var(--desktop-font-scale)); --desktop-fs-title: calc(24px * var(--desktop-font-scale)); }
 .desktop-shell[data-font-size="large"] { --desktop-fs-micro: calc(11px * var(--desktop-font-scale)); --desktop-fs-small: calc(12px * var(--desktop-font-scale)); --desktop-fs-body: calc(13px * var(--desktop-font-scale)); --desktop-fs-control: calc(13px * var(--desktop-font-scale)); --desktop-fs-section: calc(18px * var(--desktop-font-scale)); --desktop-fs-title: calc(27px * var(--desktop-font-scale)); }
@@ -166,7 +168,7 @@ body.electron-host { margin: 0; overflow: hidden; background: var(--prism-window
 .desktop-live-dot.pulse { animation: desktop-pulse 1.8s infinite; }
 @keyframes desktop-pulse { 0%,100% { box-shadow: 0 0 0 3px var(--desktop-accent-ring); } 50% { box-shadow: 0 0 0 7px transparent; } }
 
-.desktop-main { display: flex; flex-direction: column; min-width: 0; height: 100vh; overflow: auto; background: transparent; }
+.desktop-main { display: flex; flex-direction: column; min-width: 0; height: 100vh; overflow: auto; background: transparent; -webkit-backdrop-filter: var(--prism-content-filter); backdrop-filter: var(--prism-content-filter); }
 .desktop-route-stage { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; view-transition-name: prism-route; }
 .desktop-page-header { flex: 0 0 86px; display: flex; align-items: center; justify-content: space-between; gap: 28px; min-width: 0; padding: 14px 26px; border-bottom: 1px solid var(--desktop-line); background: var(--prism-nav-surface); -webkit-backdrop-filter: var(--prism-nav-filter); backdrop-filter: var(--prism-nav-filter); box-shadow: inset 0 -1px var(--prism-glass-edge); }
 .desktop-page-header > div:first-child { min-width: 0; }
