@@ -5,7 +5,7 @@ import {
   Code2, FileCheck2, FileClock, FileText, Globe2, History, Home, ImageDown, ImagePlus, KeyRound,
   LayoutDashboard, Link2, ListChecks, LoaderCircle, Lock, Plug, Plus, RefreshCw,
   RotateCcw, Save, Search, Settings, ShieldCheck, SkipForward,
-  Sparkles, Square, TerminalSquare, Trash2, Unplug, Upload, Wifi, WifiOff, XCircle
+  Sparkles, Square, TerminalSquare, Trash2, Unplug, Upload, Wifi, WifiOff, X, XCircle
 } from "lucide-react";
 import type {
   BrowserAction, EmbeddedBrowserState, ElectronHostBridge, PipelineControl,
@@ -18,17 +18,19 @@ import type { MotionIntensity, WindowMaterial } from "../shared/electron";
 import { EMPTY_PLUGIN_STATUS } from "../shared/electron";
 import { buildPipelineScoreAlignment } from "../shared/pipelineSetup";
 import {
-  DEFAULT_GRADING_MODE, DEFAULT_MODEL_TIMEOUT_MS, DEFAULT_TEACHER_REASONING_EFFORT,
+  DEFAULT_GRADING_MODE, DEFAULT_MODEL_TIMEOUT_MS, DEFAULT_REVIEW_REASONING_EFFORT, DEFAULT_TEACHER_REASONING_EFFORT,
   DEFAULT_UNREADABLE_REVIEW_THRESHOLD
 } from "../shared/types";
 import type {
-  GradingHistoryRecord, GradingTemplateDetail, GradingTemplateSummary, ModelConfigInput,
-  PublicModelConfig, Rubric, SystemLogEntry, SystemLogSnapshot
+  GradingHistoryRecord, GradingResult, GradingTemplateDetail, GradingTemplateSummary, ModelConfigInput,
+  ModelCallHistoryEntry, ModelCallLogDetails, PublicModelConfig, Rubric, SystemLogEntry, SystemLogSnapshot
 } from "../shared/types";
 import { api, uploadDocument } from "./api";
-import { ResultDetail } from "./App";
+import { ModelCallDetails, ModelCallHistory, ResultDetail } from "./App";
 import { MathText } from "./Formula";
+import { ScorePointGuidance } from "./ScorePointGuidance";
 import { directionFromPopState, pushRoute, runRouteTransition } from "./navigation";
+import { readStartUrl, START_URL_STORAGE_KEY } from "../shared/startUrl";
 
 type DesktopRoute = {
   id: "dashboard" | "jobs" | "job" | "templates" | "template" | "history" | "record" | "logs" | "models" | "browser-debug" | "plugins-debug" | "settings";
@@ -38,7 +40,7 @@ type DesktopRoute = {
 type TemplateContext = {
   templateId: string;
   title: string;
-  locked: boolean;
+  ready: boolean;
   questionText: string;
   referenceText: string;
   rubric: Rubric;
@@ -100,8 +102,7 @@ type DesktopPreferences = PluginUiPreferences & {
   autoOpenStartUrl: boolean;
 };
 
-const defaultDesktopPreferences: DesktopPreferences = {
-  fontSize: "comfortable",
+const defaultDesktopPreferences: DesktopPreferences = {  fontSize: "comfortable",
   density: "comfortable",
   fontFamily: "noto-sans-sc",
   monoFontFamily: "cascadia",
@@ -190,8 +191,8 @@ function useSystemReducedMotion() {
 }
 
 function pipelineEventTone(event: PipelineEvent) {
-  if (["page_failed", "plugin_preflight_failed", "browser_load_failed"].includes(event.type)) return "error";
-  if (["page_skipped", "pipeline_paused"].includes(event.type)) return "warning";
+  if (["pipeline_start_rejected", "page_failed", "plugin_preflight_failed", "browser_load_failed"].includes(event.type)) return "error";
+  if (["page_skipped", "pipeline_paused", "pipeline_paused_stale_answer", "pipeline_force_stopped"].includes(event.type)) return "warning";
   if (["page_completed", "pipeline_completed", "pipeline_completed_after_skip"].includes(event.type)) return "success";
   return "active";
 }
@@ -200,7 +201,7 @@ const routeTitles: Record<DesktopRoute["id"], { eyebrow: string; title: string; 
   dashboard: { eyebrow: "工作台", title: "智能阅卷", description: "查看当前任务、运行状态和需要处理的答卷。" },
   jobs: { eyebrow: "批改任务", title: "任务管理", description: "创建任务并连接已经打开的智学网阅卷页面。" },
   job: { eyebrow: "当前任务", title: "实时批改", description: "对照评分标准查看网页，并控制连续批改进度。" },
-  templates: { eyebrow: "评分资料", title: "评分标准", description: "管理已经确认并锁定的题目、答案和逐点评分规则。" },
+  templates: { eyebrow: "评分资料", title: "评分标准", description: "管理已保存且可继续修改的题目、答案和逐点评分规则。" },
   template: { eyebrow: "评分资料", title: "评分标准详情", description: "核对题目、参考答案和每一个评分点。" },
   history: { eyebrow: "批改记录", title: "历史记录", description: "查找本机保存的答卷结果和人工复核记录。" },
   record: { eyebrow: "批改记录", title: "答卷详情", description: "查看单份答卷的得分、依据和教师评语。" },
@@ -229,6 +230,9 @@ const defaultModelConfig: ModelConfigInput = {
   apiKey: "",
   visionModel: "",
   textModel: "",
+  reviewBaseUrl: "",
+  reviewApiKey: "",
+  reviewModel: "",
   timeoutMs: DEFAULT_MODEL_TIMEOUT_MS,
   maxRetries: 1,
   maxConcurrency: 2,
@@ -236,6 +240,7 @@ const defaultModelConfig: ModelConfigInput = {
   unreadableReviewThreshold: DEFAULT_UNREADABLE_REVIEW_THRESHOLD,
   gradingMode: DEFAULT_GRADING_MODE,
   teacherReasoningEffort: DEFAULT_TEACHER_REASONING_EFFORT,
+  reviewReasoningEffort: DEFAULT_REVIEW_REASONING_EFFORT,
   supportsJsonSchema: true,
   supportsJsonObject: true,
   supportsBase64Images: true,
@@ -361,6 +366,7 @@ function formatTime(value: unknown) {
 }
 
 function eventText(event: PipelineEvent) {
+  const reason = cleanPipelineError(event.reason);
   switch (event.type) {
     case "pipeline_started": return "流水线已启动";
     case "pipeline_template_bound": return "评分标准已绑定到当前任务";
@@ -368,14 +374,25 @@ function eventText(event: PipelineEvent) {
     case "plugin_preflight_failed": return "站点控件检查失败";
     case "image_extracted": return `已提取答卷 ${event.sourcePageKey || event.pageKey || "当前页"}`;
     case "page_completed": return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分`;
-    case "page_failed": return `处理失败：${event.reason || "未知异常"}`;
-    case "page_skipped": return `已跳过：${event.reason || "当前答卷"}`;
-    case "pipeline_paused": return `已暂停：${event.reason || "等待人工处理"}`;
+    case "pipeline_start_rejected": return `启动失败：${reason || "尚未选择批改任务"}`;
+    case "page_failed": return `处理失败：${reason || "未知异常"}`;
+    case "page_skipped": return `已跳过：${reason || "当前答卷"}`;
+    case "pipeline_paused": return `已暂停：${reason || "等待人工处理"}`;
+    case "pipeline_paused_stale_answer": return `已暂停：检测到答卷在模型批改期间发生切换`;
+    case "pipeline_force_stopped": return "流水线已被用户强制停止";
     case "pipeline_completed": return "当前批次已完成";
     case "pipeline_completed_after_skip": return "跳过异常答卷后批次完成";
-    case "browser_load_failed": return `网页加载失败：${event.reason || "未知异常"}`;
+    case "browser_load_failed": return `网页加载失败：${reason || "未知异常"}`;
     default: return String(event.message || event.type || "流水线事件");
   }
+}
+
+function cleanPipelineError(value: unknown) {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/^Error invoking remote method '[^']+':\s*/i, "")
+    .replace(/^Error:\s*/i, "")
+    .trim();
 }
 
 function useElectronState() {
@@ -434,7 +451,7 @@ function DesktopSidebar({ route, browser }: { route: DesktopRoute; browser: Embe
 
 function PageHeader({ route, browser }: { route: DesktopRoute; browser: EmbeddedBrowserState }) {
   const details = route.id === "template" && route.parameter === "new"
-    ? { eyebrow: "评分标准", title: "新建评分标准", description: "导入题目和参考答案，生成、核对并锁定新的评分规则。" }
+    ? { eyebrow: "评分标准", title: "新建评分标准", description: "导入题目和参考答案，生成、核对并保存新的评分规则。" }
     : route.id === "job" && route.parameter === "new"
     ? { eyebrow: "批改任务", title: "新建批改任务", description: "按照引导完成模型、评分标准、阅卷页面和安全试运行检查。" }
     : routeTitles[route.id];
@@ -481,7 +498,6 @@ function useTemplateContext() {
       api<GradingTemplateDetail>(`/api/templates/${encodeURIComponent(templateId)}`),
       host.getBrowserState()
     ]);
-    if (detail.rubric.status !== "locked") throw new Error("只能绑定已经锁定的评分标准");
     if (!browserState.url || browserState.url === "about:blank") {
       throw new Error("请先打开当前智学网阅卷页面，再绑定评分标准");
     }
@@ -532,7 +548,7 @@ function TestEntryButton({ onEnterTest }: { onEnterTest: () => Promise<unknown> 
 
 function DashboardPage({ browser, summary, template, onEnterTest }: { browser: EmbeddedBrowserState; summary: PipelineSummary; template: TemplateContext | null; onEnterTest: () => Promise<unknown> }) {
   const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities);
-  const readyCount = [template?.locked, browser.plugin.connected, pageReady, pageReady].filter(Boolean).length;
+  const readyCount = [template?.ready, browser.plugin.connected, pageReady, pageReady].filter(Boolean).length;
   return <div className="desktop-page-body desktop-dashboard">
     <MetricStrip browser={browser} summary={summary} template={template} />
     <section className="desktop-dashboard-grid">
@@ -540,7 +556,7 @@ function DashboardPage({ browser, summary, template, onEnterTest }: { browser: E
         <div className="desktop-section-heading"><div><span>启动检查</span><h2>自动批改准备情况</h2></div><strong>{readyCount} / 4</strong></div>
         <div className="desktop-readiness-line"><i style={{ width: `${readyCount * 25}%` }} /></div>
         <ul className="desktop-check-list">
-          <li className={template?.locked ? "ok" : ""}>{template?.locked ? <Check size={15} /> : <XCircle size={15} />}评分标准已确认<span>{template?.title || "尚未选择评分标准"}</span></li>
+          <li className={template?.ready ? "ok" : ""}>{template?.ready ? <Check size={15} /> : <XCircle size={15} />}评分标准已选择<span>{template?.title || "尚未选择评分标准"}</span></li>
           <li className={browser.plugin.connected ? "ok" : ""}>{browser.plugin.connected ? <Check size={15} /> : <XCircle size={15} />}智学网页面已连接<span>{browser.plugin.adapterName || "等待打开阅卷页面"}</span></li>
           <li className={pageReady ? "ok" : ""}>{pageReady ? <Check size={15} /> : <XCircle size={15} />}学生答卷可以读取<span>{pageReady ? "答卷、评分和翻页控件均已确认" : "需同时确认答卷、评分、提交和翻页控件"}</span></li>
           <li className={pageReady ? "ok" : ""}>{pageReady ? <Check size={15} /> : <XCircle size={15} />}最终总分框可以使用<span>{pageReady ? "提交后自动进入下一份" : "当前页面尚未通过完整检查"}</span></li>
@@ -557,7 +573,7 @@ function DashboardPage({ browser, summary, template, onEnterTest }: { browser: E
       <TestEntryButton onEnterTest={onEnterTest} />
     </section>
     <section className="desktop-section desktop-current-template">
-      <div className="desktop-section-heading"><div><span>当前评分标准</span><h2>{template?.title || "当前任务尚未绑定评分标准"}</h2></div><div className="desktop-heading-actions"><a className="desktop-secondary-action" href="/templates?electron=1"><BookOpenCheck size={14} />{template ? "更换评分标准" : "选择评分标准"}</a><span className={template?.locked ? "desktop-status-label locked" : "desktop-status-label"}><Lock size={13} />{template?.locked ? "已锁定" : "未绑定"}</span></div></div>
+      <div className="desktop-section-heading"><div><span>当前评分标准</span><h2>{template?.title || "当前任务尚未绑定评分标准"}</h2></div><div className="desktop-heading-actions"><a className="desktop-secondary-action" href="/templates?electron=1"><BookOpenCheck size={14} />{template ? "更换评分标准" : "选择评分标准"}</a><span className={template?.ready ? "desktop-status-label locked" : "desktop-status-label"}><BookOpenCheck size={13} />{template?.ready ? "已绑定" : "未绑定"}</span></div></div>
       <div className="desktop-template-summary">
         <div><span>模板编号</span><strong>{template?.templateId || "--"}</strong></div><div><span>满分</span><strong>{template?.rubric.totalScore ?? "--"} 分</strong></div><div><span>小问</span><strong>{template?.rubric.subquestions.length ?? "--"}</strong></div><div><span>评分点</span><strong>{template?.rubric.subquestions.reduce((count, item) => count + item.scorePoints.length, 0) ?? "--"}</strong></div>
       </div>
@@ -665,16 +681,23 @@ function BrowserToolbar({ browser, compact = false }: { browser: EmbeddedBrowser
 
 function PipelineControls({ browser, confirmBeforeStart }: { browser: EmbeddedBrowserState; confirmBeforeStart: boolean }) {
   const [pending, setPending] = useState<PipelineControl | null>(null);
+  const [error, setError] = useState("");
   const send = async (control: PipelineControl) => {
     if (control === "start" && confirmBeforeStart && !window.confirm("开始批改会向智学网写入并提交真实分数，确定继续吗？")) return;
-    setPending(control);
-    try { await getHost()?.controlPipeline(control); }
+    setPending(control); setError("");
+    try {
+      const host = getHost();
+      if (!host) throw new Error("桌面端控制桥接尚未就绪");
+      await host.controlPipeline(control);
+    } catch (reason) {
+      setError(cleanPipelineError(reason instanceof Error ? reason.message : reason) || "流水线控制失败");
+    }
     finally { window.setTimeout(() => setPending(null), 280); }
   };
   const active = ["extracting", "grading", "writing_score", "submitting", "verifying", "navigating_next", "preflight"].includes(browser.plugin.phase);
   const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities) && browser.plugin.phase === "ready";
   return <div className="desktop-pipeline-controls">
-    <div><span className={active ? "desktop-live-dot online pulse" : "desktop-live-dot"} /><div><strong>{phaseLabel(browser.plugin.phase)}</strong><small>{browser.plugin.message}</small></div></div>
+    <div><span className={active ? "desktop-live-dot online pulse" : "desktop-live-dot"} /><div><strong>{error ? "启动失败" : phaseLabel(browser.plugin.phase)}</strong><small>{error || browser.plugin.message}</small></div></div>
     <button className="primary" disabled={active || pending !== null || !pageReady} onClick={() => void send("start")}>{pending === "start" ? <LoaderCircle className="spin" size={15} /> : <CirclePlay size={15} />}开始批改</button>
     <button title="暂停流水线" disabled={!active || pending !== null} onClick={() => void send("pause")}><CirclePause size={16} /></button>
     <button title="停止流水线" disabled={!active || pending !== null} onClick={() => void send("stop")}><Square size={15} /></button>
@@ -730,7 +753,7 @@ function TemplateInspector({ template }: { template: TemplateContext | null }) {
   const [tab, setTab] = useState<"question" | "rubric">("rubric");
   const emptyState = <div className="desktop-inspector-empty" role="status"><BookOpenCheck size={24} /><strong>尚未加载评分标准</strong><span>选择或绑定评分标准后，这里会显示题目原文与逐点判分依据。</span></div>;
   return <aside className="desktop-template-inspector">
-    <div className="desktop-inspector-head"><div><span>当前锁定模板</span><strong>{template?.title || "正在读取模板"}</strong></div><b>{template?.rubric.totalScore ?? "--"} 分</b></div>
+    <div className="desktop-inspector-head"><div><span>当前评分标准</span><strong>{template?.title || "正在读取模板"}</strong></div><b>{template?.rubric.totalScore ?? "--"} 分</b></div>
     <div className="desktop-segmented" role="tablist">
       <button className={tab === "question" ? "active" : ""} onClick={() => setTab("question")}>题目原文</button>
       <button className={tab === "rubric" ? "active" : ""} onClick={() => setTab("rubric")}>评分标准</button>
@@ -739,11 +762,11 @@ function TemplateInspector({ template }: { template: TemplateContext | null }) {
       {!template ? emptyState : tab === "question" ? <div className="desktop-question-copy"><MathText value={template.questionText || "题目原文尚未加载"} formulaByDefault /></div> : <div className="desktop-rubric-copy">
         {template.rubric.subquestions.map((question) => <details key={question.id} open>
           <summary><div><strong>{question.id} · {question.title}</strong><span>{question.scorePoints.length} 个评分点</span></div><b>{question.maxScore} 分</b><ChevronDown size={14} /></summary>
-          <ol>{question.scorePoints.map((point) => <li key={point.id}><div><span>{point.id}</span><b>{point.score} 分</b></div><strong>{point.title}</strong>{point.description && <MathText value={point.description} formulaByDefault />}{point.expected && <div className="desktop-rubric-expected"><span>判分依据</span><MathText value={point.expected} formulaByDefault /></div>}</li>)}</ol>
+          <ol>{question.scorePoints.map((point) => <li key={point.id}><div><span>{point.id}</span><b>{point.score} 分</b></div><strong>{point.title}</strong>{point.description && <MathText value={point.description} formulaByDefault />}{point.expected && <div className="desktop-rubric-expected"><span>判分依据</span><MathText value={point.expected} formulaByDefault /></div>}<ScorePointGuidance point={point} /></li>)}</ol>
         </details>)}
       </div>}
     </div>
-    <div className="desktop-inspector-foot"><Lock size={13} /><span>{template?.locked ? "模板已锁定，流水线将严格按此评分" : "模板尚未锁定"}</span></div>
+    <div className="desktop-inspector-foot"><BookOpenCheck size={13} /><span>{template?.ready ? `本次任务使用评分标准 v${template.rubric.version}` : "尚未选择评分标准"}</span></div>
   </aside>;
 }
 
@@ -857,7 +880,7 @@ function GuidedSetupPage({ browser }: { browser: EmbeddedBrowserState }) {
   }, [browser.plugin.pageKey, browser.url, inspectedUrl, inspection]);
 
   const modelReady = Boolean(model?.configured && model.enabled && model.hasApiKey && model.visionModel && modelTest?.ok);
-  const templateReady = Boolean(template?.rubric.status === "locked");
+  const templateReady = Boolean(template);
   const inspectionIssues = inspection?.issues ?? [];
   const inspectionAccepted = Boolean(inspection?.ok && (!inspection.batchComplete || allowCompletedBatch));
   const inspectionMatchesCurrentPage = Boolean(inspection?.pageKey && browser.plugin.pageKey && inspection.pageKey === browser.plugin.pageKey);
@@ -937,10 +960,10 @@ function GuidedSetupPage({ browser }: { browser: EmbeddedBrowserState }) {
     </>;
   } else if (step === 1) {
     content = <>
-      <div className="desktop-guide-heading"><span>步骤 2</span><h2>选择锁定评分标准</h2><p>这里只显示真实评分模板；内置测试模板不能用于生产任务。</p></div>
+      <div className="desktop-guide-heading"><span>步骤 2</span><h2>选择评分标准</h2><p>这里只显示已保存的真实评分标准；内置测试模板不能用于生产任务。</p></div>
       <div className="desktop-guide-template-list">
-        {templates.map((item) => <label key={item.id} className={templateId === item.id ? "selected" : ""}><input type="radio" name="guide-template" checked={templateId === item.id} onChange={() => setTemplateId(item.id)} /><div><strong>{item.title}</strong><span>{item.totalScore} 分 · 已锁定 · {item.gradingCount} 条历史记录</span></div><Lock size={15} /></label>)}
-        {!templates.length && <div className="desktop-guide-empty"><AlertTriangle size={18} /><strong>还没有可用于真实任务的锁定模板</strong><span>请先在评分模板编辑器中导入题目和评分标准。</span></div>}
+        {templates.map((item) => <label key={item.id} className={templateId === item.id ? "selected" : ""}><input type="radio" name="guide-template" checked={templateId === item.id} onChange={() => setTemplateId(item.id)} /><div><strong>{item.title}</strong><span>{item.totalScore} 分 · 可编辑 · {item.gradingCount} 条历史记录</span></div><BookOpenCheck size={15} /></label>)}
+        {!templates.length && <div className="desktop-guide-empty"><AlertTriangle size={18} /><strong>还没有可用于真实任务的评分标准</strong><span>请先在评分标准编辑器中导入题目和评分依据。</span></div>}
       </div>
       <a className="desktop-secondary-action" href="/templates/new?electron=1"><Plus size={14} />新建评分标准</a>
     </>;
@@ -990,9 +1013,21 @@ function TemplateTable({ activeTemplateId, onBind, onEmpty }: {
   const [templates, setTemplates] = useState<GradingTemplateSummary[]>([]);
   const [error, setError] = useState("");
   const [pendingId, setPendingId] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+  const reload = useCallback(async () => {
+    try {
+      const items = await api<GradingTemplateSummary[]>("/api/templates");
+      setTemplates(items);
+      setSelectedIds((current) => new Set([...current].filter((id) => items.some((item) => item.id === id && item.id !== activeTemplateId))));
+      if (!items.length) onEmpty?.();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "模板读取失败");
+    }
+  }, [activeTemplateId, onEmpty]);
   useEffect(() => {
-    void api<GradingTemplateSummary[]>("/api/templates").then((items) => { setTemplates(items); if (!items.length) onEmpty?.(); }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "模板读取失败"));
-  }, [onEmpty]);
+    void reload();
+  }, [reload]);
   const bind = async (templateId: string) => {
     setPendingId(templateId);
     setError("");
@@ -1000,17 +1035,48 @@ function TemplateTable({ activeTemplateId, onBind, onEmpty }: {
     catch (reason) { setError(reason instanceof Error ? reason.message : "评分标准绑定失败"); }
     finally { setPendingId(""); }
   };
-  return <>{error && <div className="desktop-error-state desktop-template-bind-error"><AlertTriangle size={18} />{error}</div>}<div className="desktop-table-wrap"><table className="desktop-table desktop-template-table"><thead><tr><th>模板</th><th>状态</th><th>满分</th><th>题目素材</th><th>批改记录</th><th>更新时间</th><th>当前任务</th><th /></tr></thead><tbody>
+  const selectableIds = templates.filter((item) => item.id !== activeTemplateId).map((item) => item.id);
+  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.has(id));
+  const toggle = (id: string) => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const toggleAll = () => setSelectedIds(allSelected ? new Set() : new Set(selectableIds));
+  const removeSelected = async () => {
+    const selected = templates.filter((item) => selectedIds.has(item.id));
+    if (!selected.length) return;
+    const recordCount = selected.reduce((total, item) => total + item.gradingCount, 0);
+    if (!window.confirm(`确定永久删除选中的 ${selected.length} 个评分标准吗？\n\n将同时删除其下 ${recordCount} 条批改记录和全部相关图片，此操作无法恢复。`)) return;
+    setDeleting(true);
+    setError("");
+    try {
+      await api("/api/templates", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: selected.map((item) => item.id) })
+      });
+      setSelectedIds(new Set());
+      await reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "评分标准删除失败");
+    } finally {
+      setDeleting(false);
+    }
+  };
+  return <>{error && <div className="desktop-error-state desktop-template-bind-error"><AlertTriangle size={18} />{error}</div>}
+    <div className="desktop-bulk-toolbar"><label><input type="checkbox" checked={allSelected} disabled={!selectableIds.length || deleting} onChange={toggleAll} /><span>全选可删除项</span></label><span>已选择 {selectedIds.size} 项</span><button className="desktop-danger-action" disabled={!selectedIds.size || deleting} onClick={() => void removeSelected()}>{deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deleting ? "正在删除" : "删除所选"}</button></div>
+    <div className="desktop-table-wrap"><table className="desktop-table desktop-template-table"><thead><tr><th className="desktop-selection-cell"><span className="desktop-visually-hidden">选择</span></th><th>模板</th><th>状态</th><th>满分</th><th>题目素材</th><th>批改记录</th><th>更新时间</th><th>当前任务</th><th /></tr></thead><tbody>
     {templates.map((item) => {
       const active = activeTemplateId === item.id;
-      return <tr className={active ? "bound" : ""} key={item.id}><td><strong style={sharedElementStyle(sharedElementName("prism-template-title", item.id))}>{item.title}</strong><small>{item.id}</small></td><td><span className="desktop-status-label locked"><Lock size={12} />已锁定</span></td><td><span style={sharedElementStyle(sharedElementName("prism-template-score", item.id))}>{item.totalScore} 分</span></td><td>{item.questionImageCount + item.referenceImageCount} 张</td><td>{item.gradingCount}</td><td>{new Date(item.updatedAt).toLocaleString("zh-CN", { hour12: false })}</td><td>{active ? <span className="desktop-status-label locked"><Link2 size={12} />已绑定</span> : <button className="desktop-template-bind-button" disabled={Boolean(pendingId)} onClick={() => void bind(item.id)}>{pendingId === item.id ? <LoaderCircle className="spin" size={13} /> : <Link2 size={13} />}{pendingId === item.id ? "正在匹配" : "绑定到当前任务"}</button>}</td><td><a title="打开模板" href={`/templates/${encodeURIComponent(item.id)}?electron=1`}><ChevronRight size={16} /></a></td></tr>;
+      return <tr className={`${active ? "bound" : ""} ${selectedIds.has(item.id) ? "selected" : ""}`} key={item.id}><td className="desktop-selection-cell"><input type="checkbox" aria-label={`选择评分标准 ${item.title}`} checked={selectedIds.has(item.id)} disabled={active || deleting} title={active ? "当前任务正在使用此评分标准，不能删除" : "选择评分标准"} onChange={() => toggle(item.id)} /></td><td><strong style={sharedElementStyle(sharedElementName("prism-template-title", item.id))}>{item.title}</strong><small>{item.id}</small></td><td><span className="desktop-status-label locked"><BookOpenCheck size={12} />可编辑</span></td><td><span style={sharedElementStyle(sharedElementName("prism-template-score", item.id))}>{item.totalScore} 分</span></td><td>{item.questionImageCount + item.referenceImageCount} 张</td><td>{item.gradingCount}</td><td>{new Date(item.updatedAt).toLocaleString("zh-CN", { hour12: false })}</td><td>{active ? <span className="desktop-status-label locked"><Link2 size={12} />已绑定</span> : <button className="desktop-template-bind-button" disabled={Boolean(pendingId) || deleting} onClick={() => void bind(item.id)}>{pendingId === item.id ? <LoaderCircle className="spin" size={13} /> : <Link2 size={13} />}{pendingId === item.id ? "正在匹配" : "绑定到当前任务"}</button>}</td><td><a title="打开模板" href={`/templates/${encodeURIComponent(item.id)}?electron=1`}><ChevronRight size={16} /></a></td></tr>;
     })}
-    {!templates.length && <tr><td colSpan={8} className="desktop-empty-cell">暂无评分模板</td></tr>}
+    {!templates.length && <tr><td colSpan={9} className="desktop-empty-cell">暂无评分模板</td></tr>}
   </tbody></table></div></>;
 }
 
 function TemplatesPage({ template, onBindTemplate }: { template: TemplateContext | null; onBindTemplate: (templateId: string) => Promise<TemplateContext> }) {
-  return <div className="desktop-page-body"><section className="desktop-section"><div className="desktop-section-heading"><div><span>本地模板库</span><h2>已保存并锁定的评分模板</h2><p className="desktop-section-description">选择与当前智学网页面满分一致的评分标准，绑定后流水线将严格使用该版本。</p></div><a className="desktop-save-button" href="/templates/new?electron=1"><Plus size={15} />新建评分标准</a></div><TemplateTable activeTemplateId={template?.templateId} onBind={onBindTemplate} /></section></div>;
+  return <div className="desktop-page-body"><section className="desktop-section"><div className="desktop-section-heading"><div><span>本地模板库</span><h2>已保存的评分标准</h2><p className="desktop-section-description">评分标准可以继续修改；绑定后流水线固定使用当时选定的版本。</p></div><a className="desktop-save-button" href="/templates/new?electron=1"><Plus size={15} />新建评分标准</a></div><TemplateTable activeTemplateId={template?.templateId} onBind={onBindTemplate} /></section></div>;
 }
 
 function TemplateMaterialInput({ title, icon, text, images, placeholder, busy, onText, onImages, onDocument }: {
@@ -1054,6 +1120,29 @@ function TemplateMaterialInput({ title, icon, text, images, placeholder, busy, o
   </section>;
 }
 
+function RubricRefinement({ busy, message, onRefine }: {
+  busy: boolean;
+  message: string;
+  onRefine: (instruction: string) => Promise<void>;
+}) {
+  const [instruction, setInstruction] = useState("");
+  const submit = async () => {
+    const value = instruction.trim();
+    if (!value || busy) return;
+    try {
+      await onRefine(value);
+      setInstruction("");
+    } catch {
+      // Keep the teacher instruction available for correction and retry.
+    }
+  };
+  return <div className="desktop-rubric-refinement">
+    <div className="desktop-rubric-refinement-heading"><Sparkles size={16} /><div><strong>补充评分细节</strong><span>当前完整 JSON 会交给教师模型修改；总分、题号、评分点 ID 和分值保持不变。</span></div></div>
+    <textarea value={instruction} maxLength={4000} disabled={busy} onChange={(event) => setInstruction(event.target.value)} placeholder="例如：补充使用动量定理的替代解法；说明第三小问可接受的等价形式；明确单位错误时的判分说明。" />
+    <footer><span>{message || `${instruction.length} / 4000`}</span><button className="desktop-save-button" disabled={!instruction.trim() || busy} onClick={() => void submit()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{busy ? "教师模型正在修改" : "交给教师模型完善"}</button></footer>
+  </div>;
+}
+
 function TemplateCreatePage() {
   const [questionText, setQuestionText] = useState("");
   const [referenceText, setReferenceText] = useState("");
@@ -1062,8 +1151,9 @@ function TemplateCreatePage() {
   const [rubric, setRubric] = useState<Rubric | null>(null);
   const [rubricJson, setRubricJson] = useState("");
   const [editingJson, setEditingJson] = useState(false);
-  const [busy, setBusy] = useState<"question-document" | "reference-document" | "structure" | "save" | null>(null);
+  const [busy, setBusy] = useState<"question-document" | "reference-document" | "structure" | "refine" | "save" | null>(null);
   const [error, setError] = useState("");
+  const [refinementMessage, setRefinementMessage] = useState("");
   const materialReady = Boolean((questionText.trim() || questionImages.length) && (referenceText.trim() || referenceImages.length));
   const invalidateRubric = () => { setRubric(null); setRubricJson(""); setEditingJson(false); };
   const updateQuestionText = (value: string) => { setQuestionText(value); if (rubric) invalidateRubric(); };
@@ -1101,15 +1191,29 @@ function TemplateCreatePage() {
       setRubric({ ...next, status: "draft" }); setEditingJson(false); setError("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "JSON 格式无效"); }
   };
+  const refine = async (instruction: string) => {
+    if (!rubric) return;
+    setBusy("refine"); setError(""); setRefinementMessage("");
+    try {
+      const next = await api<Rubric>("/api/rubrics/refine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rubric, instruction })
+      });
+      setRubric(next); setRubricJson(JSON.stringify(next, null, 2)); setEditingJson(false);
+      setRefinementMessage("教师模型已更新草稿，请核对后保存");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "评分细节补充失败"); throw reason; }
+    finally { setBusy(null); }
+  };
   const saveTemplate = async () => {
     if (!rubric) return;
     setBusy("save"); setError("");
     try {
-      const locked: Rubric = { ...rubric, status: "locked" };
+      const savedRubric: Rubric = { ...rubric, status: "saved" };
       const form = new FormData();
       form.append("questionText", questionText);
       form.append("referenceText", referenceText);
-      form.append("rubric", JSON.stringify(locked));
+      form.append("rubric", JSON.stringify(savedRubric));
       questionImages.forEach((image) => form.append("questionImages", image.file, image.file.name));
       referenceImages.forEach((image) => form.append("referenceImages", image.file, image.file.name));
       const saved = await api<GradingTemplateSummary>("/api/templates", { method: "POST", body: form });
@@ -1117,7 +1221,7 @@ function TemplateCreatePage() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : "评分标准保存失败"); setBusy(null); }
   };
   return <div className="desktop-page-body desktop-template-create">
-    <nav className="desktop-template-create-progress" aria-label="新建评分标准进度"><span className="complete"><Check size={14} />导入材料</span><i /><span className={rubric ? "complete" : materialReady ? "active" : ""}>{rubric ? <Check size={14} /> : "2"}生成与核对</span><i /><span className={rubric ? "active" : ""}>3 锁定保存</span></nav>
+    <nav className="desktop-template-create-progress" aria-label="新建评分标准进度"><span className="complete"><Check size={14} />导入材料</span><i /><span className={rubric ? "complete" : materialReady ? "active" : ""}>{rubric ? <Check size={14} /> : "2"}生成与核对</span><i /><span className={rubric ? "active" : ""}>3 保存</span></nav>
     {error && <div className="desktop-error-state"><AlertTriangle size={17} />{error}{/模型配置|API Key|模型/.test(error) && <a href="/models?electron=1">检查教师模型</a>}</div>}
     <section className="desktop-section desktop-template-import-section">
       <div className="desktop-section-heading"><div><span>步骤 1</span><h2>导入题目与评分依据</h2></div><span className="desktop-status-label">TXT · MD · DOCX · 文本型 PDF · 图片</span></div>
@@ -1125,30 +1229,141 @@ function TemplateCreatePage() {
         <TemplateMaterialInput title="题目原文" icon={<FileText size={18} />} text={questionText} images={questionImages} placeholder="粘贴题目文字；有题图时可以添加图片或直接粘贴截图。" busy={busy === "question-document"} onText={updateQuestionText} onImages={updateQuestionImages} onDocument={(file) => void extractDocument(file, "question")} />
         <TemplateMaterialInput title="参考答案与评分标准" icon={<FileCheck2 size={18} />} text={referenceText} images={referenceImages} placeholder="粘贴参考答案和逐点给分要求；公式可以使用 LaTeX。" busy={busy === "reference-document"} onText={updateReferenceText} onImages={updateReferenceImages} onDocument={(file) => void extractDocument(file, "reference")} />
       </div>
-      <div className="desktop-template-generate-action"><div><strong>{rubric ? "材料发生修改后需要重新生成" : materialReady ? "材料已准备完成" : "题目和评分依据都需要提供文字或图片"}</strong><span>模型只生成评分标准草稿，锁定前可以核对并编辑。</span></div><button className="desktop-save-button" disabled={!materialReady || busy !== null} onClick={() => void structure()}>{busy === "structure" ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}{busy === "structure" ? "正在生成评分标准" : rubric ? "重新生成评分标准" : "生成评分标准"}</button></div>
+      <div className="desktop-template-generate-action"><div><strong>{rubric ? "材料发生修改后需要重新生成" : materialReady ? "材料已准备完成" : "题目和评分依据都需要提供文字或图片"}</strong><span>模型先生成评分标准草稿，保存后仍可继续修改。</span></div><button className="desktop-save-button" disabled={!materialReady || busy !== null} onClick={() => void structure()}>{busy === "structure" ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}{busy === "structure" ? "正在生成评分标准" : rubric ? "重新生成评分标准" : "生成评分标准"}</button></div>
     </section>
     {rubric && <section className="desktop-section desktop-template-review-section">
-      <div className="desktop-section-heading"><div><span>步骤 2</span><h2>核对评分标准草稿</h2></div><div className="desktop-template-review-actions"><button className="desktop-secondary-action" onClick={() => setEditingJson((value) => !value)}><Code2 size={14} />{editingJson ? "返回预览" : "高级编辑"}</button><button className="desktop-save-button" disabled={busy !== null || editingJson} onClick={() => void saveTemplate()}>{busy === "save" ? <LoaderCircle className="spin" size={15} /> : <Lock size={15} />}{busy === "save" ? "正在锁定保存" : "确认、锁定并保存"}</button></div></div>
+      <div className="desktop-section-heading"><div><span>步骤 2</span><h2>核对评分标准草稿</h2></div><div className="desktop-template-review-actions"><button className="desktop-secondary-action" onClick={() => setEditingJson((value) => !value)}><Code2 size={14} />{editingJson ? "返回预览" : "高级编辑"}</button><button className="desktop-save-button" disabled={busy !== null || editingJson} onClick={() => void saveTemplate()}>{busy === "save" ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{busy === "save" ? "正在保存" : "保存评分标准"}</button></div></div>
       <div className="desktop-template-name-field"><label><span>评分标准名称</span><input value={rubric.title} onChange={(event) => { const next = { ...rubric, title: event.target.value, status: "draft" as const }; setRubric(next); setRubricJson(JSON.stringify(next, null, 2)); }} /></label><div><span>总分</span><strong>{rubric.totalScore} 分</strong></div><div><span>小问</span><strong>{rubric.subquestions.length}</strong></div><div><span>评分点</span><strong>{rubric.subquestions.reduce((total, item) => total + item.scorePoints.length, 0)}</strong></div></div>
-      {rubric.warnings.length > 0 && <div className="desktop-template-warning"><AlertTriangle size={17} /><div><strong>锁定前请检查以下提示</strong>{rubric.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div></div>}
-      {editingJson ? <div className="desktop-template-json-editor"><textarea value={rubricJson} onChange={(event) => setRubricJson(event.target.value)} spellCheck={false} /><footer><button className="desktop-secondary-action" onClick={() => { setRubricJson(JSON.stringify(rubric, null, 2)); setEditingJson(false); }}>取消修改</button><button className="desktop-save-button" onClick={applyJson}><Check size={15} />应用修改</button></footer></div> : <div className="desktop-rubric-table desktop-template-rubric-preview">{rubric.subquestions.map((question) => <div key={question.id}><header><div><strong>{question.id} · {question.title}</strong><span>{question.scorePoints.length} 个评分点</span></div><b>{question.maxScore} 分</b></header>{question.finalAnswers.length > 0 && <div className="desktop-template-final-answers"><span>参考结果</span><div>{question.finalAnswers.map((answer, index) => <span key={`${answer.expression}-${index}`}><MathText value={answer.expression} formulaByDefault />{answer.unit && <small>{answer.unit}</small>}</span>)}</div></div>}{question.scorePoints.map((point) => <article key={point.id}><span>{point.id}</span><div><strong>{point.title}</strong><MathText value={point.description} formulaByDefault /><div className="desktop-rubric-expected"><span>判分依据</span><MathText value={point.expected} formulaByDefault /></div></div><b>{point.score} 分</b></article>)}</div>)}</div>}
+      <RubricRefinement busy={busy === "refine"} message={refinementMessage} onRefine={refine} />
+      {rubric.warnings.length > 0 && <div className="desktop-template-warning"><AlertTriangle size={17} /><div><strong>保存前请检查以下提示</strong>{rubric.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div></div>}
+      {editingJson ? <div className="desktop-template-json-editor"><textarea value={rubricJson} onChange={(event) => setRubricJson(event.target.value)} spellCheck={false} /><footer><button className="desktop-secondary-action" onClick={() => { setRubricJson(JSON.stringify(rubric, null, 2)); setEditingJson(false); }}>取消修改</button><button className="desktop-save-button" onClick={applyJson}><Check size={15} />应用修改</button></footer></div> : <div className="desktop-rubric-table desktop-template-rubric-preview">{rubric.subquestions.map((question) => <div key={question.id}><header><div><strong>{question.id} · {question.title}</strong><span>{question.scorePoints.length} 个评分点</span></div><b>{question.maxScore} 分</b></header>{question.finalAnswers.length > 0 && <div className="desktop-template-final-answers"><span>参考结果</span><div>{question.finalAnswers.map((answer, index) => <span key={`${answer.expression}-${index}`}><MathText value={answer.expression} formulaByDefault />{answer.unit && <small>{answer.unit}</small>}</span>)}</div></div>}{question.scorePoints.map((point) => <article key={point.id}><span>{point.id}</span><div><strong>{point.title}</strong><MathText value={point.description} formulaByDefault /><div className="desktop-rubric-expected"><span>判分依据</span><MathText value={point.expected} formulaByDefault /></div><ScorePointGuidance point={point} defaultOpen /></div><b>{point.score} 分</b></article>)}</div>)}</div>}
     </section>}
+  </div>;
+}
+
+function ManualTemplateGrade({ templateId }: { templateId: string }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState("");
+  const [studentId, setStudentId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+
+  const selectFile = (next: File | undefined) => {
+    setError("");
+    if (!next) return;
+    if (!next.type.startsWith("image/")) {
+      setError("请选择 JPG、PNG 或 WEBP 格式的试卷图片");
+      return;
+    }
+    if (next.size > 15 * 1024 * 1024) {
+      setError("试卷图片不能超过 15 MB");
+      return;
+    }
+    if (preview) URL.revokeObjectURL(preview);
+    setFile(next);
+    setPreview(URL.createObjectURL(next));
+    if (!studentId) setStudentId(next.name.replace(/\.[^.]+$/, ""));
+  };
+
+  const grade = async () => {
+    if (!file || busy) return;
+    setBusy(true); setError("");
+    try {
+      const form = new FormData();
+      form.append("image", file, file.name);
+      if (studentId.trim()) form.append("studentId", studentId.trim());
+      const result = await api<GradingResult>(`/api/templates/${encodeURIComponent(templateId)}/grade`, { method: "POST", body: form });
+      pushRoute(`/history/${encodeURIComponent(result.id)}?electron=1`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "试卷评分失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) return <div className="desktop-template-grade-launch"><button className="desktop-save-button" onClick={() => setOpen(true)}><Upload size={14} />上传试卷评分</button></div>;
+
+  return <div className="desktop-template-grade-panel">
+    <div className="desktop-template-grade-heading"><div><strong>手动上传试卷评分</strong><span>使用当前已保存版本评分，完成后自动保存到批改记录。</span></div><button title="收起上传区" onClick={() => setOpen(false)}><X size={15} /></button></div>
+    <div className="desktop-template-grade-content">
+      <button className={`desktop-template-grade-preview ${preview ? "selected" : ""}`} onClick={() => inputRef.current?.click()}>
+        {preview ? <img src={preview} alt="待评分试卷预览" /> : <><ImagePlus size={24} /><strong>选择试卷图片</strong><span>JPG、PNG、WEBP，最大 15 MB</span></>}
+      </button>
+      <div className="desktop-template-grade-fields">
+        <label><span>学生标识</span><input value={studentId} maxLength={100} placeholder="例如：张三 / 学号 202601" onChange={(event) => setStudentId(event.target.value)} /></label>
+        <div className="desktop-template-grade-file"><span>答卷文件</span><strong>{file?.name || "尚未选择"}</strong>{file && <small>{(file.size / 1024 / 1024).toFixed(2)} MB</small>}</div>
+        {error && <div className="desktop-template-grade-error"><AlertTriangle size={14} />{error}</div>}
+        <div className="desktop-template-grade-actions"><button className="desktop-secondary-action" disabled={busy} onClick={() => inputRef.current?.click()}><ImagePlus size={14} />{file ? "更换图片" : "选择图片"}</button><button className="desktop-save-button" disabled={!file || busy} onClick={() => void grade()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{busy ? "正在调用模型评分" : "开始评分"}</button></div>
+      </div>
+    </div>
+    <input ref={inputRef} className="desktop-visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { selectFile(event.target.files?.[0]); event.currentTarget.value = ""; }} />
   </div>;
 }
 
 function TemplateDetailPage({ templateId }: { templateId?: string }) {
   const [template, setTemplate] = useState<GradingTemplateDetail | null>(null);
+  const [rubric, setRubric] = useState<Rubric | null>(null);
+  const [rubricJson, setRubricJson] = useState("");
+  const [editingJson, setEditingJson] = useState(false);
+  const [busy, setBusy] = useState<"refine" | "save" | null>(null);
+  const [changed, setChanged] = useState(false);
+  const [refinementMessage, setRefinementMessage] = useState("");
   const [error, setError] = useState("");
   useEffect(() => {
     if (!templateId) return;
-    void api<GradingTemplateDetail>(`/api/templates/${encodeURIComponent(templateId)}`).then(setTemplate).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "模板读取失败"));
+    void api<GradingTemplateDetail>(`/api/templates/${encodeURIComponent(templateId)}`).then((next) => {
+      setTemplate(next); setRubric(next.rubric); setRubricJson(JSON.stringify(next.rubric, null, 2));
+    }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "模板读取失败"));
   }, [templateId]);
-  if (error) return <div className="desktop-page-body"><div className="desktop-error-state"><AlertTriangle size={18} />{error}</div></div>;
-  if (!template) return <DesktopLoading label="正在读取模板详情" />;
+  const applyRubric = (next: Rubric, message = "") => {
+    const draft = { ...next, status: "draft" as const };
+    setRubric(draft); setRubricJson(JSON.stringify(draft, null, 2)); setEditingJson(false); setChanged(true); setRefinementMessage(message);
+  };
+  const applyJson = () => {
+    try {
+      const next = JSON.parse(rubricJson) as Rubric;
+      if (!next.title || !Array.isArray(next.subquestions) || !Number.isFinite(next.totalScore)) throw new Error("评分标准缺少标题、总分或小问");
+      applyRubric(next); setError("");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "JSON 格式无效"); }
+  };
+  const refine = async (instruction: string) => {
+    if (!rubric) return;
+    setBusy("refine"); setError(""); setRefinementMessage("");
+    try {
+      const next = await api<Rubric>("/api/rubrics/refine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rubric, instruction })
+      });
+      applyRubric(next, "教师模型已更新草稿，保存后将生成新版本");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "评分细节补充失败"); throw reason; }
+    finally { setBusy(null); }
+  };
+  const save = async () => {
+    if (!template || !rubric || !changed) return;
+    setBusy("save"); setError("");
+    try {
+      const next = await api<GradingTemplateDetail>(`/api/templates/${encodeURIComponent(template.id)}/rubric`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rubric })
+      });
+      setTemplate(next); setRubric(next.rubric); setRubricJson(JSON.stringify(next.rubric, null, 2));
+      setChanged(false); setEditingJson(false); setRefinementMessage(`已保存为 v${next.rubric.version}`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "评分标准保存失败"); }
+    finally { setBusy(null); }
+  };
+  if (error && !template) return <div className="desktop-page-body"><div className="desktop-error-state"><AlertTriangle size={18} />{error}</div></div>;
+  if (!template || !rubric) return <DesktopLoading label="正在读取模板详情" />;
   return <div className="desktop-page-body desktop-template-detail">
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>{template.id}</span><h2 style={sharedElementStyle(sharedElementName("prism-template-title", template.id))}>{template.title}</h2></div><span className="desktop-status-label locked"><Lock size={13} />评分标准 v{template.rubric.version}</span></div><div className="desktop-template-summary"><div><span>满分</span><strong style={sharedElementStyle(sharedElementName("prism-template-score", template.id))}>{template.totalScore} 分</strong></div><div><span>小问</span><strong>{template.rubric.subquestions.length}</strong></div><div><span>历史答卷</span><strong>{template.records.length}</strong></div><div><span>素材</span><strong>{template.questionImageCount + template.referenceImageCount} 张</strong></div></div></section>
+    {error && <div className="desktop-error-state"><AlertTriangle size={17} />{error}</div>}
+    <section className="desktop-section"><div className="desktop-section-heading"><div><span>{template.id}</span><h2 style={sharedElementStyle(sharedElementName("prism-template-title", template.id))}>{rubric.title}</h2></div><div className="desktop-template-review-actions"><span className="desktop-status-label locked"><BookOpenCheck size={13} />评分标准 v{template.rubric.version} · 可编辑</span><button className="desktop-secondary-action" disabled={busy !== null} onClick={() => setEditingJson((value) => !value)}><Code2 size={14} />{editingJson ? "返回预览" : "高级编辑"}</button><button className="desktop-save-button" disabled={!changed || busy !== null || editingJson} onClick={() => void save()}>{busy === "save" ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{busy === "save" ? "正在保存" : changed ? `保存为 v${template.rubric.version + 1}` : "已保存"}</button></div></div><div className="desktop-template-summary"><div><span>满分</span><strong style={sharedElementStyle(sharedElementName("prism-template-score", template.id))}>{rubric.totalScore} 分</strong></div><div><span>小问</span><strong>{rubric.subquestions.length}</strong></div><div><span>历史答卷</span><strong>{template.records.length}</strong></div><div><span>素材</span><strong>{template.questionImageCount + template.referenceImageCount} 张</strong></div></div>{changed && <div className="desktop-template-unsaved"><AlertTriangle size={14} />当前修改尚未保存；上传评分仍使用已保存的 v{template.rubric.version}。</div>}<ManualTemplateGrade templateId={template.id} /></section>
     <div className="desktop-two-columns"><section className="desktop-section"><div className="desktop-section-heading"><div><span>题目</span><h2>识别原文</h2></div></div><div className="desktop-document-copy"><MathText value={template.questionText} formulaByDefault /></div></section><section className="desktop-section"><div className="desktop-section-heading"><div><span>参考答案</span><h2>标准解答</h2></div></div><div className="desktop-document-copy"><MathText value={template.referenceText} formulaByDefault /></div></section></div>
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>逐点给分</span><h2>评分标准</h2></div></div><div className="desktop-rubric-table">{template.rubric.subquestions.map((question) => <div key={question.id}><header><strong>{question.id} · {question.title}</strong><b>{question.maxScore} 分</b></header>{question.scorePoints.map((point) => <article key={point.id}><span>{point.id}</span><div><strong>{point.title}</strong>{point.description && <MathText value={point.description} formulaByDefault />}{point.expected && <div className="desktop-rubric-expected"><span>判分依据</span><MathText value={point.expected} formulaByDefault /></div>}</div><b>{point.score} 分</b></article>)}</div>)}</div></section>
+    <section className="desktop-section"><div className="desktop-section-heading"><div><span>逐点给分</span><h2>评分标准</h2></div></div><RubricRefinement busy={busy === "refine"} message={refinementMessage} onRefine={refine} />{editingJson ? <div className="desktop-template-json-editor"><textarea value={rubricJson} onChange={(event) => setRubricJson(event.target.value)} spellCheck={false} /><footer><button className="desktop-secondary-action" onClick={() => { setRubricJson(JSON.stringify(rubric, null, 2)); setEditingJson(false); }}>取消修改</button><button className="desktop-save-button" onClick={applyJson}><Check size={15} />应用修改</button></footer></div> : <div className="desktop-rubric-table">{rubric.subquestions.map((question) => <div key={question.id}><header><strong>{question.id} · {question.title}</strong><b>{question.maxScore} 分</b></header>{question.scorePoints.map((point) => <article key={point.id}><span>{point.id}</span><div><strong>{point.title}</strong>{point.description && <MathText value={point.description} formulaByDefault />}{point.expected && <div className="desktop-rubric-expected"><span>判分依据</span><MathText value={point.expected} formulaByDefault /></div>}<ScorePointGuidance point={point} /></div><b>{point.score} 分</b></article>)}</div>)}</div>}</section>
   </div>;
 }
 
@@ -1157,26 +1372,64 @@ function HistoryPage() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  useEffect(() => {
-    void (async () => {
-      try {
-        const summaries = await api<GradingTemplateSummary[]>("/api/templates");
-        const details = await Promise.all(summaries.map((item) => api<GradingTemplateDetail>(`/api/templates/${encodeURIComponent(item.id)}`)));
-        setRows(details.flatMap((detail) => detail.records.map((record) => ({ record, templateId: detail.id, templateTitle: detail.title }))).sort((left, right) => right.record.createdAt.localeCompare(left.record.createdAt)));
-      } catch (reason) { setError(reason instanceof Error ? reason.message : "批改记录读取失败"); }
-      finally { setLoading(false); }
-    })();
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const summaries = await api<GradingTemplateSummary[]>("/api/templates?includeBuiltIn=1");
+      const details = await Promise.all(summaries.map((item) => api<GradingTemplateDetail>(`/api/templates/${encodeURIComponent(item.id)}`)));
+      const nextRows = details.flatMap((detail) => detail.records.map((record) => ({ record, templateId: detail.id, templateTitle: detail.title }))).sort((left, right) => right.record.createdAt.localeCompare(left.record.createdAt));
+      setRows(nextRows);
+      setSelectedIds((current) => new Set([...current].filter((id) => nextRows.some((row) => row.record.id === id))));
+      setError("");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "批改记录读取失败"); }
+    finally { setLoading(false); }
   }, []);
+  useEffect(() => { void reload(); }, [reload]);
   const filtered = useMemo(() => rows.filter((row) => `${row.record.result.fileName} ${row.record.result.studentId} ${row.templateTitle}`.toLowerCase().includes(query.trim().toLowerCase())), [query, rows]);
   const reviewCount = rows.filter((row) => row.record.result.status !== "completed").length;
+  const filteredIds = filtered.map((row) => row.record.id);
+  const allFilteredSelected = filteredIds.length > 0 && filteredIds.every((id) => selectedIds.has(id));
+  const toggleRecord = (id: string) => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const toggleFiltered = () => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (allFilteredSelected) filteredIds.forEach((id) => next.delete(id));
+    else filteredIds.forEach((id) => next.add(id));
+    return next;
+  });
+  const removeSelected = async () => {
+    if (!selectedIds.size) return;
+    if (!window.confirm(`确定永久删除选中的 ${selectedIds.size} 条批改记录吗？\n\n相关评分结果、模型原始返回和不再使用的答卷图片将一并删除，此操作无法恢复。`)) return;
+    setDeleting(true);
+    setError("");
+    try {
+      await api("/api/history-records", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: [...selectedIds] })
+      });
+      setSelectedIds(new Set());
+      await reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "批改记录删除失败");
+    } finally {
+      setDeleting(false);
+    }
+  };
   if (error) return <div className="desktop-page-body"><div className="desktop-error-state"><AlertTriangle size={18} />{error}</div></div>;
   return <div className="desktop-page-body desktop-history-page">
     <section className="desktop-history-overview"><div><span>全部答卷</span><strong>{rows.length}</strong></div><div><span>已完成</span><strong>{rows.length - reviewCount}</strong></div><div className={reviewCount ? "warning" : ""}><span>待复核</span><strong>{reviewCount}</strong></div><div><span>评分标准</span><strong>{new Set(rows.map((row) => row.templateId)).size}</strong></div></section>
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>学生答卷</span><h2>逐份批改记录</h2></div><span className="desktop-status-label"><FileClock size={13} />自动保存</span></div>
       <div className="desktop-history-toolbar"><label><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索答卷、学生编号或评分标准" /></label><span>{filtered.length} 条记录</span></div>
-      <div className="desktop-table-wrap"><table className="desktop-table desktop-history-table"><thead><tr><th>答卷</th><th>评分标准</th><th>得分</th><th>状态</th><th>模型</th><th>批改时间</th><th /></tr></thead><tbody>
-        {filtered.map(({ record, templateTitle }) => <tr key={record.id}><td><strong>{record.result.fileName}</strong><small>{record.result.studentId || record.id}</small></td><td><span style={sharedElementStyle(sharedElementName("prism-record-template", record.id))}>{templateTitle}</span></td><td><b className="desktop-history-score" style={sharedElementStyle(sharedElementName("prism-record-score", record.id))}>{record.result.score} / {record.result.maxScore}</b></td><td><span className={`desktop-status-label ${record.result.status === "completed" ? "locked" : "warning"}`}>{record.result.status === "completed" ? <Check size={12} /> : <AlertTriangle size={12} />}{record.result.status === "completed" ? "已完成" : record.result.status === "needs_review" ? "待复核" : "失败"}</span></td><td>{record.result.modelName}</td><td>{new Date(record.createdAt).toLocaleString("zh-CN", { hour12: false })}</td><td><a title="打开批改记录" href={`/history/${encodeURIComponent(record.id)}?electron=1`}><ChevronRight size={16} /></a></td></tr>)}
-        {!filtered.length && <tr><td colSpan={7} className="desktop-empty-cell">{loading ? "正在读取批改记录" : query ? "没有符合条件的批改记录" : "暂无批改记录"}</td></tr>}
+      <div className="desktop-bulk-toolbar"><label><input type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || deleting} onChange={toggleFiltered} /><span>全选当前结果</span></label><span>已选择 {selectedIds.size} 条</span><button className="desktop-danger-action" disabled={!selectedIds.size || deleting} onClick={() => void removeSelected()}>{deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deleting ? "正在删除" : "删除所选"}</button></div>
+      <div className="desktop-table-wrap"><table className="desktop-table desktop-history-table"><thead><tr><th className="desktop-selection-cell"><span className="desktop-visually-hidden">选择</span></th><th>答卷</th><th>评分标准</th><th>得分</th><th>状态</th><th>模型</th><th>批改时间</th><th /></tr></thead><tbody>
+        {filtered.map(({ record, templateTitle }) => <tr className={selectedIds.has(record.id) ? "selected" : ""} key={record.id}><td className="desktop-selection-cell"><input type="checkbox" aria-label={`选择批改记录 ${record.result.fileName}`} checked={selectedIds.has(record.id)} disabled={deleting} onChange={() => toggleRecord(record.id)} /></td><td><strong>{record.result.fileName}</strong><small>{record.result.studentId || record.id}</small></td><td><span style={sharedElementStyle(sharedElementName("prism-record-template", record.id))}>{templateTitle}</span></td><td><b className="desktop-history-score" style={sharedElementStyle(sharedElementName("prism-record-score", record.id))}>{record.result.score} / {record.result.maxScore}</b></td><td><span className={`desktop-status-label ${record.result.status === "completed" ? "locked" : "warning"}`}>{record.result.status === "completed" ? <Check size={12} /> : <AlertTriangle size={12} />}{record.result.status === "completed" ? "已完成" : record.result.status === "needs_review" ? "待复核" : "失败"}</span></td><td>{record.result.modelName}<small>{record.modelCallCount} 次调用</small></td><td>{new Date(record.createdAt).toLocaleString("zh-CN", { hour12: false })}</td><td><a title="打开批改记录" href={`/history/${encodeURIComponent(record.id)}?electron=1`}><ChevronRight size={16} /></a></td></tr>)}
+        {!filtered.length && <tr><td colSpan={8} className="desktop-empty-cell">{loading ? "正在读取批改记录" : query ? "没有符合条件的批改记录" : "暂无批改记录"}</td></tr>}
       </tbody></table></div>
     </section>
   </div>;
@@ -1186,16 +1439,25 @@ function RecordPage({ recordId }: { recordId?: string }) {
   const [record, setRecord] = useState<GradingHistoryRecord | null>(null);
   const [templateTitle, setTemplateTitle] = useState("");
   const [rubric, setRubric] = useState<Rubric | null>(null);
+  const [modelCalls, setModelCalls] = useState<ModelCallHistoryEntry[] | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
     if (!recordId) return;
     void (async () => {
       try {
-        const summaries = await api<GradingTemplateSummary[]>("/api/templates");
+        const summaries = await api<GradingTemplateSummary[]>("/api/templates?includeBuiltIn=1");
         for (const summary of summaries) {
           const detail = await api<GradingTemplateDetail>(`/api/templates/${encodeURIComponent(summary.id)}`);
           const found = detail.records.find((item) => item.id === recordId || item.result.id === recordId);
-          if (found) { setRecord(found); setTemplateTitle(detail.title); setRubric(detail.rubric); return; }
+          if (found) {
+            setRecord(found); setTemplateTitle(detail.title); setRubric(found.rubricSnapshot ?? detail.rubric);
+            try {
+              setModelCalls(await api<ModelCallHistoryEntry[]>(`/api/history-records/${encodeURIComponent(found.id)}/model-calls`));
+            } catch {
+              setModelCalls([]);
+            }
+            return;
+          }
         }
         throw new Error("找不到该批改记录");
       } catch (reason) { setError(reason instanceof Error ? reason.message : "记录读取失败"); }
@@ -1223,6 +1485,7 @@ function RecordPage({ recordId }: { recordId?: string }) {
         onRegrade={async () => undefined}
       />
     </section>
+    {modelCalls ? <ModelCallHistory calls={modelCalls} /> : <section className="model-call-history"><div className="model-call-history-empty">正在读取本题模型原始调用...</div></section>}
   </div>;
 }
 
@@ -1230,18 +1493,66 @@ function LogsPage() {
   const [snapshot, setSnapshot] = useState<SystemLogSnapshot | null>(null);
   const [query, setQuery] = useState("");
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const reload = useCallback(() => void api<SystemLogSnapshot>("/api/logs?limit=400").then(setSnapshot), []);
+  const [stoppingId, setStoppingId] = useState<string | null>(null);
+  const [stopError, setStopError] = useState("");
+  const reload = useCallback(() => {
+    const host = getHost();
+    void Promise.all([
+      api<SystemLogSnapshot>("/api/logs?limit=400"),
+      host?.getPipelineEvents().catch(() => [] as PipelineEvent[]) ?? Promise.resolve([] as PipelineEvent[])
+    ]).then(([next, pipelineEvents]) => {
+      const pipelineEntries = pipelineEvents.map(pipelineEventLogEntry);
+      setSnapshot({
+        ...next,
+        entries: [...next.entries, ...pipelineEntries]
+          .sort((left, right) => left.timestamp.localeCompare(right.timestamp))
+          .slice(-500)
+      });
+    });
+  }, []);
   useEffect(() => { reload(); if (!autoRefresh) return; const timer = window.setInterval(reload, 2000); return () => window.clearInterval(timer); }, [autoRefresh, reload]);
+  const forceStop = async (operationId: string, label: string, scope: SystemLogEntry["scope"]) => {
+    if (!window.confirm(`确定强制停止“${label}”吗？\n\n当前模型请求会立即中断，当前答卷不会写分、提交或跳到下一份。`)) return;
+    setStoppingId(operationId);
+    setStopError("");
+    try {
+      if (scope === "grading") await getHost()?.controlPipeline("stop").catch(() => undefined);
+      await api(`/api/operations/${encodeURIComponent(operationId)}/force-stop`, { method: "POST" });
+      reload();
+    } catch (error) {
+      setStopError(error instanceof Error ? error.message : "强制停止失败");
+    } finally {
+      setStoppingId(null);
+    }
+  };
   const entries = useMemo(() => (snapshot?.entries || []).filter((entry) => `${entry.scope} ${entry.step} ${entry.message}`.toLowerCase().includes(query.toLowerCase())).slice().reverse(), [query, snapshot]);
   return <div className="desktop-page-body desktop-logs-page">
     <section className="desktop-log-toolbar"><label><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选步骤、消息或作用域" /></label><button className={autoRefresh ? "active" : ""} onClick={() => setAutoRefresh((value) => !value)}><RefreshCw className={autoRefresh ? "spin-slow" : ""} size={14} />自动刷新</button><button title="立即刷新" onClick={reload}><RefreshCw size={15} /></button></section>
-    <section className="desktop-log-layout"><aside><span>活动操作</span>{snapshot?.activeOperations.length ? snapshot.activeOperations.map((operation) => <div key={operation.id}><LoaderCircle className="spin" size={14} /><strong>{operation.label}</strong><small>{operation.step}</small></div>) : <p>当前没有运行中的模型调用</p>}</aside><div className="desktop-log-stream">{entries.map((entry) => <LogEntry key={entry.id} entry={entry} />)}{!entries.length && <div className="desktop-empty-state"><TerminalSquare size={22} /><strong>暂无匹配日志</strong><span>运行任务后，模型调用和流水线步骤会显示在这里。</span></div>}</div></section>
+    {stopError && <div className="desktop-log-stop-error"><AlertTriangle size={13} />{stopError}</div>}
+    <section className="desktop-log-layout"><aside><span>活动操作</span>{snapshot?.activeOperations.length ? snapshot.activeOperations.map((operation) => <div key={operation.id}><LoaderCircle className="spin" size={14} /><strong>{operation.label}</strong><small>{operation.step}</small>{operation.cancellable && <button className="desktop-force-stop" title="强制停止任务" disabled={stoppingId !== null} onClick={() => void forceStop(operation.id, operation.label, operation.scope)}>{stoppingId === operation.id ? <LoaderCircle className="spin" size={12} /> : <Square size={11} />}<span>{stoppingId === operation.id ? "正在停止" : "强制停止"}</span></button>}</div>) : <p>当前没有运行中的模型调用</p>}</aside><div className="desktop-log-stream">{entries.map((entry) => <LogEntry key={entry.id} entry={entry} />)}{!entries.length && <div className="desktop-empty-state"><TerminalSquare size={22} /><strong>暂无匹配日志</strong><span>运行任务后，模型调用和流水线步骤会显示在这里。</span></div>}</div></section>
   </div>;
+}
+
+function pipelineEventLogEntry(event: PipelineEvent, index: number): SystemLogEntry {
+  const tone = pipelineEventTone(event);
+  const timestamp = typeof event.timestamp === "string" ? event.timestamp : new Date(0).toISOString();
+  return {
+    id: `pipeline-${timestamp}-${event.type}-${index}`,
+    operationId: String(event.pageKey || event.sourcePageKey || "pipeline"),
+    timestamp,
+    level: tone === "error" ? "error" : tone === "warning" ? "warning" : tone === "success" ? "success" : "info",
+    status: tone === "error" ? "failed" : tone === "success" ? "completed" : "progress",
+    scope: "system",
+    step: `pipeline:${event.type}`,
+    message: eventText(event),
+    details: { ...event, reason: cleanPipelineError(event.reason) || event.reason }
+  };
 }
 
 function LogEntry({ entry }: { entry: SystemLogEntry }) {
   const [open, setOpen] = useState(false);
-  return <article className={`desktop-log-entry ${entry.level}`}><button onClick={() => setOpen((value) => !value)}><span>{formatTime(entry.timestamp)}</span><i>{entry.scope}</i><strong>{entry.message}</strong><em>{entry.status}</em><ChevronDown className={open ? "open" : ""} size={15} /></button>{open && <pre>{JSON.stringify(entry.details || { step: entry.step, operationId: entry.operationId }, null, 2)}</pre>}</article>;
+  const modelCall = entry.scope === "model" && entry.details?.kind === "model_call";
+  return <article className={`desktop-log-entry ${entry.level}`}><button onClick={() => setOpen((value) => !value)}><span>{formatTime(entry.timestamp)}</span><i>{entry.scope}</i><strong>{entry.message}</strong><em>{entry.status}</em><ChevronDown className={open ? "open" : ""} size={15} /></button>{open && (modelCall ? <div className="desktop-model-call-detail"><ModelCallDetails details={entry.details as unknown as ModelCallLogDetails} /></div> : <pre>{JSON.stringify(entry.details || { step: entry.step, operationId: entry.operationId }, null, 2)}</pre>)}</article>;
 }
 
 function ModelsPage() {
@@ -1249,21 +1560,21 @@ function ModelsPage() {
   const [current, setCurrent] = useState<PublicModelConfig | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
-  useEffect(() => { void api<PublicModelConfig | null>("/api/model-config").then((value) => { setCurrent(value); if (value) setForm({ ...value, apiKey: "" }); }); }, []);
+  useEffect(() => { void api<PublicModelConfig | null>("/api/model-config").then((value) => { setCurrent(value); if (value) setForm({ ...value, apiKey: "", reviewApiKey: "" }); }); }, []);
   const update = <K extends keyof ModelConfigInput>(key: K, value: ModelConfigInput[K]) => setForm((previous) => ({ ...previous, [key]: value }));
   const save = async () => {
     setSaving(true); setMessage("");
     try {
       const saved = await api<PublicModelConfig>("/api/model-config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
-      setCurrent(saved); setForm((value) => ({ ...value, apiKey: "" })); setMessage("配置已应用到全局模型调用");
+      setCurrent(saved); setForm((value) => ({ ...value, apiKey: "", reviewApiKey: "" })); setMessage("配置已应用到全局模型调用");
     } catch (error) { setMessage(error instanceof Error ? error.message : "配置保存失败"); }
     finally { setSaving(false); }
   };
   return <div className="desktop-page-body desktop-model-page">
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>OpenAI 兼容接口</span><h2>全局连接信息</h2></div><span className={current?.enabled && current.hasApiKey ? "desktop-status-label locked" : "desktop-status-label warning"}>{current?.enabled && current.hasApiKey ? <Wifi size={13} /> : <WifiOff size={13} />}{current?.enabled && current.hasApiKey ? "已配置" : "待配置"}</span></div>
-      <div className="desktop-form-grid"><label><span>配置名称</span><input value={form.name} onChange={(event) => update("name", event.target.value)} /></label><label className="wide"><span>API Base URL</span><input value={form.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://api.example.com/v1" /></label><label className="wide"><span>API Key</span><div className="desktop-input-with-icon"><KeyRound size={14} /><input type="password" value={form.apiKey || ""} onChange={(event) => update("apiKey", event.target.value)} placeholder={current?.hasApiKey ? `保留现有密钥 ${current.apiKeyMasked}` : "输入服务密钥"} /></div></label><label><span>多模态教师模型</span><input value={form.visionModel} onChange={(event) => update("visionModel", event.target.value)} /></label><label><span>文本模型</span><input value={form.textModel} onChange={(event) => update("textModel", event.target.value)} /></label></div>
+      <div className="desktop-form-grid"><label><span>配置名称</span><input value={form.name} onChange={(event) => update("name", event.target.value)} /></label><label className="wide"><span>教师 API Base URL</span><input value={form.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://api.example.com/v1" /></label><label className="wide"><span>教师 API Key</span><div className="desktop-input-with-icon"><KeyRound size={14} /><input type="password" value={form.apiKey || ""} onChange={(event) => update("apiKey", event.target.value)} placeholder={current?.hasApiKey ? `保留现有密钥 ${current.apiKeyMasked}` : "输入教师服务密钥"} /></div></label><label><span>多模态教师模型</span><input value={form.visionModel} onChange={(event) => update("visionModel", event.target.value)} /></label><label><span>文本模型</span><input value={form.textModel} onChange={(event) => update("textModel", event.target.value)} /></label><label><span>局部审验模型</span><input value={form.reviewModel || ""} onChange={(event) => update("reviewModel", event.target.value)} placeholder="留空则不主动审验数值答案" /></label><label className="wide"><span>审验 API Base URL</span><input value={form.reviewBaseUrl || ""} onChange={(event) => update("reviewBaseUrl", event.target.value)} placeholder="留空则复用教师服务地址" /></label><label className="wide"><span>审验 API Key</span><div className="desktop-input-with-icon"><ShieldCheck size={14} /><input type="password" value={form.reviewApiKey || ""} onChange={(event) => update("reviewApiKey", event.target.value)} placeholder={current?.hasReviewApiKey ? `保留现有审验密钥 ${current.reviewApiKeyMasked}` : "输入独立审验服务密钥"} /></div></label></div>
     </section>
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>调用策略</span><h2>批改参数</h2></div></div><div className="desktop-form-grid three"><label><span>批改模式</span><select value={form.gradingMode} onChange={(event) => update("gradingMode", event.target.value as ModelConfigInput["gradingMode"])}><option value="vision_direct">教师模型直看图像</option><option value="evidence_pipeline">证据转录流水线</option></select></label><label><span>推理强度</span><select value={form.teacherReasoningEffort} onChange={(event) => update("teacherReasoningEffort", event.target.value as ModelConfigInput["teacherReasoningEffort"])}><option value="disabled">不传 reasoning_effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label><label><span>超时（毫秒）</span><input type="number" min={1000} max={300000} value={form.timeoutMs} onChange={(event) => update("timeoutMs", Number(event.target.value))} /></label><label><span>最大重试</span><input type="number" min={0} max={5} value={form.maxRetries} onChange={(event) => update("maxRetries", Number(event.target.value))} /></label><label><span>并发数</span><input type="number" min={1} max={20} value={form.maxConcurrency} onChange={(event) => update("maxConcurrency", Number(event.target.value))} /></label><label><span>人工复核分值阈值</span><input type="number" step={0.5} min={0.5} value={form.unreadableReviewThreshold} onChange={(event) => update("unreadableReviewThreshold", Number(event.target.value))} /></label></div>
+    <section className="desktop-section"><div className="desktop-section-heading"><div><span>调用策略</span><h2>批改参数</h2></div></div><div className="desktop-form-grid three"><label><span>批改模式</span><select value={form.gradingMode} onChange={(event) => update("gradingMode", event.target.value as ModelConfigInput["gradingMode"])}><option value="vision_direct">教师模型直看图像</option><option value="evidence_pipeline">证据转录流水线</option></select></label><label><span>教师模型推理强度</span><select value={form.teacherReasoningEffort} onChange={(event) => update("teacherReasoningEffort", event.target.value as ModelConfigInput["teacherReasoningEffort"])}><option value="disabled">不传 reasoning_effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select></label><label><span>审验模型推理强度</span><select value={form.reviewReasoningEffort} onChange={(event) => update("reviewReasoningEffort", event.target.value as ModelConfigInput["reviewReasoningEffort"])}><option value="disabled">不传 reasoning_effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select></label><label><span>超时（毫秒）</span><input type="number" min={1000} max={300000} value={form.timeoutMs} onChange={(event) => update("timeoutMs", Number(event.target.value))} /></label><label><span>最大重试</span><input type="number" min={0} max={5} value={form.maxRetries} onChange={(event) => update("maxRetries", Number(event.target.value))} /></label><label><span>并发数</span><input type="number" min={1} max={20} value={form.maxConcurrency} onChange={(event) => update("maxConcurrency", Number(event.target.value))} /></label><label><span>人工复核分值阈值</span><input type="number" step={0.5} min={0.5} value={form.unreadableReviewThreshold} onChange={(event) => update("unreadableReviewThreshold", Number(event.target.value))} /></label></div>
       <div className="desktop-toggle-row"><label><input type="checkbox" checked={form.supportsJsonSchema} onChange={(event) => update("supportsJsonSchema", event.target.checked)} /><span>JSON Schema</span></label><label><input type="checkbox" checked={form.supportsJsonObject} onChange={(event) => update("supportsJsonObject", event.target.checked)} /><span>JSON Object</span></label><label><input type="checkbox" checked={form.supportsBase64Images} onChange={(event) => update("supportsBase64Images", event.target.checked)} /><span>Base64 图像</span></label><label><input type="checkbox" checked={form.enabled} onChange={(event) => update("enabled", event.target.checked)} /><span>启用此配置</span></label></div>
       <div className="desktop-form-actions"><button className="desktop-save-button" disabled={saving} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}保存并全局应用</button>{message && <span>{message}</span>}</div>
     </section>
@@ -1375,14 +1686,10 @@ function Capability({ label, value, selector }: { label: string; value: boolean;
   return <article className={value ? "ok" : "failed"}>{value ? <Check size={17} /> : <XCircle size={17} />}<div><strong>{label}</strong><code>{selector}</code></div><span>{value ? "已找到" : "缺失"}</span></article>;
 }
 
-function SettingsPage({ browser, preferences, onPreferencesChange }: { browser: EmbeddedBrowserState; preferences: DesktopPreferences; onPreferencesChange: (patch: Partial<DesktopPreferences>) => void }) {
-  const savedStartUrl = localStorage.getItem("hengzhun.startUrl");
-  const [startUrl, setStartUrl] = useState(() => savedStartUrl || browser.url || "http://localhost:5173/zhixue-mock?embedded=1");
+function SettingsPage({ preferences, onPreferencesChange }: { preferences: DesktopPreferences; onPreferencesChange: (patch: Partial<DesktopPreferences>) => void }) {
+  const [startUrl, setStartUrl] = useState(() => readStartUrl(localStorage));
   const [saved, setSaved] = useState(false);
-  useEffect(() => {
-    if (!savedStartUrl && browser.url) setStartUrl(browser.url);
-  }, [browser.url, savedStartUrl]);
-  const save = () => { localStorage.setItem("hengzhun.startUrl", startUrl); setSaved(true); window.setTimeout(() => setSaved(false), 1800); };
+  const save = () => { localStorage.setItem(START_URL_STORAGE_KEY, startUrl); setSaved(true); window.setTimeout(() => setSaved(false), 1800); };
   const fontOptions: Array<{ value: DesktopFontSize; label: string; description: string }> = [
     { value: "compact", label: "紧凑", description: "适合较小窗口" },
     { value: "comfortable", label: "舒适", description: "推荐的默认大小" },
@@ -1427,7 +1734,7 @@ function SettingsPage({ browser, preferences, onPreferencesChange }: { browser: 
       <div className="desktop-setting-block"><div className="desktop-setting-copy"><strong>强调色</strong><span>同步应用到工作台和智学网页面内的阅卷插件。</span></div><div className="desktop-accent-picker" role="group" aria-label="界面强调色">{accentOptions.map((option) => <button key={option.value} className={preferences.accent === option.value ? "active" : ""} aria-pressed={preferences.accent === option.value} onClick={() => onPreferencesChange({ accent: option.value })}><i style={{ background: option.color }} /><span>{option.label}</span>{preferences.accent === option.value && <Check size={13} />}</button>)}</div></div>
       <div className="desktop-setting-block vertical"><div className="desktop-setting-copy"><strong>材质模式</strong><span>Windows 11 优先使用原生 Mica；不支持时自动保持不透明浅灰回退。</span></div><div className="desktop-font-size-picker prism-material-picker" role="group" aria-label="材质模式">{materialOptions.map((option) => <button key={option.value} className={preferences.materialMode === option.value ? "active" : ""} aria-pressed={preferences.materialMode === option.value} onClick={() => onPreferencesChange({ materialMode: option.value })}><strong>{option.label}</strong><span>{option.description}</span></button>)}</div></div>
       <div className="desktop-setting-block vertical"><div className="desktop-setting-copy"><strong>动效强度</strong><span>动效集中在页面切换、状态变化和关键操作反馈，不改变控件尺寸。</span></div><div className="desktop-font-size-picker prism-motion-picker" role="group" aria-label="动效强度">{motionOptions.map((option) => <button key={option.value} className={preferences.motionIntensity === option.value ? "active" : ""} aria-pressed={preferences.motionIntensity === option.value} onClick={() => onPreferencesChange({ motionIntensity: option.value })}><strong>{option.label}</strong><span>{option.description}</span></button>)}</div></div>
-      <div className="desktop-setting-block prism-range-grid"><label><span>透明度</span><input type="range" min="68" max="88" step="1" value={preferences.surfaceOpacity} onChange={(event) => onPreferencesChange({ surfaceOpacity: Number(event.target.value) })} /><output>{preferences.surfaceOpacity}%</output></label><label><span>模糊强度</span><input type="range" min="12" max="28" step="2" value={preferences.blurStrength} onChange={(event) => onPreferencesChange({ blurStrength: Number(event.target.value) })} /><output>{preferences.blurStrength}px</output></label></div>
+      <div className="desktop-setting-block prism-range-grid"><label><span>透明度</span><input type="range" min="68" max="88" step="1" value={preferences.surfaceOpacity} style={{ "--prism-range-fill": `${((preferences.surfaceOpacity - 68) / 20) * 100}%` } as CSSProperties} onChange={(event) => onPreferencesChange({ surfaceOpacity: Number(event.target.value) })} /><output>{preferences.surfaceOpacity}%</output></label><label><span>模糊强度</span><input type="range" min="12" max="28" step="2" value={preferences.blurStrength} style={{ "--prism-range-fill": `${((preferences.blurStrength - 12) / 16) * 100}%` } as CSSProperties} onChange={(event) => onPreferencesChange({ blurStrength: Number(event.target.value) })} /><output>{preferences.blurStrength}px</output></label></div>
       <div className="desktop-setting-block vertical"><div className="desktop-setting-copy"><strong>字体大小</strong><span>按屏幕尺寸和阅读习惯选择，不会缩放网页答卷。</span></div><div className="desktop-font-size-picker" role="group" aria-label="界面字体大小">{fontOptions.map((option) => <button key={option.value} className={preferences.fontSize === option.value ? "active" : ""} aria-pressed={preferences.fontSize === option.value} onClick={() => onPreferencesChange({ fontSize: option.value })}><strong>{option.label}</strong><span>{option.description}</span></button>)}</div></div>
       <div className="desktop-setting-block vertical"><div className="desktop-setting-copy"><strong>字体族</strong><span>只使用本机已经安装的字体；未安装时会自动按字体栈回退，不会影响程序启动。</span></div><div className="desktop-font-family-picker" role="group" aria-label="界面字体族">{fontFamilyOptions.map((option) => <button key={option.value} className={preferences.fontFamily === option.value ? "active" : ""} aria-pressed={preferences.fontFamily === option.value} onClick={() => onPreferencesChange({ fontFamily: option.value })} style={{ fontFamily: fontFamilyStacks[option.value] }}><strong>{option.preview}</strong><span>{option.label} · {option.description}</span></button>)}</div></div>
       <div className="desktop-typography-grid">
@@ -1485,7 +1792,7 @@ function DesktopPage({ route, browser, summary, template, preferences, onPrefere
     case "models": return <ModelsPage />;
     case "browser-debug": return <BrowserDebugPage browser={browser} />;
     case "plugins-debug": return <PluginsDebugPage browser={browser} />;
-    case "settings": return <SettingsPage browser={browser} preferences={preferences} onPreferencesChange={onPreferencesChange} />;
+    case "settings": return <SettingsPage preferences={preferences} onPreferencesChange={onPreferencesChange} />;
   }
 }
 
@@ -1499,14 +1806,13 @@ export default function DesktopApp() {
   useEffect(() => {
     if (startupNavigationStarted.current) return;
     startupNavigationStarted.current = true;
-    const startUrl = localStorage.getItem("hengzhun.startUrl");
+    const startUrl = readStartUrl(localStorage);
     const host = getHost();
-    if (preferences.autoOpenStartUrl && startUrl && host) {
-      void host.getBrowserState().then((state) => {
-        if (!state.url || state.url === "about:blank") return host.navigateBrowser(startUrl);
-        return state;
-      });
-    }
+    if (!preferences.autoOpenStartUrl || !host) return;
+    void host.getBrowserState().then((state) => {
+      if (state.url && state.url !== "about:blank" && state.url === startUrl) return state;
+      return host.navigateBrowser(startUrl);
+    });
   }, [preferences.autoOpenStartUrl]);
   useEffect(() => {
     const pluginPreferences: PluginUiPreferences = {

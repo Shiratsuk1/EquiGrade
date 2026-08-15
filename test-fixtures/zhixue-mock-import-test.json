@@ -6,17 +6,17 @@
       "id": "imported-101",
       "studentId": "导入学生 101",
       "label": "导入学生 101",
-      "questionLabel": "第 1 题 · 导入样例",
-      "maxScore": 10,
-      "lines": ["v = 2gR", "N = 4mg"]
+      "questionLabel": "第 16 题 · 竖直圆轨道综合题",
+      "maxScore": 18,
+      "lines": ["(1) mgh=1/2 mvB²，vB=8.0 m/s", "NB-mg=mvB²/R，NB=45 N", "(2) vC²=32，NC=15 N>0，能通过C点", "(3) NC=0，hmin=5R/2=2.00 m", "(4) cosθ=-5/6，θ=146.4°，v=2.58 m/s"]
     },
     {
       "id": "imported-102",
       "studentId": "导入学生 102",
       "label": "导入学生 102",
-      "questionLabel": "第 1 题 · 导入样例",
-      "maxScore": 10,
-      "lines": ["v = ?", "N = 0"]
+      "questionLabel": "第 16 题 · 竖直圆轨道综合题",
+      "maxScore": 18,
+      "lines": ["(1) mgh=1/2 mvB²", "NB+mg=mvB²/R，NB=35 N", "(3) 临界时 vC=0，hmin=1.6 m", "(4) 未作答"]
     }
   ]
 }

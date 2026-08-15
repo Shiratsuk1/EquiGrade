@@ -16,6 +16,7 @@ describe("pipeline commit safety", () => {
   it("rejects a changed page or image before score writing", () => {
     expect(() => assertSameAnswer(answer, { ...answer, imageHash: "two" })).toThrow("答卷图像已经变化");
     expect(() => assertSameAnswer(answer, { ...answer, sourcePageKey: "zhixue:two" })).toThrow("阅卷页面已经切换");
+    expect(() => assertSameAnswer({ ...answer, pageToken: "page-one" }, { ...answer, pageToken: "page-two" })).toThrow("答卷实例已经变化");
     expect(() => assertSameAnswer(answer, { ...answer })).not.toThrow();
   });
 

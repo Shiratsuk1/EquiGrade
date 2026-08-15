@@ -22,7 +22,15 @@ const DEFAULT_CASES: ZhixueMockCase[] = [
     label: "模拟学生 001",
     questionLabel: "第 16 题 · 竖直圆轨道综合题",
     maxScore: 18,
-    lines: ["mgR = 1/2mv²", "N - mg = mv² / R", "N = 3mg"]
+    lines: [
+      "(1) mgh=1/2 mvB²，vB=8.0 m/s",
+      "NB-mg=mvB²/R，NB=45 N，方向竖直向下",
+      "(2) vC²=vB²-4gR=32 m²/s²",
+      "NC+mg=mvC²/R，NC=15 N>0，能通过C点",
+      "(3) 临界：NC=0，vC²=gR，hmin=5R/2=2.00 m",
+      "(4) v²=2g[h'-R(1-cosθ)]，脱离时 N=0",
+      "v²=-gRcosθ，cosθ=-5/6，θ=146.4°，v=2.58 m/s"
+    ]
   },
   {
     id: "zx-test-002",
@@ -30,7 +38,15 @@ const DEFAULT_CASES: ZhixueMockCase[] = [
     label: "模拟学生 002",
     questionLabel: "第 16 题 · 竖直圆轨道综合题",
     maxScore: 18,
-    lines: ["mgR = 1/2mv²", "N - mg = mv² / R", "N = 2mg"]
+    lines: [
+      "(1) mgh=1/2 mvB²，vB=8.0 m/s",
+      "NB-mg=mvB²/R，NB=45 N",
+      "(2) vC²=vB²-4gR=32，NC+mg=mvC²/R",
+      "NC=15 N>0，能通过C点",
+      "(3) 恰好通过时 NC=0，hmin=2.00 m",
+      "(4) v²=2g[h'-R(1-cosθ)]，N=0 时 v²=-gRcosθ",
+      "cosθ=-2/3，θ=131.8°，v≈2.3 m/s"
+    ]
   },
   {
     id: "zx-test-003",
@@ -38,7 +54,15 @@ const DEFAULT_CASES: ZhixueMockCase[] = [
     label: "模拟学生 003",
     questionLabel: "第 16 题 · 竖直圆轨道综合题",
     maxScore: 18,
-    lines: ["mgR = 1/2mv²", "N - mg = mv² / R", "N = ?mg"]
+    lines: [
+      "(1) mgh=1/2 mvB²，vB=8 m/s",
+      "NB+mg=mvB²/R，NB=35 N",
+      "(2) vC²=64-4×10×0.8=48",
+      "NC+mg=mvC²/R，NC=25 N，能通过",
+      "(3) 临界时 vC=0，mgh=2mgR，hmin=1.6 m",
+      "(4) N=0，v²=-gRcosθ",
+      "cosθ=-1/2，θ=120°，v=2 m/s"
+    ]
   },
   {
     id: "zx-test-004",
@@ -46,7 +70,15 @@ const DEFAULT_CASES: ZhixueMockCase[] = [
     label: "模拟学生 004",
     questionLabel: "第 16 题 · 竖直圆轨道综合题",
     maxScore: 18,
-    lines: ["mgR = 1/2mv²", "N - mg = mv² / R", "N = 3mg，方向向上"]
+    lines: [
+      "(1) W合=ΔEk，mgh=1/2 mvB²，vB=√(2gh)=8.0 m/s",
+      "N-mg=mvB²/R=40 N，N=45 N，压力向下",
+      "(2) 从A到C：mg(h-2R)=1/2 mvC²，vC²=32",
+      "NC+mg=mvC²/R，NC=15 N>0，能通过C点",
+      "(3) mghmin=mg·2R+1/2 mgR，hmin=2.00 m",
+      "(4) v²=2g[h'-R(1-cosθ)]",
+      "脱离条件 v²=-gRcosθ，cosθ=-5/6，θ=146.4°，v=2.58 m/s"
+    ]
   }
 ];
 
@@ -127,6 +159,8 @@ export default function ZhixueMockPage() {
   const [autoSubmit, setAutoSubmit] = useState(false);
   const [importMessage, setImportMessage] = useState("内置 4 份测试答卷");
   const [batchComplete, setBatchComplete] = useState(false);
+  const [toast, setToast] = useState<{ key: number; text: string } | null>(null);
+  const toastTimer = useRef<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const current = cases[index] ?? cases[0];
   const currentScore = current ? scores[current.id] ?? "" : "";
@@ -135,6 +169,11 @@ export default function ZhixueMockPage() {
   const progressText = `初评已阅量 ${submitted.size} / 任务量 ${cases.length}`;
 
   const addEvent = (message: string) => setEvents((previous) => [message, ...previous].slice(0, 8));
+  const showToast = (text: string) => {
+    setToast({ key: Date.now(), text });
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2600);
+  };
   const selectCase = (nextIndex: number) => {
     if (!cases.length) return;
     const safeIndex = Math.max(0, Math.min(cases.length - 1, nextIndex));
@@ -149,6 +188,7 @@ export default function ZhixueMockPage() {
       return;
     }
     setSubmitted((previous) => new Set(previous).add(current.id));
+    showToast("保存成功");
     addEvent(`${current.label} 保存成功 · ${currentScore} 分`);
   };
   const onImport = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -181,6 +221,7 @@ export default function ZhixueMockPage() {
   if (!current) return <main className="zx-mock-empty">没有可用的本地测试用例。</main>;
 
   return <div className="zx-mock-shell" data-zx-mock-site data-zx-scenario="local-import">
+    {toast && <div className="el-message el-message--success" data-mock-toast key={toast.key}><div className="el-message__content">{toast.text}</div></div>}
     <header className="zx-mock-topbar">
       <div className="zx-mock-brand"><span className="zx-mock-logo">知</span><div><strong>智学网</strong><small>个人阅卷 · 本地模拟站</small></div></div>
       <div className="zx-mock-top-meta"><span>2026 春季物理模拟卷</span><b>模拟账号</b></div>

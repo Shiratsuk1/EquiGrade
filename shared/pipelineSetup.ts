@@ -67,7 +67,7 @@ export function buildPipelineScoreAlignment(rubric: Rubric, fields: TargetScoreF
       source: "total",
       issues: matched
         ? []
-        : [`网页满分 ${fields[0].maxScore} 与锁定评分模板总分 ${rubric.totalScore} 不一致`],
+        : [`网页满分 ${fields[0].maxScore} 与评分标准总分 ${rubric.totalScore} 不一致`],
       rows: [{
         targetId: fields[0].id,
         targetLabel: fields[0].label,

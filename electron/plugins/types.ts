@@ -16,6 +16,7 @@ export type PreflightResult = {
 export type ExtractedAnswer = {
   pageKey: string;
   sourcePageKey?: string;
+  pageToken?: string;
   imageDataUrl: string;
   imageHash: string;
   imageMimeType: string;
@@ -42,6 +43,7 @@ export type ScoreWritePayload = {
   maxScore: number;
   segments: ScoreSegmentValue[];
   expectedPageKey?: string;
+  expectedPageToken?: string;
   expectedImageHash?: string;
 };
 
@@ -86,7 +88,7 @@ export interface SiteAdapter {
   navigateForDiagnostic(direction: DiagnosticPageDirection): Promise<DiagnosticNavigationResult>;
   writeScore(payload: ScoreWritePayload): Promise<void>;
   testScoreWrite(payload: ScoreWritePayload): Promise<PipelineWriteTestResult>;
-  submitScore(): Promise<void>;
+  submitScore(payload: ScoreWritePayload): Promise<void>;
   verifySubmission(payload: ScoreWritePayload): Promise<void>;
   goToNext(): Promise<void>;
   detectPageChange(previousPageKey: string): Promise<PageTransition>;

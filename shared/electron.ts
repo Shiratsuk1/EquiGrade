@@ -270,7 +270,7 @@ export interface PluginResponse {
 export interface PipelineTemplateContext {
   templateId: string;
   title: string;
-  locked: boolean;
+  ready: boolean;
   questionText: string;
   referenceText: string;
   rubric: Rubric;

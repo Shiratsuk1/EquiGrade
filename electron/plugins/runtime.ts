@@ -23,6 +23,8 @@ import {
   assertSameAnswer,
   commitFailureMessage,
   failureRequiresPause,
+  isStaleAnswerError,
+  StaleAnswerError,
   type PipelineCommitStage
 } from "./pipelineSafety.js";
 import {
@@ -298,6 +300,14 @@ function checkInterruption() {
   if (skipRequested) throw new Error("__PIPELINE_SKIP__");
 }
 
+function readableRemoteError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : String(error || fallback);
+  return message
+    .replace(/^Error invoking remote method '[^']+':\s*/i, "")
+    .replace(/^Error:\s*/i, "")
+    .trim() || fallback;
+}
+
 async function gradeCurrent(answer: ExtractedAnswer) {
   phase("grading", "教师模型正在直接查看学生答卷图片", { pageKey: answer.sourcePageKey ?? answer.pageKey });
   return await ipcRenderer.invoke("pipeline:grade-image", {
@@ -313,6 +323,7 @@ function scorePayload(grading: GradingResponse, answer: ExtractedAnswer): ScoreW
     score: grading.score,
     maxScore: grading.maxScore,
     expectedPageKey: answer.sourcePageKey ?? answer.pageKey,
+    expectedPageToken: answer.pageToken,
     expectedImageHash: answer.imageHash,
     segments: (grading.result?.subquestions ?? []).map((subquestion) => ({
       id: subquestion.id,
@@ -330,8 +341,8 @@ function scorePayload(grading: GradingResponse, answer: ExtractedAnswer): ScoreW
 
 async function confirmCurrentAnswer(expected: ExtractedAnswer) {
   const currentPageKey = adapter.currentPageKey();
-  if (expected.sourcePageKey && currentPageKey && expected.sourcePageKey !== currentPageKey) {
-    throw new Error("模型批改期间阅卷页面已经切换，已拒绝写入旧答卷分数");
+  if (expected.sourcePageKey && currentPageKey !== expected.sourcePageKey) {
+    throw new StaleAnswerError("模型批改期间阅卷页面已经切换，已拒绝写入旧答卷分数");
   }
   const current = await adapter.getCurrentAnswer();
   assertSameAnswer(expected, current);
@@ -396,7 +407,7 @@ async function runPipeline() {
         await confirmCurrentAnswer(answer);
         phase("submitting", "正在提交当前答卷分数", { pageKey: transitionKey });
         commitStage = "submit_started";
-        await adapter.submitScore();
+        await adapter.submitScore(score);
         phase("verifying", "正在验证网页已接收分数", { pageKey: transitionKey });
         await adapter.verifySubmission(score);
         commitStage = "verified";
@@ -421,7 +432,25 @@ async function runPipeline() {
         }
         await runPreflight();
       } catch (error) {
-        const reason = error instanceof Error ? error.message : "当前答卷处理失败";
+        const reason = readableRemoteError(error, "当前答卷处理失败");
+        if (stopRequested || reason === "任务已被用户强制停止") {
+          phase("idle", "流水线已强制停止");
+          record({ type: "pipeline_force_stopped", pageKey: answer?.sourcePageKey ?? answer?.pageKey ?? fallbackPageKey });
+          return;
+        }
+        if (isStaleAnswerError(error)) {
+          const currentKey = adapter.currentPageKey() ?? answer?.sourcePageKey ?? answer?.pageKey ?? fallbackPageKey;
+          const message = `检测到当前答卷已变化，已停止写分：${reason}`;
+          phase("paused", message, { pageKey: currentKey });
+          record({
+            type: "pipeline_paused_stale_answer",
+            pageKey: currentKey,
+            expectedPageKey: answer?.sourcePageKey ?? answer?.pageKey,
+            imageHash: answer?.imageHash,
+            reason
+          });
+          return;
+        }
         if (failureRequiresPause(commitStage)) {
           const currentKey = answer?.sourcePageKey ?? answer?.pageKey ?? fallbackPageKey;
           const message = commitFailureMessage(commitStage, reason);
@@ -475,7 +504,7 @@ async function runPipeline() {
           }
           await runPreflight();
         } catch (skipError) {
-          const skipReason = skipError instanceof Error ? skipError.message : "异常答卷跳过失败";
+          const skipReason = readableRemoteError(skipError, "异常答卷跳过失败");
           phase("paused", skipReason, { pageKey: currentKey });
           record({ type: "pipeline_paused", pageKey: currentKey, reason: skipReason, consecutiveFailures: failures });
           return;
@@ -627,7 +656,7 @@ async function handlePluginRequest(request: PluginRequest) {
       try {
         return await runPluginDiagnostic(request.diagnostic);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : "插件行为测试失败";
+        const reason = readableRemoteError(error, "插件行为测试失败");
         phase("failed", `诊断失败：${reason}`, { pageKey: adapter.currentPageKey() });
         record({ type: "plugin_diagnostic_failed", action: request.diagnostic.action, reason, pageKey: adapter.currentPageKey() });
         throw error;
@@ -645,7 +674,7 @@ async function skipWhenIdle() {
     record({ type: "page_skipped", pageKey, reason: "用户手动跳过" });
     await runPreflight();
   } catch (error) {
-    const reason = error instanceof Error ? error.message : "当前答卷跳过失败";
+    const reason = readableRemoteError(error, "当前答卷跳过失败");
     phase("failed", reason, { pageKey });
   }
 }
@@ -656,7 +685,14 @@ async function control(command: PipelineControl) {
       if (!running) await runPreflight();
       break;
     case "start":
-      await runPipeline();
+      try {
+        await ipcRenderer.invoke("pipeline:assert-task");
+        await runPipeline();
+      } catch (error) {
+        const reason = readableRemoteError(error, "批改任务启动失败");
+        phase("failed", reason);
+        record({ type: "pipeline_start_rejected", reason });
+      }
       break;
     case "pause":
       pauseRequested = true;
@@ -697,7 +733,7 @@ export function bootPluginRuntime() {
         response = {
           requestId: request.requestId,
           ok: false,
-          error: error instanceof Error ? error.message : "插件请求执行失败"
+          error: readableRemoteError(error, "插件请求执行失败")
         };
       }
       ipcRenderer.send("plugin:response", response);

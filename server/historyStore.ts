@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   GradingHistoryRecord,
@@ -10,14 +10,15 @@ import type {
 } from "../shared/types.js";
 import { demoQuestion, demoReference, demoRubric } from "./demoData.js";
 import { pipelineFixtureQuestion, pipelineFixtureReference, pipelineFixtureRubric } from "./pipelineFixtureData.js";
-import { logEvent } from "./systemLog.js";
+import { getOperationModelCalls, logEvent, releaseOperationModelCalls } from "./systemLog.js";
 
 interface StoredAsset extends SavedAsset {
   diskName: string;
 }
 
-interface StoredHistoryRecord extends Omit<GradingHistoryRecord, "answerImage"> {
+interface StoredHistoryRecord extends Omit<GradingHistoryRecord, "answerImage" | "modelCallCount" | "modelCalls"> {
   answerImage: StoredAsset;
+  modelCalls?: GradingHistoryRecord["modelCalls"];
 }
 
 interface StoredTemplate {
@@ -58,6 +59,57 @@ export function normalizeUploadedFileName(value: string): string {
 export function countCurrentGradingResults(results: Array<Pick<GradingResult, "id" | "previousResultId">>): number {
   const supersededIds = new Set(results.flatMap((result) => result.previousResultId ? [result.previousResultId] : []));
   return results.filter((result) => !supersededIds.has(result.id)).length;
+}
+
+export function matchesStoredRecordId(record: { id: string; result: Pick<GradingResult, "id"> }, ids: ReadonlySet<string>): boolean {
+  return ids.has(record.id) || ids.has(record.result.id);
+}
+
+export function shouldDeleteAnswerAsset(diskName: string, remainingRecords: Array<{ answerImage: Pick<StoredAsset, "diskName"> }>): boolean {
+  return !remainingRecords.some((record) => record.answerImage.diskName === diskName);
+}
+
+export function normalizeLegacyReviewState(result: GradingResult): GradingResult {
+  const staleReasons = new Set<string>();
+  let changed = false;
+  const subquestions = result.subquestions.map((subquestion) => {
+    const decisions = subquestion.decisions.map((decision) => {
+      const isClearDecision = decision.status === "satisfied"
+        || decision.status === "not_satisfied"
+        || decision.status === "not_present"
+        || decision.status === "not_required";
+      if (!isClearDecision || decision.decisionSource === "synthetic_missing" || !decision.requiresReview) return decision;
+      if (decision.reviewReason) staleReasons.add(decision.reviewReason);
+      changed = true;
+      return { ...decision, requiresReview: false, reviewReason: undefined };
+    });
+    return {
+      ...subquestion,
+      decisions,
+      processAuditSummary: subquestion.processAuditSummary
+        ? { ...subquestion.processAuditSummary, reviewRequired: decisions.filter((decision) => decision.requiresReview).length }
+        : subquestion.processAuditSummary
+    };
+  });
+  if (!changed) return result;
+
+  const retainedDecisionReasons = new Set(subquestions.flatMap((subquestion) => subquestion.decisions
+    .filter((decision) => decision.requiresReview && decision.reviewReason)
+    .map((decision) => decision.reviewReason as string)));
+  const reviewReasons = result.reviewReasons.filter((reason) => !staleReasons.has(reason) || retainedDecisionReasons.has(reason));
+  const teacherCommentary = result.teacherCommentary
+    ? {
+        ...result.teacherCommentary,
+        reviewItems: result.teacherCommentary.reviewItems.filter((reason) => !staleReasons.has(reason) || retainedDecisionReasons.has(reason))
+      }
+    : result.teacherCommentary;
+  return {
+    ...result,
+    status: reviewReasons.length ? "needs_review" : "completed",
+    reviewReasons,
+    subquestions,
+    teacherCommentary
+  };
 }
 
 async function readDatabase(): Promise<HistoryDatabase> {
@@ -228,14 +280,14 @@ export async function saveTemplate(input: {
       updatedAt: now,
       questionText: input.questionText,
       referenceText: input.referenceText,
-      rubric: { ...input.rubric, status: "locked" },
+      rubric: { ...input.rubric, status: "saved" },
       questionImages,
       referenceImages,
       records: []
     };
     database.templates.unshift(template);
     await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
-    logEvent(input.operationId, "storage", "template_saved", "已自动保存锁定模板", {
+    logEvent(input.operationId, "storage", "template_saved", "评分标准已保存，后续仍可修改", {
       templateId: id,
       title: template.title,
       questionImages: questionImages.length,
@@ -245,10 +297,43 @@ export async function saveTemplate(input: {
   });
 }
 
+export async function updateTemplateRubric(input: {
+  templateId: string;
+  rubric: Rubric;
+  operationId: string;
+}): Promise<GradingTemplateSummary> {
+  return mutate(async () => {
+    const database = await readDatabase();
+    const template = database.templates.find((item) => item.id === input.templateId);
+    if (!template) throw new Error("找不到要修改的评分标准");
+    if (template.builtIn) throw new Error("内置测试评分标准不能修改");
+    if (input.rubric.version !== template.rubric.version) {
+      throw new Error(`评分标准已在其他位置更新为 v${template.rubric.version}，请刷新后再修改`);
+    }
+    const previousRubric = structuredClone(template.rubric);
+    for (const record of template.records) {
+      record.rubricSnapshot ??= structuredClone(previousRubric);
+    }
+    const nextVersion = template.rubric.version + 1;
+    template.rubric = structuredClone({ ...input.rubric, version: nextVersion, status: "saved" });
+    template.title = template.rubric.title;
+    template.totalScore = template.rubric.totalScore;
+    template.updatedAt = new Date().toISOString();
+    await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
+    logEvent(input.operationId, "storage", "template_updated", "评分标准修改已保存为新版本", {
+      templateId: template.id,
+      version: nextVersion,
+      existingRecords: template.records.length
+    }, "success", "progress");
+    return toSummary(template);
+  });
+}
+
 export async function saveGradingRecord(input: {
   templateId: string;
   answerImage: Express.Multer.File;
   result: GradingResult;
+  rubricSnapshot: Rubric;
   operationId: string;
 }): Promise<void> {
   await mutate(async () => {
@@ -256,19 +341,24 @@ export async function saveGradingRecord(input: {
     const template = database.templates.find((item) => item.id === input.templateId);
     if (!template) throw new Error("找不到当前批改模板，无法保存历史记录");
     const answerImage = await saveAsset(template.id, input.answerImage, "answer");
+    const modelCalls = getOperationModelCalls(input.operationId);
     template.records.unshift({
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       answerImage,
-      result: input.result
+      result: input.result,
+      rubricSnapshot: structuredClone(input.rubricSnapshot),
+      modelCalls
     });
     template.updatedAt = new Date().toISOString();
     await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
+    releaseOperationModelCalls(input.operationId);
     logEvent(input.operationId, "storage", "grading_record_saved", "学生答卷与批改结果已写入历史记录", {
       templateId: template.id,
       studentId: input.result.studentId,
       score: input.result.score,
-      maxScore: input.result.maxScore
+      maxScore: input.result.maxScore,
+      modelCalls: modelCalls.length
     }, "success", "completed");
   });
 }
@@ -295,7 +385,7 @@ export async function getRegradeContext(templateId: string, resultId: string): P
     buffer: await readFile(path.join(assetsDirectory, template.id, asset.diskName))
   });
   return {
-    rubric: template.rubric,
+    rubric: record.rubricSnapshot ?? template.rubric,
     questionText: template.questionText,
     referenceText: template.referenceText,
     questionImages: await Promise.all(template.questionImages.map(loadTemplateImage)),
@@ -343,27 +433,80 @@ export async function saveRegradedRecord(input: {
     const template = database.templates.find((item) => item.id === input.templateId);
     const sourceRecord = template?.records.find((item) => item.result.id === input.sourceResultId);
     if (!template || !sourceRecord) throw new Error("找不到要重判的历史批改记录");
+    const modelCalls = getOperationModelCalls(input.operationId);
     template.records.unshift({
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       answerImage: sourceRecord.answerImage,
-      result: input.result
+      result: input.result,
+      rubricSnapshot: structuredClone(sourceRecord.rubricSnapshot ?? template.rubric),
+      modelCalls
     });
     template.updatedAt = new Date().toISOString();
     await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
+    releaseOperationModelCalls(input.operationId);
     logEvent(input.operationId, "storage", "regraded_record_saved", "重判结果已作为新版本写入历史记录，原结果保持不变", {
       templateId: template.id,
       previousResultId: input.sourceResultId,
       resultId: input.result.id,
       studentId: input.result.studentId,
       score: input.result.score,
-      maxScore: input.result.maxScore
+      maxScore: input.result.maxScore,
+      modelCalls: modelCalls.length
     }, "success", "completed");
   });
 }
 
 export async function listTemplates(): Promise<GradingTemplateSummary[]> {
   return (await readDatabase()).templates.map(toSummary);
+}
+
+export async function deleteTemplates(templateIds: string[]): Promise<{ deletedTemplates: number; deletedRecords: number }> {
+  return mutate(async () => {
+    const ids = new Set(templateIds);
+    const database = await readDatabase();
+    const targets = database.templates.filter((template) => ids.has(template.id));
+    const protectedTemplate = targets.find((template) => template.builtIn);
+    if (protectedTemplate) throw new Error(`内置评分标准“${protectedTemplate.title}”不能删除`);
+    if (!targets.length) return { deletedTemplates: 0, deletedRecords: 0 };
+
+    database.templates = database.templates.filter((template) => !ids.has(template.id));
+    await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
+    await Promise.all(targets.map((template) => rm(path.join(assetsDirectory, template.id), { recursive: true, force: true })));
+    return {
+      deletedTemplates: targets.length,
+      deletedRecords: targets.reduce((total, template) => total + template.records.length, 0)
+    };
+  });
+}
+
+export async function deleteGradingRecords(recordIds: string[]): Promise<{ deletedRecords: number; deletedAssets: number }> {
+  return mutate(async () => {
+    const ids = new Set(recordIds);
+    const database = await readDatabase();
+    const assetsToDelete: string[] = [];
+    let deletedRecords = 0;
+
+    for (const template of database.templates) {
+      const removed = template.records.filter((record) => matchesStoredRecordId(record, ids));
+      if (!removed.length) continue;
+      const remaining = template.records.filter((record) => !removed.includes(record));
+      const candidateDiskNames = new Set(removed.map((record) => record.answerImage.diskName));
+      for (const diskName of candidateDiskNames) {
+        if (shouldDeleteAnswerAsset(diskName, remaining)) {
+          assetsToDelete.push(path.join(assetsDirectory, template.id, diskName));
+        }
+      }
+      template.records = remaining;
+      template.updatedAt = new Date().toISOString();
+      deletedRecords += removed.length;
+    }
+
+    if (!deletedRecords) return { deletedRecords: 0, deletedAssets: 0 };
+    await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
+    await Promise.all(assetsToDelete.map((assetPath) => rm(assetPath, { force: true })));
+    return { deletedRecords, deletedAssets: assetsToDelete.length };
+  });
 }
 
 export async function getTemplate(id: string): Promise<GradingTemplateDetail | null> {
@@ -376,12 +519,25 @@ export async function getTemplate(id: string): Promise<GradingTemplateDetail | n
     rubric: template.rubric,
     questionImages: template.questionImages.map(publicAsset),
     referenceImages: template.referenceImages.map(publicAsset),
-    records: template.records.map((record) => ({
-      ...record,
-      answerImage: publicAsset(record.answerImage),
-      result: { ...record.result, fileName: normalizeUploadedFileName(record.result.fileName) }
-    }))
+    records: template.records.map((record) => {
+      const { modelCalls, ...publicRecord } = record;
+      return {
+        ...publicRecord,
+        answerImage: publicAsset(record.answerImage),
+        result: normalizeLegacyReviewState({ ...record.result, fileName: normalizeUploadedFileName(record.result.fileName) }),
+        modelCallCount: modelCalls?.length ?? 0
+      };
+    })
   };
+}
+
+export async function getGradingRecordModelCalls(recordId: string): Promise<GradingHistoryRecord["modelCalls"] | null> {
+  const database = await readDatabase();
+  for (const template of database.templates) {
+    const record = template.records.find((item) => item.id === recordId || item.result.id === recordId);
+    if (record) return structuredClone(record.modelCalls ?? []);
+  }
+  return null;
 }
 
 export function resolveAssetPath(templateId: string, diskName: string): string | null {

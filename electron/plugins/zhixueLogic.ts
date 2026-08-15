@@ -40,3 +40,11 @@ export function buildZhixueScorePlan(payload: ScoreWritePayload, fields: ZhixueS
   }
   return { source: "total", values: [payload.score] };
 }
+
+export function parseMarkingProgress(text: string): { completed: number; total: number } | undefined {
+  const match = text.match(
+    /(?:初评)?已阅量\s*(\d+)\s*\/\s*任务量\s*(\d+)|(?:初评)?已阅量\s*\/\s*任务量[^\d]*(\d+)\s*\/\s*(\d+)/
+  );
+  if (!match) return undefined;
+  return { completed: Number(match[1] ?? match[3]), total: Number(match[2] ?? match[4]) };
+}

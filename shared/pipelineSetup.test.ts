@@ -30,7 +30,7 @@ describe("buildPipelineScoreAlignment", () => {
         matched: false
       }]
     });
-    expect(result.issues).toEqual(["网页满分 18 与锁定评分模板总分 16 不一致"]);
+    expect(result.issues).toEqual(["网页满分 18 与评分标准总分 16 不一致"]);
     expect(result.issues.join(" ")).not.toMatch(/小问|评分点|数量|顺序/);
   });
 

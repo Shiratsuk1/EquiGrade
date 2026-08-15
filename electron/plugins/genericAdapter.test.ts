@@ -2,16 +2,26 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { GENERIC_ADAPTER_MANIFEST } from "./manifests.js";
 import { createGenericAdapter } from "./genericAdapter.js";
 import { DEFAULT_GRADING_SELECTORS } from "./selectors.js";
+import { extractAnswerImage } from "./imageExtractor.js";
+
+vi.mock("./imageExtractor.js", () => ({ extractAnswerImage: vi.fn() }));
 
 type FakeNode = {
   dataset: Record<string, string>;
   querySelector: ReturnType<typeof vi.fn>;
+  addEventListener: ReturnType<typeof vi.fn>;
+  emitClick: () => void;
+  value?: string;
 };
 
 function node(children: Record<string, FakeNode | null> = {}, dataset: Record<string, string> = {}): FakeNode {
+  const listeners: Array<() => void> = [];
   return {
     dataset,
-    querySelector: vi.fn((selector: string) => children[selector] ?? null)
+    querySelector: vi.fn((selector: string) => children[selector] ?? null),
+    addEventListener: vi.fn((_type: string, listener: () => void) => listeners.push(listener)),
+    emitClick: () => listeners.forEach((listener) => listener()),
+    value: ""
   };
 }
 
@@ -45,6 +55,7 @@ function adapter() {
 }
 
 afterEach(() => {
+  vi.mocked(extractAnswerImage).mockReset();
   vi.unstubAllGlobals();
 });
 
@@ -116,5 +127,34 @@ describe("generic adapter answer-page safety", () => {
 describe("generic answer selector", () => {
   it("does not contain a bare page-wide img fallback", () => {
     expect(DEFAULT_GRADING_SELECTORS.answerImage).not.toMatch(/(?:^|,\s*)img(?:$|,)/);
+  });
+});
+
+describe("generic commit target safety", () => {
+  it("rejects a next-page action even when the visible page key has not changed", async () => {
+    const image = node();
+    const card = node({ [DEFAULT_GRADING_SELECTORS.answerImage]: image }, { pageKey: "student-001" });
+    const next = node();
+    installPage({ card, image, next });
+    vi.mocked(extractAnswerImage).mockResolvedValue({
+      dataUrl: "data:image/png;base64,AA==",
+      mimeType: "image/png",
+      sha256: "a".repeat(64),
+      source: "test",
+      bytes: 1
+    });
+
+    const target = adapter();
+    const answer = await target.getCurrentAnswer();
+    next.emitClick();
+
+    await expect(target.writeScore({
+      score: 1,
+      maxScore: 1,
+      segments: [],
+      expectedPageKey: answer.sourcePageKey,
+      expectedPageToken: answer.pageToken,
+      expectedImageHash: answer.imageHash
+    })).rejects.toThrow("当前答卷实例已经变化");
   });
 });

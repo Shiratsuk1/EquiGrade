@@ -8,7 +8,13 @@ import {
 import type { ModelCallLogDetails, ModelConfigInput, TeacherReasoningEffort } from "../shared/types.js";
 import { findInvalidFormulaPath } from "./formulaValidation.js";
 import { assertSafeModelBaseUrl } from "./outboundUrlPolicy.js";
-import { logEvent } from "./systemLog.js";
+import {
+  getOperationSignal,
+  isOperationCancelled,
+  logEvent,
+  OperationCancelledError,
+  throwIfOperationCancelled
+} from "./systemLog.js";
 
 type JsonSchema = Record<string, unknown>;
 
@@ -44,10 +50,24 @@ const VISION_CONNECTION_TEST_PNG = "iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPac
 let activeModelCalls = 0;
 const modelCallWaiters: Array<{ limit: number; grant: () => void }> = [];
 
-function acquireModelCallSlot(configuredLimit: number): Promise<() => void> {
+function acquireModelCallSlot(configuredLimit: number, signal?: AbortSignal): Promise<() => void> {
   const limit = Math.max(1, Math.floor(configuredLimit));
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    let queued = false;
+    let settled = false;
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      if (queued) {
+        const index = modelCallWaiters.findIndex((waiter) => waiter.grant === grant);
+        if (index >= 0) modelCallWaiters.splice(index, 1);
+      }
+      reject(new OperationCancelledError());
+    };
     const grant = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", cancel);
       activeModelCalls += 1;
       let released = false;
       resolve(() => {
@@ -65,8 +85,16 @@ function acquireModelCallSlot(configuredLimit: number): Promise<() => void> {
         }
       });
     };
+    if (signal?.aborted) {
+      cancel();
+      return;
+    }
+    signal?.addEventListener("abort", cancel, { once: true });
     if (activeModelCalls < limit) grant();
-    else modelCallWaiters.push({ limit, grant });
+    else {
+      queued = true;
+      modelCallWaiters.push({ limit, grant });
+    }
   });
 }
 
@@ -140,7 +168,7 @@ function contentFromRaw(raw: string): string | undefined {
 }
 
 function resolveReasoningEffort(value: TeacherReasoningEffort | undefined): AppliedReasoningEffort | undefined {
-  return value === "low" || value === "medium" || value === "high" ? value : undefined;
+  return value && value !== "disabled" ? value : undefined;
 }
 
 function summarizeValidationError(error: unknown): string {
@@ -252,6 +280,7 @@ async function callStructuredInternal<T>(
   config: ModelConfigInput,
   input: StructuredRequest<T>
 ): Promise<{ data: T; durationMs: number; outputMode: string }> {
+  throwIfOperationCancelled(input.operationId);
   if ((input.images?.length ?? 0) > 0 && !config.supportsBase64Images) {
     throw new Error("当前全局模型配置未启用 Base64 图片，无法执行包含图片的模型调用");
   }
@@ -278,7 +307,12 @@ async function callStructuredInternal<T>(
 
   for (const mode of modes) {
     for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
+      throwIfOperationCancelled(protectedInput.operationId);
       const controller = new AbortController();
+      const operationSignal = getOperationSignal(protectedInput.operationId);
+      const abortForOperation = () => controller.abort(operationSignal?.reason ?? new OperationCancelledError());
+      if (operationSignal?.aborted) abortForOperation();
+      else operationSignal?.addEventListener("abort", abortForOperation, { once: true });
       const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
       const attemptStartedAt = performance.now();
       let httpResult: ModelHttpResult | undefined;
@@ -339,7 +373,9 @@ async function callStructuredInternal<T>(
           outputMode: mode
         };
       } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
+        lastError = operationSignal?.aborted || isOperationCancelled(error)
+          ? new OperationCancelledError()
+          : error instanceof Error ? error : new Error(String(error));
         const modeUserContent = mode === "json_schema"
           ? userContent
           : [
@@ -362,9 +398,11 @@ async function callStructuredInternal<T>(
           httpResult?.durationMs ?? Math.round(performance.now() - attemptStartedAt),
           lastError
         );
+        if (isOperationCancelled(lastError)) throw lastError;
         if (attempt < config.maxRetries) continue;
       } finally {
         clearTimeout(timeout);
+        operationSignal?.removeEventListener("abort", abortForOperation);
       }
     }
   }
@@ -375,30 +413,51 @@ export async function callStructured<T>(
   config: ModelConfigInput,
   input: StructuredRequest<T>
 ): Promise<{ data: T; durationMs: number; outputMode: string }> {
-  const release = await acquireModelCallSlot(config.maxConcurrency);
+  throwIfOperationCancelled(input.operationId);
+  const release = await acquireModelCallSlot(config.maxConcurrency, getOperationSignal(input.operationId));
   try {
+    throwIfOperationCancelled(input.operationId);
     return await callStructuredInternal(config, input);
   } finally {
     release();
   }
 }
 
+export function resolveReviewModelConfig(config: ModelConfigInput): ModelConfigInput {
+  const reviewModel = config.reviewModel?.trim();
+  if (!reviewModel) throw new Error("未配置局部审验模型");
+  const reviewApiKey = config.reviewApiKey?.trim();
+  if (!reviewApiKey) throw new Error("局部审验模型缺少独立 API Key，系统不会使用教师模型密钥代替");
+  return {
+    ...config,
+    baseUrl: config.reviewBaseUrl?.trim() || config.baseUrl,
+    apiKey: reviewApiKey,
+    reviewModel
+  };
+}
+
 export async function testModelConnection(
   config: ModelConfigInput,
-  mode: "text" | "vision",
+  mode: "text" | "vision" | "review",
   operationId?: string
 ): Promise<{ ok: true; durationMs: number; model: string; message: string }> {
+  const effectiveConfig = mode === "review" ? resolveReviewModelConfig(config) : config;
+  const model = mode === "vision"
+    ? effectiveConfig.visionModel
+    : mode === "review"
+      ? effectiveConfig.reviewModel!
+      : effectiveConfig.textModel;
   const result = await callStructured<{ status: string }>({
-    ...config,
+    ...effectiveConfig,
     maxRetries: 0,
-    maxOutputTokens: Math.min(config.maxOutputTokens, 256)
+    maxOutputTokens: Math.min(effectiveConfig.maxOutputTokens, 256)
   }, {
-    model: mode === "vision" ? config.visionModel : config.textModel,
+    model,
     system: "Return only valid JSON. Do not include markdown.",
-    prompt: mode === "vision"
+    prompt: mode === "vision" || mode === "review"
       ? "Inspect the supplied RGB test image. Return {\"status\":\"ok\"}."
       : "Return {\"status\":\"ok\"}.",
-    images: mode === "vision" ? [{
+    images: mode === "vision" || mode === "review" ? [{
       mimeType: "image/png",
       base64: VISION_CONNECTION_TEST_PNG,
       label: "[视觉连接测试图：128x128 RGB PNG]"
@@ -422,7 +481,7 @@ export async function testModelConnection(
   return {
     ok: true,
     durationMs: result.durationMs,
-    model: mode === "vision" ? config.visionModel : config.textModel,
+    model,
     message: `连接成功，结构化输出模式：${result.outputMode}`
   };
 }

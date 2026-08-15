@@ -13,5 +13,5 @@
     "sourceMap": true,
     "types": ["node"]
   },
-  "include": ["electron/**/*.ts", "shared/electron.ts"]
+  "include": ["electron/**/*.ts", "shared/electron.ts", "shared/startUrl.ts"]
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   DEFAULT_GRADING_MODE,
   DEFAULT_MODEL_TIMEOUT_MS,
+  DEFAULT_REVIEW_REASONING_EFFORT,
   DEFAULT_TEACHER_REASONING_EFFORT,
   DEFAULT_UNREADABLE_REVIEW_THRESHOLD,
   GRADING_MODES,
@@ -75,6 +76,11 @@ function withConfigDefaults(config: StoredConfig): StoredConfig {
     && TEACHER_REASONING_EFFORTS.includes(configuredReasoningEffort)
     ? configuredReasoningEffort
     : DEFAULT_TEACHER_REASONING_EFFORT;
+  const configuredReviewReasoningEffort = config.reviewReasoningEffort;
+  const reviewReasoningEffort: TeacherReasoningEffort = configuredReviewReasoningEffort
+    && TEACHER_REASONING_EFFORTS.includes(configuredReviewReasoningEffort)
+    ? configuredReviewReasoningEffort
+    : DEFAULT_REVIEW_REASONING_EFFORT;
   const configuredGradingMode = config.gradingMode;
   const gradingMode: GradingMode = configuredGradingMode
     && GRADING_MODES.includes(configuredGradingMode)
@@ -89,6 +95,9 @@ function withConfigDefaults(config: StoredConfig): StoredConfig {
       ? unreadableReviewThreshold
       : DEFAULT_UNREADABLE_REVIEW_THRESHOLD,
     teacherReasoningEffort,
+    reviewBaseUrl: config.reviewBaseUrl?.trim().replace(/\/+$/, "") ?? "",
+    reviewModel: config.reviewModel?.trim() ?? "",
+    reviewReasoningEffort,
     gradingMode
   };
 }
@@ -113,6 +122,7 @@ export async function requireModelConfig(): Promise<ActiveModelConfig> {
 export async function saveModelConfig(input: ModelConfigInput): Promise<PublicModelConfig> {
   const current = await readModelConfig();
   const apiKey = input.apiKey?.trim() || current?.apiKey || "";
+  const reviewApiKey = input.reviewApiKey?.trim() || current?.reviewApiKey || "";
   const stored: StoredConfig = {
     ...input,
     name: input.name.trim(),
@@ -120,6 +130,9 @@ export async function saveModelConfig(input: ModelConfigInput): Promise<PublicMo
     apiKey,
     visionModel: input.visionModel.trim(),
     textModel: input.textModel.trim(),
+    reviewBaseUrl: input.reviewBaseUrl?.trim().replace(/\/+$/, "") ?? "",
+    reviewApiKey,
+    reviewModel: input.reviewModel?.trim() ?? "",
     id: current?.id ?? crypto.randomUUID(),
     updatedAt: new Date().toISOString()
   };
@@ -130,12 +143,15 @@ export async function saveModelConfig(input: ModelConfigInput): Promise<PublicMo
 
 export function toPublicConfig(config: StoredConfig): PublicModelConfig {
   const apiKey = config.apiKey ?? "";
+  const reviewApiKey = config.reviewApiKey ?? "";
   return {
     id: config.id,
     name: config.name,
     baseUrl: config.baseUrl,
     visionModel: config.visionModel,
     textModel: config.textModel,
+    reviewBaseUrl: config.reviewBaseUrl ?? "",
+    reviewModel: config.reviewModel ?? "",
     timeoutMs: config.timeoutMs,
     maxRetries: config.maxRetries,
     maxConcurrency: config.maxConcurrency,
@@ -143,12 +159,15 @@ export function toPublicConfig(config: StoredConfig): PublicModelConfig {
     unreadableReviewThreshold: config.unreadableReviewThreshold ?? DEFAULT_UNREADABLE_REVIEW_THRESHOLD,
     gradingMode: config.gradingMode ?? DEFAULT_GRADING_MODE,
     teacherReasoningEffort: config.teacherReasoningEffort ?? DEFAULT_TEACHER_REASONING_EFFORT,
+    reviewReasoningEffort: config.reviewReasoningEffort ?? DEFAULT_REVIEW_REASONING_EFFORT,
     supportsJsonSchema: config.supportsJsonSchema,
     supportsJsonObject: config.supportsJsonObject,
     supportsBase64Images: config.supportsBase64Images,
     enabled: config.enabled,
     hasApiKey: Boolean(apiKey),
     apiKeyMasked: apiKey ? `${apiKey.slice(0, 3)}${"•".repeat(10)}${apiKey.slice(-4)}` : "",
+    hasReviewApiKey: Boolean(reviewApiKey),
+    reviewApiKeyMasked: reviewApiKey ? `${reviewApiKey.slice(0, 3)}${"•".repeat(10)}${reviewApiKey.slice(-4)}` : "",
     updatedAt: config.updatedAt
   };
 }
