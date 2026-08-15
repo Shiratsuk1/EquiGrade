@@ -1638,7 +1638,22 @@ function Capability({ label, value, selector }: { label: string; value: boolean;
 function SettingsPage({ preferences, onPreferencesChange }: { preferences: DesktopPreferences; onPreferencesChange: (patch: Partial<DesktopPreferences>) => void }) {
   const [startUrl, setStartUrl] = useState(() => readStartUrl(localStorage));
   const [saved, setSaved] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [openMessage, setOpenMessage] = useState("");
   const save = () => { localStorage.setItem(START_URL_STORAGE_KEY, startUrl); setSaved(true); window.setTimeout(() => setSaved(false), 1800); };
+  const openNow = async () => {
+    const host = getHost();
+    if (!host) { setOpenMessage("当前环境不支持打开网页（仅桌面工作台可用）"); return; }
+    setOpening(true); setOpenMessage("");
+    try {
+      await host.navigateBrowser(startUrl);
+      setOpenMessage("已打开默认阅卷网站");
+    } catch (error) {
+      setOpenMessage(error instanceof Error ? `打开失败：${error.message}` : "打开失败，请检查地址或网络");
+    } finally {
+      setOpening(false);
+    }
+  };
   const fontOptions: Array<{ value: DesktopFontSize; label: string; description: string }> = [
     { value: "compact", label: "紧凑", description: "适合较小窗口" },
     { value: "comfortable", label: "舒适", description: "推荐的默认大小" },
@@ -1702,7 +1717,7 @@ function SettingsPage({ preferences, onPreferencesChange }: { preferences: Deskt
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>工作区</span><h2>启动与任务信息</h2></div></div>
       <label className="desktop-setting-switch"><div><strong>显示实时任务消息</strong><span>在当前批改页面顶部展示最近四条流水线状态。</span></div><input type="checkbox" checked={preferences.showLiveMessages} onChange={(event) => onPreferencesChange({ showLiveMessages: event.target.checked })} /><i /></label>
       <label className="desktop-setting-switch"><div><strong>启动时打开默认阅卷网站</strong><span>关闭后保留嵌入式浏览器当前状态，只有手动操作才会导航。</span></div><input type="checkbox" checked={preferences.autoOpenStartUrl} onChange={(event) => onPreferencesChange({ autoOpenStartUrl: event.target.checked })} /><i /></label>
-      <div className="desktop-setting-block vertical"><div className="desktop-setting-copy"><strong>默认阅卷网站</strong><span>用于主页按钮和启用自动打开时的启动地址。</span></div><div className="desktop-form-grid"><label className="wide"><span>启动地址</span><input value={startUrl} onChange={(event) => setStartUrl(event.target.value)} /></label></div><div className="desktop-form-actions"><button className="desktop-save-button" onClick={save}>{saved ? <Check size={15} /> : <Save size={15} />}{saved ? "已保存" : "保存地址"}</button><button className="desktop-secondary-action" onClick={() => void getHost()?.navigateBrowser(startUrl)}><Globe2 size={14} />立即打开</button></div></div>
+      <div className="desktop-setting-block vertical"><div className="desktop-setting-copy"><strong>默认阅卷网站</strong><span>用于主页按钮和启用自动打开时的启动地址。</span></div><div className="desktop-form-grid"><label className="wide"><span>启动地址</span><input value={startUrl} onChange={(event) => setStartUrl(event.target.value)} /></label></div><div className="desktop-form-actions"><button className="desktop-save-button" onClick={save}>{saved ? <Check size={15} /> : <Save size={15} />}{saved ? "已保存" : "保存地址"}</button><button className="desktop-secondary-action" disabled={opening} onClick={() => void openNow()}>{opening ? <LoaderCircle className="spin" size={14} /> : <Globe2 size={14} />}{opening ? "正在打开" : "立即打开"}</button>{openMessage && <span className="desktop-setting-hint">{openMessage}</span>}</div></div>
     </section>
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>网页插件</span><h2>浮动控制器</h2></div><span className="desktop-status-label locked">跟随全局配色</span></div>
       <label className="desktop-setting-switch"><div><strong>在阅卷网页中显示插件</strong><span>隐藏后仍可从工作台控制批改流程。</span></div><input type="checkbox" checked={preferences.visible} onChange={(event) => onPreferencesChange({ visible: event.target.checked })} /><i /></label>
