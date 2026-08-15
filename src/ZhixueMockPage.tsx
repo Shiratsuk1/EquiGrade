@@ -165,6 +165,8 @@ export default function ZhixueMockPage() {
   const current = cases[index] ?? cases[0];
   const currentScore = current ? scores[current.id] ?? "" : "";
   const currentSubmitted = Boolean(current && submitted.has(current.id));
+  // 对齐真实智学网约束：批完（保存）当前份之前，下一份按钮禁用。
+  const nextDisabled = batchComplete || !currentSubmitted;
   const imageUrl = useMemo(() => current?.imageDataUrl || (current ? generatedImage(current) : ""), [current]);
   const progressText = `初评已阅量 ${submitted.size} / 任务量 ${cases.length}`;
 
@@ -249,7 +251,7 @@ export default function ZhixueMockPage() {
               <div className="auto_choose"><button type="button" className={`el-switch ${autoSubmit ? "is-checked" : ""}`} role="switch" aria-checked={autoSubmit} data-auto-submit onClick={() => setAutoSubmit((value) => !value)}><i /></button><span>自动提交</span><small>{autoSubmit ? "开启后模拟页拒绝手动保存" : "关闭"}</small></div>
               <button id="bnt_save" data-grading-submit type="button" disabled={!currentScore.trim() || currentSubmitted || batchComplete} onClick={saveScore}>{currentSubmitted ? "已保存" : "保存分数"}</button>
             </div>
-            <div className="zx-mock-page-actions"><a title="上一份" className={index <= 0 ? "unprev" : ""} aria-disabled={index <= 0} href="#previous" onClick={(event) => { event.preventDefault(); if (index > 0) previous(); }}>上一份</a><a title="下一份" data-grading-next className={batchComplete ? "unnext" : ""} aria-disabled={batchComplete} href="#next" onClick={(event) => { event.preventDefault(); if (!batchComplete) next(); }}>下一份</a></div>
+            <div className="zx-mock-page-actions"><a title="上一份" className={index <= 0 ? "unprev" : ""} aria-disabled={index <= 0} href="#previous" onClick={(event) => { event.preventDefault(); if (index > 0) previous(); }}>上一份</a><a title="下一份" data-grading-next className={nextDisabled ? "unnext" : ""} aria-disabled={nextDisabled} href="#next" onClick={(event) => { event.preventDefault(); if (!nextDisabled) next(); }}>下一份</a></div>
             <div className="zx-mock-operation-log"><span>网页操作记录</span>{events.length ? events.map((event, eventIndex) => <p key={`${event}-${eventIndex}`}>{event}</p>) : <p>等待插件或人工操作</p>}</div>
           </aside>
         </div>
