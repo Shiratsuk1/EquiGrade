@@ -169,4 +169,7 @@ npx vitest run                        # 146 个用例全量回归
 
 ## 📄 许可
 
-当前为私有仓库，未提供开源许可；如需公开请先补充 LICENSE 文件。
+本项目采用 [MIT License](./LICENSE) 开源（Copyright © 2026 Hengzhun）。
+
+> 提示：本仓库不附带任何模型服务额度；API Key、Base URL 与答卷数据均由使用者自行配置与保管。
+
