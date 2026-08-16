@@ -15,3 +15,6 @@ coverage/
 tmp/
 
 deepseek-harness-app/
+
+.DS_Store
+Thumbs.db

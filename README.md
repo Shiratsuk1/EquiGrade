@@ -8,6 +8,7 @@
 ![Express](https://img.shields.io/badge/Express-5-000000?logo=express&logoColor=white)
 ![Vitest](https://img.shields.io/badge/tests-146%20passed-22c55e)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
+![CI](https://github.com/Shiratsuk1/EquiGrade/actions/workflows/ci.yml/badge.svg)
 
 一个面向高中物理大题的**本地单机**自动改卷工作台（Windows 优先）。教师多模态模型直接查看题目、评分标准与学生答卷原图，**一次调用**同时完成"最终答案判定 + 逐评分点审验 + 教师评语"；后端只做结构校验、按当前评分标准版本**重算总分**与复核阈值判定，不信任模型返回的总分。桌面端（Electron）右侧内嵌目标阅卷网页，自动写分、提交并翻页。
 
