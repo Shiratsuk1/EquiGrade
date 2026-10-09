@@ -1,6 +1,8 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type {
+  GradingArtifact,
   GradingHistoryRecord,
   GradingResult,
   GradingTemplateDetail,
@@ -10,10 +12,12 @@ import type {
 } from "../shared/types.js";
 import { demoQuestion, demoReference, demoRubric } from "./demoData.js";
 import { pipelineFixtureQuestion, pipelineFixtureReference, pipelineFixtureRubric } from "./pipelineFixtureData.js";
-import { getOperationModelCalls, logEvent, releaseOperationModelCalls } from "./systemLog.js";
+import { deleteGradingArtifacts, saveGradingArtifacts, type GradingArtifactSource } from "./gradingArtifactStore.js";
+import { flushPersistedLogs, getOperationModelCalls, logEvent, releaseOperationModelCalls } from "./systemLog.js";
 
 interface StoredAsset extends SavedAsset {
   diskName: string;
+  sha256?: string;
 }
 
 interface StoredHistoryRecord extends Omit<GradingHistoryRecord, "answerImage" | "modelCallCount" | "modelCalls"> {
@@ -48,6 +52,29 @@ const databasePath = path.join(dataDirectory, "history.json");
 let mutationQueue: Promise<unknown> = Promise.resolve();
 
 export const PIPELINE_FIXTURE_TEMPLATE_ID = "00000000-0000-4000-8000-000000000001";
+
+type LegacyRubric = Omit<Rubric, "questionType"> & { questionType?: Rubric["questionType"] };
+
+/** 在历史存储读取边界补齐新增题型字段，避免业务层反复处理旧数据。 */
+export function migrateLegacyRubric(rubric: LegacyRubric): Rubric {
+  return { ...rubric, questionType: rubric.questionType ?? "large" };
+}
+
+export function migrateHistoryDatabase(database: HistoryDatabase): HistoryDatabase {
+  return {
+    ...database,
+    templates: database.templates.map((template) => ({
+      ...template,
+      rubric: migrateLegacyRubric(template.rubric as LegacyRubric),
+      records: template.records.map((record) => ({
+        ...record,
+        rubricSnapshot: record.rubricSnapshot
+          ? migrateLegacyRubric(record.rubricSnapshot as LegacyRubric)
+          : record.rubricSnapshot
+      }))
+    }))
+  };
+}
 
 export function normalizeUploadedFileName(value: string): string {
   const bytes = Array.from(value, (character) => character.charCodeAt(0));
@@ -115,7 +142,7 @@ export function normalizeLegacyReviewState(result: GradingResult): GradingResult
 async function readDatabase(): Promise<HistoryDatabase> {
   await mkdir(assetsDirectory, { recursive: true });
   try {
-    return JSON.parse(await readFile(databasePath, "utf8")) as HistoryDatabase;
+    return migrateHistoryDatabase(JSON.parse(await readFile(databasePath, "utf8")) as HistoryDatabase);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { templates: [] };
     throw error;
@@ -147,7 +174,8 @@ async function saveAsset(templateId: string, file: Express.Multer.File, prefix: 
     fileName: normalizeUploadedFileName(file.originalname),
     mimeType: file.mimetype,
     diskName,
-    url: `/api/history-assets/${templateId}/${diskName}`
+    url: `/api/history-assets/${templateId}/${diskName}`,
+    sha256: createHash("sha256").update(file.buffer).digest("hex")
   };
 }
 
@@ -155,6 +183,7 @@ function toSummary(template: StoredTemplate): GradingTemplateSummary {
   return {
     id: template.id,
     title: template.title,
+    questionType: template.rubric.questionType,
     totalScore: template.totalScore,
     builtIn: Boolean(template.builtIn),
     createdAt: template.createdAt,
@@ -253,7 +282,7 @@ export async function ensurePipelineFixtureTemplate(): Promise<GradingTemplateSu
 }
 
 function publicAsset(asset: StoredAsset): SavedAsset {
-  const { diskName: _diskName, ...publicFields } = asset;
+  const { diskName: _diskName, sha256: _sha256, ...publicFields } = asset;
   return { ...publicFields, fileName: normalizeUploadedFileName(publicFields.fileName) };
 }
 
@@ -307,6 +336,9 @@ export async function updateTemplateRubric(input: {
     const template = database.templates.find((item) => item.id === input.templateId);
     if (!template) throw new Error("找不到要修改的评分标准");
     if (template.builtIn) throw new Error("内置测试评分标准不能修改");
+    if (input.rubric.questionType !== template.rubric.questionType) {
+      throw new Error("题型保存后不可修改，请新建评分标准");
+    }
     if (input.rubric.version !== template.rubric.version) {
       throw new Error(`评分标准已在其他位置更新为 v${template.rubric.version}，请刷新后再修改`);
     }
@@ -335,20 +367,34 @@ export async function saveGradingRecord(input: {
   result: GradingResult;
   rubricSnapshot: Rubric;
   operationId: string;
+  artifactSource?: GradingArtifactSource;
 }): Promise<void> {
   await mutate(async () => {
     const database = await readDatabase();
     const template = database.templates.find((item) => item.id === input.templateId);
     if (!template) throw new Error("找不到当前批改模板，无法保存历史记录");
-    const answerImage = await saveAsset(template.id, input.answerImage, "answer");
     const modelCalls = getOperationModelCalls(input.operationId);
+    const answerHash = createHash("sha256").update(input.answerImage.buffer).digest("hex");
+    const duplicateOf = template.records.find((record) =>
+      record.result.studentId === input.result.studentId
+      && record.rubricSnapshot?.version === input.rubricSnapshot.version
+      && record.answerImage.sha256 === answerHash
+    );
+    const persistedResult = duplicateOf
+      ? { ...input.result, duplicateOfResultId: duplicateOf.result.id }
+      : input.result;
+    const artifacts = input.artifactSource
+      ? await saveGradingArtifacts({ result: input.result, source: input.artifactSource, modelCalls })
+      : undefined;
+    const answerImage = await saveAsset(template.id, input.answerImage, "answer");
     template.records.unshift({
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       answerImage,
-      result: input.result,
+      result: persistedResult,
       rubricSnapshot: structuredClone(input.rubricSnapshot),
-      modelCalls
+      modelCalls,
+      ...(artifacts ? { artifacts } : {})
     });
     template.updatedAt = new Date().toISOString();
     await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
@@ -358,8 +404,11 @@ export async function saveGradingRecord(input: {
       studentId: input.result.studentId,
       score: input.result.score,
       maxScore: input.result.maxScore,
-      modelCalls: modelCalls.length
+      modelCalls: modelCalls.length,
+      artifacts: artifacts?.length ?? 0,
+      ...(duplicateOf ? { duplicateOf: duplicateOf.result.id } : {})
     }, "success", "completed");
+    await flushPersistedLogs();
   });
 }
 
@@ -374,10 +423,11 @@ export async function getRegradeContext(templateId: string, resultId: string): P
   mimeType: string;
   imageBuffer: Buffer;
   previousResultId: string;
+  ocrAudit?: GradingResult["ocrAudit"];
 } | null> {
   const database = await readDatabase();
   const template = database.templates.find((item) => item.id === templateId);
-  const record = template?.records.find((item) => item.result.id === resultId);
+  const record = template?.records.find((item) => item.result.id === resultId || item.id === resultId);
   if (!template || !record) return null;
   const loadTemplateImage = async (asset: StoredAsset) => ({
     fileName: normalizeUploadedFileName(asset.fileName),
@@ -394,7 +444,8 @@ export async function getRegradeContext(templateId: string, resultId: string): P
     fileName: normalizeUploadedFileName(record.answerImage.fileName),
     mimeType: record.answerImage.mimeType,
     imageBuffer: await readFile(path.join(assetsDirectory, template.id, record.answerImage.diskName)),
-    previousResultId: record.result.id
+    previousResultId: record.result.id,
+    ocrAudit: record.result.ocrAudit
   };
 }
 
@@ -427,6 +478,7 @@ export async function saveRegradedRecord(input: {
   sourceResultId: string;
   result: GradingResult;
   operationId: string;
+  artifactSource?: GradingArtifactSource;
 }): Promise<void> {
   await mutate(async () => {
     const database = await readDatabase();
@@ -434,13 +486,17 @@ export async function saveRegradedRecord(input: {
     const sourceRecord = template?.records.find((item) => item.result.id === input.sourceResultId);
     if (!template || !sourceRecord) throw new Error("找不到要重判的历史批改记录");
     const modelCalls = getOperationModelCalls(input.operationId);
+    const artifacts = input.artifactSource
+      ? await saveGradingArtifacts({ result: input.result, source: input.artifactSource, modelCalls })
+      : undefined;
     template.records.unshift({
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       answerImage: sourceRecord.answerImage,
       result: input.result,
       rubricSnapshot: structuredClone(sourceRecord.rubricSnapshot ?? template.rubric),
-      modelCalls
+      modelCalls,
+      ...(artifacts ? { artifacts } : {})
     });
     template.updatedAt = new Date().toISOString();
     await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
@@ -452,8 +508,10 @@ export async function saveRegradedRecord(input: {
       studentId: input.result.studentId,
       score: input.result.score,
       maxScore: input.result.maxScore,
-      modelCalls: modelCalls.length
+      modelCalls: modelCalls.length,
+      artifacts: artifacts?.length ?? 0
     }, "success", "completed");
+    await flushPersistedLogs();
   });
 }
 
@@ -473,6 +531,7 @@ export async function deleteTemplates(templateIds: string[]): Promise<{ deletedT
     database.templates = database.templates.filter((template) => !ids.has(template.id));
     await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
     await Promise.all(targets.map((template) => rm(path.join(assetsDirectory, template.id), { recursive: true, force: true })));
+    await deleteGradingArtifacts(targets.flatMap((template) => template.records.map((record) => record.result.id)));
     return {
       deletedTemplates: targets.length,
       deletedRecords: targets.reduce((total, template) => total + template.records.length, 0)
@@ -485,12 +544,14 @@ export async function deleteGradingRecords(recordIds: string[]): Promise<{ delet
     const ids = new Set(recordIds);
     const database = await readDatabase();
     const assetsToDelete: string[] = [];
+    const artifactResultIds: string[] = [];
     let deletedRecords = 0;
 
     for (const template of database.templates) {
       const removed = template.records.filter((record) => matchesStoredRecordId(record, ids));
       if (!removed.length) continue;
       const remaining = template.records.filter((record) => !removed.includes(record));
+      artifactResultIds.push(...removed.map((record) => record.result.id));
       const candidateDiskNames = new Set(removed.map((record) => record.answerImage.diskName));
       for (const diskName of candidateDiskNames) {
         if (shouldDeleteAnswerAsset(diskName, remaining)) {
@@ -505,6 +566,7 @@ export async function deleteGradingRecords(recordIds: string[]): Promise<{ delet
     if (!deletedRecords) return { deletedRecords: 0, deletedAssets: 0 };
     await writeFile(databasePath, JSON.stringify(database, null, 2), "utf8");
     await Promise.all(assetsToDelete.map((assetPath) => rm(assetPath, { force: true })));
+    await deleteGradingArtifacts(artifactResultIds);
     return { deletedRecords, deletedAssets: assetsToDelete.length };
   });
 }
@@ -576,6 +638,15 @@ export async function getGradingRecordModelCalls(recordId: string): Promise<Grad
   for (const template of database.templates) {
     const record = template.records.find((item) => item.id === recordId || item.result.id === recordId);
     if (record) return structuredClone(record.modelCalls ?? []);
+  }
+  return null;
+}
+
+export async function getGradingRecordArtifacts(recordId: string): Promise<GradingArtifact[] | null> {
+  const database = await readDatabase();
+  for (const template of database.templates) {
+    const record = template.records.find((item) => item.id === recordId || item.result.id === recordId);
+    if (record) return structuredClone(record.artifacts ?? []);
   }
   return null;
 }

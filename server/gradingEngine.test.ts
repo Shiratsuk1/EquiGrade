@@ -53,6 +53,7 @@ describe("calculateGrade teacher-model authority", () => {
       recognizedQuestionText: "求状态Ⅱ压强",
       version: 1,
       status: "locked",
+      questionType: "large",
       totalScore: 2,
       warnings: [],
       subquestions: [{
@@ -217,6 +218,33 @@ describe("calculateGrade teacher-model authority", () => {
       unreadableReviewTriggered: false
     });
     expect(result.status).toBe("completed");
+    expect(result.scoreResolved).toBe(true);
+  });
+
+  it("does not block score resolution for unreadable points from large-question point review below threshold", () => {
+    const result = calculateGrade({
+      id: "point-review-below-threshold", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
+      evidence: baseEvidence, finalAnswerJudgements: [finalJudgement("incorrect")],
+      decisions: decisions().map((item, index) => index === 2 ? {
+        ...item,
+        status: "unreadable" as const,
+        requiresReview: true,
+        reviewReason: "局部小分证据仍无法可靠辨认",
+        decisionSource: "large_question_point_review"
+      } : item),
+      unreadableReviewThreshold: 20,
+      modelName: "test", durationMs: 10
+    });
+
+    expect(result.score).toBe(6);
+    expect(result.subquestions[0].decisions[2].requiresReview).toBe(false);
+    expect(result.scoreResolved).toBe(true);
+    expect(result.reviewPolicy).toEqual({
+      unreadableScoreThreshold: 20,
+      unreadableAffectedScore: 2,
+      unreadableReviewTriggered: false
+    });
+    expect(result.status).toBe("completed");
   });
 
   it("does not review unreadable process work when a correct final answer removes all score impact", () => {
@@ -353,6 +381,40 @@ describe("calculateGrade teacher-model authority", () => {
     expect(result.subquestions[0].finalAnswerDecisionSource).toBe("missing_teacher_judgement");
     expect(result.status).toBe("needs_review");
   });
+
+  it("treats an explicitly confirmed blank answer as resolved without process-point review", () => {
+    const result = calculateGrade({
+      id: "confirmed-blank-answer",
+      studentId: "S5",
+      fileName: "blank.jpg",
+      rubric: structuredClone(demoRubric),
+      evidence: { lines: [], finalAnswers: [], ambiguities: [] },
+      finalAnswerJudgements: [{
+        subquestionId: "Q1-1",
+        status: "missing",
+        answerPresence: "no_effective_answer",
+        evidenceLineIds: [],
+        studentAnswer: "",
+        referenceAnswer: "N=3mg",
+        reason: "未发现有效作答",
+        confidence: 0.99
+      }],
+      decisions: [],
+      modelName: "test",
+      durationMs: 10
+    });
+
+    expect(result.score).toBe(0);
+    expect(result.scoreResolved).toBe(true);
+    expect(result.status).toBe("completed");
+    expect(result.reviewReasons).toEqual([]);
+    expect(result.subquestions[0].processAuditSummary?.reviewRequired).toBe(0);
+    expect(result.subquestions[0].decisions.every((decision) => (
+      decision.status === "not_present"
+      && decision.requiresReview === false
+      && decision.decisionSource === "synthetic_missing"
+    ))).toBe(true);
+  });
 });
 
 describe("real grading regression 16", () => {
@@ -361,6 +423,7 @@ describe("real grading regression 16", () => {
     recognizedQuestionText: "16",
     version: 1,
     status: "locked",
+    questionType: "large",
     totalScore: 16,
     warnings: [],
     subquestions: [
@@ -498,7 +561,7 @@ describe("grading evidence and confidence safeguards", () => {
     expect(result.status).toBe("completed");
   });
 
-  it("keeps a low-confidence not-present model judgement unchanged", () => {
+  it("requires an absence audit before accepting a not-present model judgement", () => {
     const result = calculateGrade({
       id: "low-confidence-not-present", studentId: "S", fileName: "s.jpg", rubric: demoRubric,
       evidence: baseEvidence,
@@ -519,9 +582,10 @@ describe("grading evidence and confidence safeguards", () => {
 
     expect(result.subquestions[0].decisions[0].status).toBe("not_present");
     expect(result.subquestions[0].decisions[0].awardedScore).toBe(0);
-    expect(result.subquestions[0].decisions[0].requiresReview).toBe(false);
+    expect(result.subquestions[0].decisions[0].requiresReview).toBe(true);
+    expect(result.subquestions[0].decisions[0].reviewReason).toContain("缺失审验");
     expect(result.subquestions[0].maximumPossibleScore).toBe(result.subquestions[0].score);
-    expect(result.status).toBe("completed");
+    expect(result.status).toBe("needs_review");
   });
 
   it("applies a model-selected deduction without a local evidence veto", () => {
@@ -548,10 +612,37 @@ describe("grading evidence and confidence safeguards", () => {
     });
 
     expect(result.metrics.ruleCoverage).toBe(0);
-    expect(result.metrics.evidenceTraceability).toBe(0);
-    expect(result.metrics.autoDecisionRate).toBe(0);
+    // Synthetic placeholders are excluded from process-metric denominators;
+    // the missing decisions remain visible through needs_review/reviewReasons.
+    expect(result.metrics.evidenceTraceability).toBe(1);
+    expect(result.metrics.autoDecisionRate).toBe(1);
     expect(result.score).toBe(0);
     expect(result.maximumPossibleScore).toBe(0);
+  });
+
+  it("uses only executed process decisions for traceability and automatic-rate denominators", () => {
+    const sourceDecisions = decisions();
+    const result = calculateGrade({
+      id: "mixed-process-metrics",
+      studentId: "S",
+      fileName: "metrics.jpg",
+      rubric: demoRubric,
+      evidence: baseEvidence,
+      finalAnswerJudgements: [finalJudgement("incorrect")],
+      decisions: [
+        { ...sourceDecisions[0], decisionSource: "final_answer_authority" as const },
+        sourceDecisions[2]
+      ],
+      modelName: "test",
+      durationMs: 10
+    });
+
+    // P1 is a final-answer-authority row and P2 is a synthetic missing row;
+    // neither was an executed process audit. Only P3 belongs in these ratios.
+    expect(result.metrics.ruleCoverage).toBeCloseTo(1 / 3);
+    expect(result.metrics.evidenceTraceability).toBe(1);
+    expect(result.metrics.autoDecisionRate).toBe(1);
+    expect(result.status).toBe("needs_review");
   });
 
   it("returns a fixed zero when the final answer is missing and all six process points are unreadable", () => {
@@ -560,6 +651,7 @@ describe("grading evidence and confidence safeguards", () => {
       recognizedQuestionText: "求动摩擦因数",
       version: 1,
       status: "locked",
+      questionType: "large",
       totalScore: 6,
       warnings: [],
       subquestions: [{
@@ -626,11 +718,12 @@ describe("grading evidence and confidence safeguards", () => {
     expect(result.subquestions[0].decisions.every((decision) => decision.awardedScore === 0)).toBe(true);
     expect(result.subquestions[0].processAuditSummary).toMatchObject({ unreadable: 6, reviewRequired: 6 });
     expect(result.status).toBe("needs_review");
+    expect(result.scoreResolved).toBe(false);
   });
 
   it("treats absent or crossed-out work as not present without reserving points", () => {
     const crossedOutEvidence: AnswerEvidence = {
-      lines: [{ id: "L4", text: "N=3mg", status: "crossed_out", confidence: 0.99 }],
+      lines: [{ id: "L4", text: "N=3mg", region: [10, 10, 40, 20], status: "crossed_out", confidence: 0.99 }],
       finalAnswers: [],
       ambiguities: []
     };
@@ -666,7 +759,10 @@ describe("grading evidence and confidence safeguards", () => {
     expect(result.score).toBe(0);
     expect(result.maximumPossibleScore).toBe(0);
     expect(result.status).toBe("completed");
+    expect(result.scoreResolved).toBe(true);
     expect(result.subquestions[0].processAuditSummary).toMatchObject({ notPresent: 3, reviewRequired: 0 });
+    expect(result.metrics.evidenceTraceability).toBe(1);
+    expect(result.metrics.autoDecisionRate).toBe(1);
   });
 
   it("removes duplicate and crossed-out final answer references", () => {

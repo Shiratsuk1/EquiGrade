@@ -24,7 +24,7 @@ export interface PluginCapabilities {
   scoreInput: boolean;
   submit: boolean;
   next: boolean;
-  /** 当前答卷未批完时能否翻页跳过（如智学网"批完才能下一份"则不支持）。 */
+  /** 当前答卷未批完时能否翻页跳过（如目标网站"批完才能下一份"则不支持）。 */
   skip: boolean;
 }
 
@@ -61,7 +61,7 @@ export interface BrowserSessionHealth {
   encryptionAvailable: boolean;
   vaultCookieCount: number;
   restoredCookieCount: number;
-  liveZhixueCookieCount: number;
+  liveTargetCookieCount: number;
   persistentCookieCount: number;
   sessionCookieCount: number;
   cookieNames: string[];
@@ -288,6 +288,9 @@ export interface PipelineEvent extends Record<string, unknown> {
   message?: string;
   score?: number;
   maxScore?: number;
+  requiresReview?: boolean;
+  reviewCount?: number;
+  reviewReasons?: string[];
   segments?: Array<{
     id: string;
     title: string;

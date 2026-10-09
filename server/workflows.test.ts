@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
 import type { ModelConfigInput, Rubric } from "../shared/types.js";
 
@@ -18,7 +18,17 @@ vi.mock("./modelClient.js", () => ({
   }
 }));
 
+vi.mock("./paddleOcr.js", () => ({
+  runPaddleOcr: vi.fn()
+}));
+
+vi.mock("./responsesAgentGrading.js", () => ({
+  gradeLargeQuestionResponsesAgent: vi.fn()
+}));
+
 import { callStructured } from "./modelClient.js";
+import { runPaddleOcr } from "./paddleOcr.js";
+import { gradeLargeQuestionResponsesAgent } from "./responsesAgentGrading.js";
 import { rubricSchema } from "./schemas.js";
 import { gradeStudentAnswer, refineRubric, structureRubric } from "./workflows.js";
 
@@ -45,6 +55,7 @@ const rubric: Rubric = {
   recognizedQuestionText: "求结果",
   version: 1,
   status: "locked",
+  questionType: "large",
   totalScore: 2,
   warnings: [],
   subquestions: [{
@@ -59,6 +70,17 @@ const rubric: Rubric = {
     ],
     deductions: []
   }]
+};
+
+const directOcrAudit = {
+  provider: "paddleocr" as const,
+  model: "PaddleOCR-VL-1.6",
+  jobId: "direct-ocr-job",
+  rawJsonl: "{\"result\":{\"layoutParsingResults\":[]}}\n",
+  markdownText: "x=2",
+  imageWidth: 80,
+  imageHeight: 60,
+  durationMs: 12
 };
 
 const extractionResponse = {
@@ -93,48 +115,6 @@ async function createTestAnswerImage(): Promise<Buffer> {
       background: { r: 248, g: 248, b: 248 }
     }
   }).png().toBuffer();
-}
-
-function directVisionResponse(pointStatus: "satisfied" | "unreadable", contradictoryReview = false) {
-  return {
-    data: {
-      evidence: {
-        lines: [{ id: "L1", text: pointStatus === "unreadable" ? "x=?" : "x=2", region: [12, 10, 36, 20], status: pointStatus === "unreadable" ? "uncertain" : "active", confidence: pointStatus === "unreadable" ? 0.45 : 0.99, alternatives: [] }],
-        finalAnswers: [],
-        ambiguities: pointStatus === "unreadable" ? [{ lineId: "L1", reason: "数字被覆盖", scoreImpact: "possible" }] : []
-      },
-      finalAnswerJudgements: [{ subquestionId: "Q1", status: "missing", evidenceLineIds: [], studentAnswer: "", referenceAnswer: "x=2", reason: "未见明确最终答案", confidence: 0.95 }],
-      decisions: [
-        { subquestionId: "Q1", pointId: "P1", status: "not_present", evidenceLineIds: [], evidenceQuote: "", reason: "未见列式", confidence: 0.98, requiresReview: false, reviewReason: "" },
-        { subquestionId: "Q1", pointId: "P2", status: pointStatus, evidenceLineIds: ["L1"], evidenceQuote: pointStatus === "unreadable" ? "x=?" : "x=2", reason: pointStatus === "unreadable" ? "关键数字被覆盖" : "结果清楚", confidence: pointStatus === "unreadable" ? 0.45 : 0.99, requiresReview: pointStatus === "unreadable" || contradictoryReview, reviewReason: pointStatus === "unreadable" ? "需要局部复查" : contradictoryReview ? "下标较潦草" : "" }
-      ],
-      appliedDeductions: [],
-      teacherCommentary: commentaryResponse.data
-    },
-    durationMs: 20,
-    outputMode: "json_schema" as const
-  };
-}
-
-function directNumericResponse(studentAnswer = "x=2") {
-  return {
-    data: {
-      evidence: {
-        lines: [{ id: "L1", text: studentAnswer, region: [12, 10, 36, 20], status: "active", confidence: 0.99, alternatives: [] }],
-        finalAnswers: [{ subquestionId: "Q1", lineId: "L1", expression: studentAnswer, unit: "", confidence: 0.99 }],
-        ambiguities: []
-      },
-      finalAnswerJudgements: [{ subquestionId: "Q1", status: "correct", evidenceLineIds: ["L1"], studentAnswer, referenceAnswer: "x=2", reason: "最终答案正确", confidence: 0.99 }],
-      decisions: [
-        { subquestionId: "Q1", pointId: "P1", status: "satisfied", evidenceLineIds: ["L1"], evidenceQuote: studentAnswer, reason: "作答成立", confidence: 0.98, requiresReview: false, reviewReason: "" },
-        { subquestionId: "Q1", pointId: "P2", status: "satisfied", evidenceLineIds: ["L1"], evidenceQuote: studentAnswer, reason: "结果正确", confidence: 0.99, requiresReview: false, reviewReason: "" }
-      ],
-      appliedDeductions: [],
-      teacherCommentary: commentaryResponse.data
-    },
-    durationMs: 20,
-    outputMode: "json_schema" as const
-  };
 }
 
 describe("structureRubric final-answer policy", () => {
@@ -210,6 +190,31 @@ describe("structureRubric final-answer policy", () => {
       acceptedEquivalents: []
     });
   });
+
+  it("accepts both question types and rejects unknown values", () => {
+    expect(rubricSchema.parse({ ...rubric, questionType: "large" }).questionType).toBe("large");
+    expect(rubricSchema.parse({ ...rubric, questionType: "small" }).questionType).toBe("small");
+    expect(() => rubricSchema.parse({ ...rubric, questionType: "hybrid" })).toThrow();
+  });
+
+  it("uses the selected small-question policy and overwrites a model-supplied type", async () => {
+    vi.mocked(callStructured).mockResolvedValueOnce({
+      data: { ...rubric, questionType: "large", status: "draft" },
+      durationMs: 10,
+      outputMode: "json_schema"
+    });
+
+    const result = await structureRubric(config, {
+      questionText: "小题题目",
+      referenceText: "小题参考答案",
+      questionImages: [],
+      referenceImages: [],
+      questionType: "small"
+    });
+
+    expect(result.questionType).toBe("small");
+    expect(vi.mocked(callStructured).mock.calls[0]?.[1].system).toContain("小题评分标准结构化工具");
+  });
 });
 
 describe("refineRubric", () => {
@@ -273,6 +278,12 @@ describe("refineRubric", () => {
     vi.mocked(callStructured).mockResolvedValueOnce(response);
 
     await expect(refineRubric(config, rubric, "完善说明")).rejects.toThrow("评分点类型");
+  });
+
+  it("rejects a model response that changes the question type", async () => {
+    vi.mocked(callStructured).mockResolvedValueOnce(refinedResponse({ questionType: "small" }));
+
+    await expect(refineRubric(config, rubric, "完善说明")).rejects.toThrow("题型保存后不可修改");
   });
 });
 
@@ -448,262 +459,1007 @@ describe("gradeStudentAnswer call sequence", () => {
   });
 });
 
-describe("vision-direct unreadable local review", () => {
-  beforeEach(() => vi.mocked(callStructured).mockReset());
+describe("small-question OCR grading pipeline", () => {
+  const smallRubric: Rubric = { ...structuredClone(rubric), questionType: "small" };
+  const ocrAudit = {
+    provider: "paddleocr" as const,
+    model: "PaddleOCR-VL-1.6",
+    jobId: "ocr-job-1",
+    rawJsonl: '{"result":{"layoutParsingResults":[{"markdown":{"text":"x=2"}}]}}\n',
+    markdownText: "x=2",
+    imageWidth: 80,
+    imageHeight: 60,
+    layoutBlocks: [
+      { blockId: "block-00", pageIndex: 0, label: "text", score: 0.99, coordinate: [0, 0, 40, 24] as [number, number, number, number], polygonPoints: [], order: 0 }
+    ],
+    durationMs: 31
+  };
+  const reconstruction = {
+    lines: [{ id: "L1", text: "x=2", status: "active" as const, confidence: 0.99, region: [1, 2, 30, 12] as [number, number, number, number], alternatives: [] }],
+    ambiguities: [],
+    status: "clear" as const,
+    reviewReasons: []
+  };
 
-  it("uses exactly one model call when the direct result has no unreadable target", async () => {
-    vi.mocked(callStructured).mockResolvedValueOnce(directVisionResponse("satisfied"));
-
-    const { result } = await gradeStudentAnswer({
-      ...config,
-      gradingMode: "vision_direct",
-      reviewModel: "fast-review",
-      reviewApiKey: "review-secret"
-    }, {
-      id: "direct-readable", studentId: "S5", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: await createTestAnswerImage(), rubric
-    });
-
-    expect(callStructured).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(callStructured).mock.calls[0][1].schemaName).toBe("direct_vision_grading");
-    expect(vi.mocked(callStructured).mock.calls[0][1].system).toContain("不能从纯数字算式反推未写出的字母公式");
-    expect(vi.mocked(callStructured).mock.calls[0][1].system).toContain("每个 satisfied 的 evidenceQuote 必须逐字引用");
-    expect(result.subquestions[0].decisions[1].status).toBe("satisfied");
+  beforeEach(() => {
+    vi.mocked(callStructured).mockReset();
+    vi.mocked(runPaddleOcr).mockReset();
   });
 
-  it("uses one conditional second call and adopts a clear local-review decision", async () => {
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce(directVisionResponse("unreadable"))
-      .mockResolvedValueOnce({
-        data: {
-          reviews: [{ subquestionId: "Q1", pointId: "P2", status: "satisfied", evidenceLineIds: ["L1"], evidenceQuote: "x=2", reason: "局部放大后数字2清晰可见", confidence: 0.98, requiresReview: false }],
-          finalAnswers: []
-        },
-        durationMs: 9,
-        outputMode: "json_schema"
-      });
+  afterEach(() => vi.unstubAllEnvs());
 
-    const { result } = await gradeStudentAnswer({
-      ...config,
-      gradingMode: "vision_direct",
-      reviewModel: "fast-review",
-      reviewApiKey: "review-secret"
-    }, {
-      id: "direct-reviewed", studentId: "S6", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: await createTestAnswerImage(), rubric
+  function smallGradeResponse(status: "correct" | "incorrect" = "correct", studentAnswer = "x=2") {
+    return {
+      data: {
+        finalAnswerJudgements: [{ subquestionId: "Q1", status, evidenceLineIds: ["L1"], studentAnswer, referenceAnswer: "x=2", reason: status === "correct" ? "最终答案正确" : "最终答案错误", confidence: 0.98 }],
+        decisions: [
+          { subquestionId: "Q1", pointId: "P1", status: "satisfied" as const, evidenceLineIds: ["L1"], evidenceQuote: "x=1+1", reason: "公式正确", confidence: 0.98, requiresReview: false, reviewReason: "" },
+          { subquestionId: "Q1", pointId: "P2", status: "not_satisfied" as const, evidenceLineIds: ["L1"], evidenceQuote: studentAnswer, reason: status === "correct" ? "过程未明确展示" : "结果错误", confidence: 0.98, requiresReview: false, reviewReason: "" }
+        ],
+        appliedDeductions: [] as Array<{
+          subquestionId: string;
+          ruleId: string;
+          evidenceLineIds: string[];
+          reason: string;
+          confidence: number;
+        }>,
+        teacherCommentary: commentaryResponse.data,
+        totalScore: 999
+      },
+      durationMs: 12,
+      outputMode: "json_schema" as const
+    };
+  }
+
+  function smallArbitrationResponse(overrides = false, confirmedStatus: "correct" | "incorrect" | "uncertain" = "incorrect", evidence = "x=2") {
+    return {
+      data: {
+        arbitrations: [{
+          subquestionId: "Q1",
+          confirmedStatus,
+          studentHandwrittenEvidence: evidence,
+          overridesInitialJudgement: overrides,
+          reason: overrides ? "原图复查证实学生写了正确答案" : "原图复查证实学生写错",
+          confidence: 0.98
+        }]
+      },
+      durationMs: 8,
+      outputMode: "json_schema" as const
+    };
+  }
+
+  it("always uses OCR, reconstruction, and scoring without the global gradingMode", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(smallGradeResponse());
+
+    const answerBytes = Buffer.from("small-answer-image");
+    const questionImage = { mimeType: "image/png", base64: "question-image", label: "[题目图片]" };
+    const referenceImage = { mimeType: "image/png", base64: "reference-image", label: "[参考答案图片]" };
+    const { result } = await gradeStudentAnswer({ ...config, gradingMode: "vision_direct" }, {
+      id: "small-correct", studentId: "S-small", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: answerBytes, rubric: smallRubric,
+      questionText: "CONFIDENTIAL_QUESTION_TEXT", referenceText: "CONFIDENTIAL_REFERENCE_TEXT",
+      questionImages: [questionImage], referenceImages: [referenceImage]
     });
 
+    expect(runPaddleOcr).toHaveBeenCalledTimes(1);
     expect(callStructured).toHaveBeenCalledTimes(2);
     expect(vi.mocked(callStructured).mock.calls.map((call) => call[1].schemaName)).toEqual([
-      "direct_vision_grading",
-      "unreadable_local_review"
+      "student_answer_reconstruction",
+      "small_question_grading"
     ]);
-    expect(vi.mocked(callStructured).mock.calls[1][1].images).toHaveLength(2);
-    expect(vi.mocked(callStructured).mock.calls[1][1].system).toContain("只有具体数字组成的算式");
-    expect(vi.mocked(callStructured).mock.calls[1][1].prompt).toContain('"type":"result"');
-    expect(result.subquestions[0].decisions[1]).toMatchObject({
-      status: "satisfied",
-      requiresReview: false,
-      decisionSource: "unreadable_local_review",
-      awardedScore: 1
-    });
+    const reconstructionRequest = vi.mocked(callStructured).mock.calls[0][1];
+    expect(reconstructionRequest.system).not.toContain("CONFIDENTIAL_QUESTION_TEXT");
+    expect(reconstructionRequest.system).not.toContain("CONFIDENTIAL_REFERENCE_TEXT");
+    expect(reconstructionRequest.prompt).not.toContain("CONFIDENTIAL_QUESTION_TEXT");
+    expect(reconstructionRequest.prompt).not.toContain("CONFIDENTIAL_REFERENCE_TEXT");
+    expect(reconstructionRequest.prompt).not.toContain(JSON.stringify(smallRubric));
+    expect(reconstructionRequest.images).toHaveLength(1);
+    expect(reconstructionRequest.images?.[0]?.base64).toBe(answerBytes.toString("base64"));
+    expect(reconstructionRequest.images).not.toEqual(expect.arrayContaining([questionImage, referenceImage]));
+    const scoringRequest = vi.mocked(callStructured).mock.calls[1][1];
+    expect(scoringRequest.model).toBe(config.visionModel);
+    expect(scoringRequest.prompt).toContain("CONFIDENTIAL_QUESTION_TEXT");
+    expect(scoringRequest.prompt).toContain("CONFIDENTIAL_REFERENCE_TEXT");
+    expect(scoringRequest.images).toEqual([questionImage, referenceImage]);
+    expect(scoringRequest.images ?? []).not.toEqual(expect.arrayContaining([expect.objectContaining({ base64: answerBytes.toString("base64") })]));
+    expect(JSON.stringify(scoringRequest)).not.toContain(answerBytes.toString("base64"));
+    expect(result.score).toBe(2);
     expect(result.status).toBe("completed");
+    expect(result.gradingPipeline).toBe("small_question_ocr");
+    expect(result.ocrAudit).toEqual(ocrAudit);
   });
 
-  it("locally rechecks a clear decision that also carries a contradictory review flag", async () => {
+  it("preprocesses the student image before OCR and sends only the processed result downstream", async () => {
+    vi.stubEnv("HENGZHUN_STUDENT_IMAGE_PREPROCESSING", "dual");
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
     vi.mocked(callStructured)
-      .mockResolvedValueOnce(directVisionResponse("satisfied", true))
+      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(smallGradeResponse());
+
+    const answerBytes = await sharp({
+      create: {
+        width: 120,
+        height: 80,
+        channels: 3,
+        background: { r: 245, g: 245, b: 245 }
+      }
+    }).composite([{
+      input: Buffer.from(`<svg width="120" height="80"><path d="M 12 26 L 108 26 M 12 52 L 86 52" stroke="black" stroke-width="3" fill="none"/></svg>`)
+    }]).png().toBuffer();
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-preprocessed", studentId: "S-preprocessed", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: answerBytes, rubric: smallRubric
+    });
+
+    const paddleInput = vi.mocked(runPaddleOcr).mock.calls[0]?.[0];
+    expect(paddleInput?.mimeType).toBe("image/png");
+    expect(paddleInput?.imageBuffer).toBeInstanceOf(Buffer);
+    expect(Buffer.compare(paddleInput?.imageBuffer ?? Buffer.alloc(0), answerBytes)).not.toBe(0);
+
+    const reconstructionRequest = vi.mocked(callStructured).mock.calls[0]?.[1];
+    expect(reconstructionRequest?.images).toHaveLength(1);
+    expect(reconstructionRequest?.images?.[0]?.label).toContain("本地预处理结果");
+    expect(reconstructionRequest?.images?.[0]?.base64).not.toBe(answerBytes.toString("base64"));
+    expect(result.imagePreprocessAudit).toMatchObject({ mode: "enhanced", applied: true, geometryPreserved: true });
+  });
+
+  it("keeps partial credit for an incorrect final answer and does not trust a model total", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(smallGradeResponse("incorrect", "x=3"))
+      .mockResolvedValueOnce(smallArbitrationResponse(false, "incorrect", "x=3"));
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-partial", studentId: "S-partial", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    });
+
+    expect(result.score).toBe(1);
+    expect(result.maxScore).toBe(2);
+    expect(result.subquestions[0].finalAnswerStatus).toBe("incorrect");
+  });
+
+  it("upgrades an incorrect final answer to correct when deterministic physics equivalence succeeds", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(smallGradeResponse("incorrect", "x=2.0"));
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-equiv", studentId: "S-equiv", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    });
+
+    expect(result.score).toBe(2);
+    expect(result.subquestions[0].finalAnswerStatus).toBe("correct");
+    expect(result.subquestions[0].finalAnswerDecisionSource).toBe("local_numeric_review");
+    expect(callStructured).toHaveBeenCalledTimes(2);
+  });
+
+  it("overrides incorrect to correct and grants full credit when visual dispute arbitration finds valid handwriting", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(smallGradeResponse("incorrect", "x=3"))
+      .mockResolvedValueOnce(smallArbitrationResponse(true, "correct", "x=2"));
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-arbitration-override", studentId: "S-arb-override", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    });
+
+    expect(callStructured).toHaveBeenCalledTimes(3);
+    expect(result.score).toBe(2);
+    expect(result.subquestions[0].finalAnswerStatus).toBe("correct");
+    expect(result.subquestions[0].finalAnswerDecisionSource).toBe("visual_local_review");
+    expect(result.subquestions[0].finalAnswerReason).toContain("死刑复核反查原图纠正为正确");
+  });
+
+  it("forces review for uncertain reconstruction even when scoring returns correct", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    vi.mocked(callStructured)
       .mockResolvedValueOnce({
         data: {
-          reviews: [{ subquestionId: "Q1", pointId: "P2", status: "satisfied", evidenceLineIds: ["L1"], evidenceQuote: "x=2", reason: "局部放大后下标清晰，结果正确", confidence: 0.98, requiresReview: false }],
-          finalAnswers: []
+          ...reconstruction,
+          lines: [{ ...reconstruction.lines[0], text: "x=?", status: "uncertain", confidence: 0.4 }],
+          ambiguities: [{ lineId: "L1", reason: "关键数字被涂改覆盖", scoreImpact: "possible" }],
+          status: "review",
+          reviewReasons: ["关键数字无法确认"]
         },
-        durationMs: 9,
+        durationMs: 10,
         outputMode: "json_schema"
-      });
+      })
+      .mockResolvedValueOnce(smallGradeResponse());
 
-    const { result } = await gradeStudentAnswer({
-      ...config,
-      gradingMode: "vision_direct",
-      reviewModel: "fast-review",
-      reviewApiKey: "review-secret"
-    }, {
-      id: "direct-conflicting-review", studentId: "S6-conflict", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: await createTestAnswerImage(), rubric
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-review", studentId: "S-review", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
     });
 
     expect(callStructured).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(callStructured).mock.calls[1][1].schemaName).toBe("unreadable_local_review");
-    expect(vi.mocked(callStructured).mock.calls[1][1].prompt).toContain("明确状态 satisfied 和人工复核标记");
-    expect(result.subquestions[0].decisions[1]).toMatchObject({
-      status: "satisfied",
-      requiresReview: false,
-      decisionSource: "unreadable_local_review",
-      awardedScore: 1
-    });
-    expect(result.status).toBe("completed");
-  });
-
-  it("keeps the result in mandatory review when the second call is still unreadable", async () => {
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce(directVisionResponse("unreadable"))
-      .mockResolvedValueOnce({
-        data: {
-          reviews: [{ subquestionId: "Q1", pointId: "P2", status: "unreadable", evidenceLineIds: ["L1"], evidenceQuote: "x=?", reason: "放大后关键数字仍被涂改覆盖", confidence: 0.7, requiresReview: true }],
-          finalAnswers: []
-        },
-        durationMs: 9,
-        outputMode: "json_schema"
-      });
-
-    const { result } = await gradeStudentAnswer({
-      ...config,
-      gradingMode: "vision_direct",
-      reviewModel: "fast-review",
-      reviewApiKey: "review-secret",
-      unreadableReviewThreshold: 1
-    }, {
-      id: "direct-still-unreadable", studentId: "S7", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: await createTestAnswerImage(), rubric
-    });
-
-    expect(callStructured).toHaveBeenCalledTimes(2);
-    expect(result.subquestions[0].decisions[1]).toMatchObject({
-      status: "unreadable",
-      requiresReview: true,
-      decisionSource: "unreadable_local_review",
-      awardedScore: 0
-    });
     expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join(" ")).toContain("关键数字无法确认");
   });
 
-  it("does not reuse the teacher model when an unreadable target has no independent reviewer", async () => {
-    vi.mocked(callStructured).mockResolvedValueOnce(directVisionResponse("unreadable"));
+  it("forces review when the scoring response omits points or cites invalid evidence", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    const invalidGrade = smallGradeResponse();
+    invalidGrade.data.finalAnswerJudgements[0].evidenceLineIds = ["L1", "L1", "missing-line"];
+    invalidGrade.data.decisions = [invalidGrade.data.decisions[0]];
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(invalidGrade);
 
-    const { result } = await gradeStudentAnswer({ ...config, gradingMode: "vision_direct", unreadableReviewThreshold: 1 }, {
-      id: "direct-no-reviewer", studentId: "S7-no-reviewer", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: await createTestAnswerImage(), rubric
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-invalid-evidence", studentId: "S-invalid", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
     });
 
+    expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join(" ")).toContain("引用了不存在的作答还原行");
+    expect(result.reviewReasons.join(" ")).toContain("遗漏评分点 Q1:P2");
+  });
+
+  it("forces review when a referenced reconstruction region is outside the OCR image", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    const invalidReconstruction = {
+      ...reconstruction,
+      lines: [{ ...reconstruction.lines[0], region: [75, 55, 10, 10] as [number, number, number, number] }]
+    };
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: invalidReconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(smallGradeResponse());
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-region-outside", studentId: "S-region-outside", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join(" ")).toContain("区域超出PaddleOCR图像范围");
+  });
+
+  it.each([
+    ["missing", undefined, "缺少有限的区域坐标"],
+    ["non-positive", [1, 2, 0, 12] as [number, number, number, number], "区域宽高必须为正数"]
+  ])("forces review when a referenced reconstruction region is %s", async (_label, region, expectedReason) => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    const invalidReconstruction = {
+      ...reconstruction,
+      lines: [{ ...reconstruction.lines[0], region }]
+    };
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: invalidReconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(smallGradeResponse());
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: `small-region-${_label}`, studentId: `S-region-${_label}`, fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join(" ")).toContain(expectedReason);
+  });
+
+  it("forces review when a referenced reconstruction region cannot bind an OCR block", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    const unboundReconstruction = {
+      ...reconstruction,
+      lines: [{ ...reconstruction.lines[0], region: [55, 40, 15, 15] as [number, number, number, number] }]
+    };
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: unboundReconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(smallGradeResponse());
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-region-unbound", studentId: "S-region-unbound", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join(" ")).toContain("区域无法与任何PaddleOCR layout block合理相交");
+  });
+
+  it("forces review for low-confidence evidence even when the reconstruction says clear", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    const lowConfidenceReconstruction = {
+      ...reconstruction,
+      lines: [{ ...reconstruction.lines[0], confidence: 0.4 }]
+    };
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: lowConfidenceReconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(smallGradeResponse());
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-low-confidence", studentId: "S-low-confidence", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join(" ")).toContain("证据行置信度低于复核阈值");
+  });
+
+  it("forces review when score-bearing decisions have no locatable student evidence", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    const noEvidenceGrade = smallGradeResponse();
+    noEvidenceGrade.data.finalAnswerJudgements[0].evidenceLineIds = [];
+    noEvidenceGrade.data.decisions = noEvidenceGrade.data.decisions.map((decision) => ({ ...decision, evidenceLineIds: [] }));
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(noEvidenceGrade);
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-score-without-evidence", studentId: "S-score-without-evidence", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join(" ")).toContain("没有任何可定位学生证据");
+    expect(result.reviewReasons.join(" ")).toContain("Q1:P1评分点已计入1分");
+  });
+
+  it("forces review when a certain deduction has no locatable student evidence", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    const deductionRubric: Rubric = {
+      ...structuredClone(smallRubric),
+      subquestions: smallRubric.subquestions.map((subquestion) => ({
+        ...structuredClone(subquestion),
+        deductions: [{ id: "D1", reason: "错误结论", deduct: 1, exclusiveGroup: "answer" }]
+      }))
+    };
+    const noEvidenceDeduction = smallGradeResponse("incorrect", "x=3");
+    noEvidenceDeduction.data.appliedDeductions = [{
+      subquestionId: "Q1",
+      ruleId: "D1",
+      evidenceLineIds: [],
+      reason: "错误结论",
+      confidence: 0.99
+    }];
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(noEvidenceDeduction);
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-deduction-without-evidence", studentId: "S-deduction-without-evidence", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: deductionRubric
+    });
+
+    expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join(" ")).toContain("Q1:D1扣分已生效但没有任何可定位学生证据");
+  });
+
+  it("does not call GPT when PaddleOCR fails", async () => {
+    vi.mocked(runPaddleOcr).mockRejectedValueOnce(new Error("PaddleOCR 网络失败"));
+
+    await expect(gradeStudentAnswer(config, {
+      id: "small-ocr-failed", studentId: "S-failed", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    })).rejects.toThrow("PaddleOCR 网络失败");
+    expect(callStructured).not.toHaveBeenCalled();
+  });
+
+  it("does not call scoring when reconstruction fails", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    vi.mocked(callStructured).mockRejectedValueOnce(new Error("还原 JSON 无效"));
+
+    await expect(gradeStudentAnswer(config, {
+      id: "small-reconstruction-failed", studentId: "S-failed", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    })).rejects.toThrow("还原 JSON 无效");
     expect(callStructured).toHaveBeenCalledTimes(1);
-    expect(result.subquestions[0].decisions[1]).toMatchObject({
-      status: "unreadable",
-      awardedScore: 0
+  });
+
+  it("does not return a grading result when scoring fails", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockRejectedValueOnce(new Error("小题评分服务失败"));
+
+    await expect(gradeStudentAnswer(config, {
+      id: "small-scoring-failed", studentId: "S-failed", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: Buffer.from("image"), rubric: smallRubric
+    })).rejects.toThrow("小题评分服务失败");
+    expect(callStructured).toHaveBeenCalledTimes(2);
+  });
+
+  it("reruns the fixed small-question chain for a regrade and keeps lineage metadata", async () => {
+    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
+      .mockResolvedValueOnce(smallGradeResponse());
+
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-regrade-v2",
+      studentId: "S-regrade",
+      fileName: "answer.png",
+      mimeType: "image/png",
+      imageBuffer: Buffer.from("image"),
+      rubric: smallRubric,
+      previousResultId: "small-regrade-v1",
+      regradedAt: "2026-08-28T12:00:00.000Z",
+      regradeReason: "重新核对小题识别"
     });
-    expect(result.status).toBe("needs_review");
+
+    expect(runPaddleOcr).toHaveBeenCalledTimes(1);
+    expect(result.previousResultId).toBe("small-regrade-v1");
+    expect(result.regradedAt).toBe("2026-08-28T12:00:00.000Z");
+    expect(result.regradeReason).toBe("重新核对小题识别");
+    expect(result.ocrAudit?.jobId).toBe(ocrAudit.jobId);
   });
 });
 
-describe("vision-direct local numeric answer review", () => {
-  beforeEach(() => vi.mocked(callStructured).mockReset());
+describe("large-question staged answer triage and conditional reviews", () => {
+  const stagedRubric: Rubric = {
+    ...structuredClone(rubric),
+    title: "物理大题首轮答案核验测试",
+    totalScore: 3,
+    subquestions: [{
+      ...structuredClone(rubric.subquestions[0]),
+      id: "Q1",
+      title: "（1）木板速度",
+      maxScore: 3,
+      finalAnswers: [{ expression: "v_1=\\frac{\\sqrt{10}}5", unit: "m/s" }],
+      scorePoints: [
+        { id: "P1", title: "受力关系", description: "写出受力关系", score: 1, type: "formula", expected: "f=\\mu mg" },
+        { id: "P2", title: "加速度关系", description: "写出加速度关系", score: 1, type: "formula", expected: "a=\\mu g" },
+        { id: "P3", title: "最终数值", description: "读出最终数值", score: 1, type: "result", expected: "5" }
+      ],
+      deductions: []
+    }]
+  };
 
-  it("keeps the teacher decision when the fast review model reads the same number", async () => {
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce(directNumericResponse("x=2"))
-      .mockResolvedValueOnce({
-        data: {
-          reviews: [{
-            subquestionId: "Q1",
-            observedAnswer: "x=2",
-            numericTokens: ["2"],
-            status: "readable",
-            confidence: 0.98,
-            reason: "局部数字清晰"
-          }]
-        },
-        durationMs: 7,
-        outputMode: "json_schema"
-      });
+  const expectedFinalAnswer = "v_1=\\frac{\\sqrt{10}}5 m/s";
+  const wrongFinalAnswer = "v_1=\\frac{\\sqrt{10}}3 m/s";
+  const stagedConfig: ModelConfigInput = {
+    ...config,
+    gradingMode: "vision_direct",
+    reviewModel: "review-vision",
+    reviewApiKey: "review-key",
+    reviewBaseUrl: "https://review.example.test/v1"
+  };
 
-    const { result } = await gradeStudentAnswer({
-      ...config,
-      gradingMode: "vision_direct",
-      reviewModel: "fast-review",
-      reviewBaseUrl: "https://review.example/v1",
-      reviewApiKey: "review-secret",
-      reviewReasoningEffort: "low"
-    }, {
-      id: "numeric-confirmed", studentId: "S8", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: await createTestAnswerImage(), rubric
-    });
+  function bboxOcrAudit() {
+    return {
+      ...directOcrAudit,
+      markdownText: "OCR block-00: 受力关系；OCR block-01: v₁=√10/3 m/s",
+      layoutBlocks: [
+        { blockId: "block-00", pageIndex: 0, label: "inline_formula", score: 0.93, coordinate: [5, 5, 20, 20] as [number, number, number, number], polygonPoints: [[5, 5], [20, 5], [20, 20], [5, 20]] as Array<[number, number]>, order: 0 },
+        { blockId: "block-01", pageIndex: 0, label: "inline_formula", score: 0.92, coordinate: [25, 10, 50, 25] as [number, number, number, number], polygonPoints: [[25, 10], [50, 10], [50, 25], [25, 25]] as Array<[number, number]>, order: 1 }
+      ]
+    };
+  }
 
-    expect(callStructured).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(callStructured).mock.calls[1][1]).toMatchObject({
-      schemaName: "local_numeric_answer_review",
-      model: "fast-review",
-      reasoningEffort: "low"
+  function triageResponse(
+    status: "correct" | "incorrect" | "missing" | "uncertain",
+    studentAnswer: string,
+    blockIds = ["block-01"],
+    confidence = 0.96,
+    transcriptionBlockIds = ["block-00", "block-01"]
+  ) {
+    return {
+      data: {
+        answers: [{
+          subquestionId: "Q1",
+          blockIds,
+          status,
+          studentAnswer,
+          confidence,
+          reason: status === "correct" ? "最终答案与评分标准一致" : "首轮读数需要独立核对"
+        }],
+        transcription: {
+          lines: transcriptionBlockIds.map((blockId) => blockId === "block-00"
+            ? { blockId, text: "受力关系", latex: "", status: "active" as const, confidence: 0.93, alternatives: [] }
+            : { blockId, text: "v₁=√10/3 m/s", latex: "v_1=\\frac{\\sqrt{10}}3\\,m/s", status: "active" as const, confidence: 0.92, alternatives: [] })
+        }
+      },
+      durationMs: 20,
+      outputMode: "json_schema" as const
+    };
+  }
+
+  function localReviewResponse(
+    result: string,
+    certainty: "clear" | "uncertain" | "insufficient_visual_evidence" = "clear"
+  ) {
+    return {
+      data: {
+        reviews: [{
+          review_id: "auto-final-answer-Q1",
+          result,
+          certainty,
+          reason: certainty === "clear" ? "局部原图已确认" : "局部原图仍无法可靠区分"
+        }]
+      },
+      durationMs: 9,
+      outputMode: "json_schema" as const
+    };
+  }
+
+  function pointReviewResponse(status: "not_present" | "unreadable" = "not_present") {
+    return {
+      data: {
+        reviews: [{
+          subquestionId: "Q1",
+          decisions: stagedRubric.subquestions[0].scorePoints.map((point) => ({
+            pointId: point.id,
+            status,
+            evidenceBlockIds: status === "unreadable" ? ["block-01"] : ["block-00"],
+            evidenceQuote: "",
+            reason: status === "unreadable" ? "局部笔迹无法可靠辨认" : "已在整页图逐个检查所有区块，未发现相关作答",
+            confidence: status === "unreadable" ? 0.35 : 0.9
+          })),
+          appliedDeductions: []
+        }]
+      },
+      durationMs: 11,
+      outputMode: "json_schema" as const
+    };
+  }
+
+  function wholePagePointReviewResponse() {
+    return {
+      data: {
+        reviews: [{
+          subquestionId: "Q1",
+          decisions: stagedRubric.subquestions[0].scorePoints.map((point) => ({
+            pointId: point.id,
+            status: "satisfied" as const,
+            evidenceBlockIds: ["block-00"],
+            evidenceQuote: point.id === "P1" ? "f=μmg" : point.id === "P2" ? "a=μg" : "v₁=√10/5 m/s",
+            reason: "整页图中找到实际卷面证据",
+            confidence: 0.9
+          })),
+          appliedDeductions: []
+        }]
+      },
+      durationMs: 11,
+      outputMode: "json_schema" as const
+    };
+  }
+
+  function installStagedResponses(options: {
+    triage: ReturnType<typeof triageResponse>;
+    local?: ReturnType<typeof localReviewResponse>;
+    point?: ReturnType<typeof pointReviewResponse> | ReturnType<typeof wholePagePointReviewResponse>;
+    pointError?: string;
+  }) {
+    vi.mocked(callStructured).mockImplementation(async (_modelConfig, request) => {
+      let response: {
+        data: unknown;
+        durationMs: number;
+        outputMode: string;
+      };
+      if (request.schemaName === "large_question_answer_triage") {
+        response = options.triage;
+      } else if (request.schemaName === "direct_visual_review") {
+        if (!options.local) throw new Error("测试未配置局部视觉复核结果");
+        response = options.local;
+      } else if (request.schemaName === "large_question_point_review") {
+        if (options.pointError) throw new Error(options.pointError);
+        if (!options.point) throw new Error("测试未配置小分审验结果");
+        response = options.point;
+      } else {
+        throw new Error("意外的模型 schema：" + request.schemaName);
+      }
+      return {
+        data: request.validate ? request.validate(response.data) : response.data,
+        durationMs: response.durationMs,
+        outputMode: response.outputMode
+      };
     });
-    expect(vi.mocked(callStructured).mock.calls[1][0]).toMatchObject({
-      baseUrl: "https://review.example/v1",
-      apiKey: "review-secret"
+  }
+
+  async function runCase(id: string, overrides: Partial<ModelConfigInput> = {}, rubricOverride: Rubric = stagedRubric) {
+    return gradeStudentAnswer({ ...stagedConfig, ...overrides }, {
+      id,
+      studentId: "S-" + id,
+      fileName: "answer.png",
+      mimeType: "image/png",
+      imageBuffer: await createTestAnswerImage(),
+      rubric: rubricOverride
     });
-    expect(vi.mocked(callStructured).mock.calls[1][0].apiKey).not.toBe(config.apiKey);
+  }
+
+  beforeEach(() => {
+    vi.mocked(callStructured).mockReset();
+    vi.mocked(runPaddleOcr).mockReset().mockResolvedValue(bboxOcrAudit());
+  });
+
+  it("清晰正确时只调用一次首轮教师模型，并直接给满分", async () => {
+    installStagedResponses({ triage: triageResponse("correct", expectedFinalAnswer) });
+
+    const { result, artifactSource } = await runCase("staged-clear-correct");
+
+    expect(runPaddleOcr).toHaveBeenCalledTimes(1);
+    expect(callStructured).toHaveBeenCalledTimes(1);
+    const request = vi.mocked(callStructured).mock.calls[0][1];
+    expect(request.schemaName).toBe("large_question_answer_triage");
+    expect(request.prompt).toContain("transcription.lines 恰好逐个覆盖");
+    expect(request.prompt).not.toContain("不要输出 transcription");
+    expect(request.prompt).toContain("block-00");
+    expect(result.score).toBe(3);
+    expect(result.status).toBe("completed");
+    expect(artifactSource?.subquestionCrops).toBeDefined();
+    expect(artifactSource?.subquestionCrops?.length).toBe(1);
+    expect(artifactSource?.subquestionCrops?.[0]?.fileName).toContain("subquestion-Q1-crop.webp");
     expect(result.subquestions[0]).toMatchObject({
+      score: 3,
+      maxScore: 3,
       finalAnswerStatus: "correct",
-      finalAnswerDecisionSource: "teacher_model",
-      score: 2
+      finalAnswerDecisionSource: "teacher_model"
     });
+    expect(result.subquestions[0].decisions.every((decision) => decision.decisionSource === "final_answer_authority")).toBe(true);
+    expect(result.directVisualReviewAudit).toMatchObject({
+      reviewRequired: false,
+      reviewItems: [],
+      results: [],
+      initialScore: 3,
+      finalScore: 3
+    });
+    expect(result.ocrTranscription).toMatchObject({
+      blockCount: 2,
+      verifiedBlockCount: 2,
+      missingBlockIds: []
+    });
+  });
+
+  it("作用主体反转导致的功的符号差异不会直接落为错误", async () => {
+    const signRubric: Rubric = {
+      ...structuredClone(stagedRubric),
+      subquestions: [{
+        ...structuredClone(stagedRubric.subquestions[0]),
+        finalAnswers: [{
+          expression: "W=-10",
+          unit: "J",
+          signPolicy: "role_reversal",
+          subject: "外力对系统做功"
+        }]
+      }]
+    };
+    installStagedResponses({
+      triage: triageResponse("incorrect", "系统对外做功10J"),
+      local: localReviewResponse("系统对外做功10J"),
+      point: pointReviewResponse()
+    });
+
+    const { result } = await runCase("staged-role-reversal-sign", {}, signRubric);
+
+    expect(result.score).toBe(3);
+    expect(result.subquestions[0].finalAnswerStatus).toBe("correct");
+    expect(result.reviewReasons.join("\n")).toContain("符号约定");
+  });
+
+  it("缓存 OCR 回放走完整大题链路但不重新请求 PaddleOCR", async () => {
+    installStagedResponses({ triage: triageResponse("correct", expectedFinalAnswer) });
+    const replayAudit = bboxOcrAudit();
+
+    const { result } = await gradeStudentAnswer({ ...stagedConfig }, {
+      id: "staged-cached-ocr",
+      studentId: "S-staged-cached-ocr",
+      fileName: "answer.png",
+      mimeType: "image/png",
+      imageBuffer: await createTestAnswerImage(),
+      rubric: stagedRubric,
+      ocrAudit: replayAudit
+    });
+
+    expect(runPaddleOcr).not.toHaveBeenCalled();
+    expect(result.ocrAudit).toMatchObject({ source: "cached_replay", jobId: replayAudit.jobId });
+    expect(result.score).toBe(3);
     expect(result.status).toBe("completed");
   });
 
-  it("blocks automatic release when the review model reads a conflicting number", async () => {
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce(directNumericResponse("x=2"))
-      .mockResolvedValueOnce({
-        data: {
-          reviews: [{
-            subquestionId: "Q1",
-            observedAnswer: "x=3",
-            numericTokens: ["3"],
-            status: "readable",
-            confidence: 0.97,
-            reason: "局部数字清晰"
-          }]
-        },
-        durationMs: 6,
-        outputMode: "json_schema"
-      });
-
-    const { result } = await gradeStudentAnswer({
-      ...config,
-      gradingMode: "vision_direct",
-      reviewModel: "fast-review",
-      reviewBaseUrl: "https://review.example/v1",
-      reviewApiKey: "review-secret",
-      reviewReasoningEffort: "low"
-    }, {
-      id: "numeric-conflict", studentId: "S9", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: await createTestAnswerImage(), rubric
+  it("首轮转录漏掉 OCR 区块时保留分数但标记转录复核", async () => {
+    installStagedResponses({
+      triage: triageResponse("correct", expectedFinalAnswer, ["block-01"], 0.96, ["block-01"])
     });
 
-    expect(result.subquestions[0]).toMatchObject({
-      finalAnswerStatus: "uncertain",
-      finalAnswerDecisionSource: "local_numeric_review"
+    const { result } = await runCase("staged-incomplete-transcription");
+
+    expect(result.ocrTranscription).toMatchObject({
+      blockCount: 2,
+      verifiedBlockCount: 1,
+      missingBlockIds: ["block-00"]
     });
-    expect(result.subquestions[0].finalAnswerReason).toContain("教师模型与局部审验模型读取冲突");
-    expect(result.reviewReasons.join("\n")).toContain("局部审验结果冲突或无法确认");
+    expect(result.score).toBe(3);
     expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join("\n")).toContain("教师模型未返回 1 个 OCR 区块的转录");
   });
 
-  it("never falls back to the teacher API key when review credentials are missing", async () => {
-    vi.mocked(callStructured).mockResolvedValueOnce(directNumericResponse("x=2"));
-
-    const { result } = await gradeStudentAnswer({
-      ...config,
-      gradingMode: "vision_direct",
-      reviewModel: "fast-review",
-      reviewApiKey: ""
-    }, {
-      id: "numeric-missing-key", studentId: "S10", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: await createTestAnswerImage(), rubric
+  it("首轮判错时并行执行局部最终答案复核和小分审验，并可纠正根式分式误读", async () => {
+    installStagedResponses({
+      triage: triageResponse("incorrect", wrongFinalAnswer),
+      local: localReviewResponse(expectedFinalAnswer),
+      point: pointReviewResponse()
     });
+
+    const { result } = await runCase("staged-wrong-corrected");
+
+    expect(callStructured).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(callStructured).mock.calls.map((call) => call[1].schemaName).sort()).toEqual([
+      "direct_visual_review",
+      "large_question_answer_triage",
+      "large_question_point_review"
+    ].sort());
+    const localRequest = vi.mocked(callStructured).mock.calls.find((call) => call[1].schemaName === "direct_visual_review")?.[1];
+    const pointRequest = vi.mocked(callStructured).mock.calls.find((call) => call[1].schemaName === "large_question_point_review")?.[1];
+    expect(localRequest?.images).toHaveLength(3);
+    expect(localRequest?.images?.[0]?.label).toContain("block-01");
+    expect(localRequest?.images?.[1]?.label).toContain("bbox定位索引图");
+    expect(localRequest?.prompt).toContain("候选集合");
+    expect(localRequest?.prompt).not.toContain("score_effect");
+    expect(localRequest?.prompt).not.toContain("maxScore");
+    expect(pointRequest?.prompt).toContain("P1");
+    expect(pointRequest?.system).toContain("不要重新判定最终答案");
+    expect(pointRequest?.prompt).toContain("评分标准");
+    expect(result.score).toBe(3);
+    expect(result.status).toBe("completed");
+    expect(result.directVisualReviewAudit).toMatchObject({
+      reviewRequired: true,
+      reviewItems: [{ reviewId: "auto-final-answer-Q1", blockId: "block-01" }],
+      results: [{ reviewId: "auto-final-answer-Q1", result: expectedFinalAnswer, certainty: "clear" }],
+      initialScore: 0,
+      finalScore: 3
+    });
+    expect(result.subquestions[0]).toMatchObject({
+      score: 3,
+      finalAnswerStatus: "correct",
+      finalAnswerDecisionSource: "visual_local_review",
+      studentFinalAnswer: expectedFinalAnswer
+    });
+    expect(result.subquestions[0].finalAnswerReason).toBe(
+      `首轮识别为“${wrongFinalAnswer}”；局部视觉复核确认最终答案为“${expectedFinalAnswer}”。`,
+    );
+  });
+
+  it("局部视觉复核返回候选集之外的真实新转录时动态判分并采纳真实转录", async () => {
+    const unlistedRealAnswer = "v_1=\\frac{\\sqrt{2}}3 m/s";
+    installStagedResponses({
+      triage: triageResponse("incorrect", wrongFinalAnswer),
+      local: localReviewResponse(unlistedRealAnswer),
+      point: pointReviewResponse()
+    });
+
+    const { result } = await runCase("staged-unlisted-real-answer");
+
+    expect(result.subquestions[0]).toMatchObject({
+      score: 0,
+      finalAnswerStatus: "incorrect",
+      finalAnswerDecisionSource: "visual_local_review",
+      studentFinalAnswer: unlistedRealAnswer
+    });
+    expect(result.subquestions[0].finalAnswerReason).toBe(
+      `首轮识别为“${wrongFinalAnswer}”；局部视觉复核确认最终答案为“${unlistedRealAnswer}”。`
+    );
+    expect(result.directVisualReviewAudit?.results[0]).toMatchObject({
+      reviewId: "auto-final-answer-Q1",
+      result: unlistedRealAnswer,
+      certainty: "clear"
+    });
+  });
+
+  it("小分审验在整页图中查找证据，首轮 blockId 只作为定位提示", async () => {
+    installStagedResponses({
+      triage: triageResponse("incorrect", wrongFinalAnswer, ["block-01"]),
+      local: localReviewResponse(expectedFinalAnswer),
+      point: wholePagePointReviewResponse()
+    });
+
+    const { result } = await runCase("staged-whole-page-point-evidence");
+
+    const pointRequest = vi.mocked(callStructured).mock.calls.find((call) => call[1].schemaName === "large_question_point_review")?.[1];
+    expect(pointRequest?.system).toContain("不受首轮定位提示限制");
+    expect(pointRequest?.prompt).toContain("不是“允许引用范围”");
+    expect(pointRequest?.prompt).not.toContain("allowedBlockIds");
+    expect(pointRequest?.images).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: "[学生答卷图（预处理后小分审验上下文）]" })
+    ]));
+    expect(result.evidence.lines).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "point-review-Q1-point-P1-block-00", text: "f=μmg", region: [5, 5, 15, 15] })
+    ]));
+    expect(result.subquestions[0]?.decisions.find((decision) => decision.pointId === "P1")?.evidenceLineIds)
+      .toContain("point-review-Q1-point-P1-block-00");
+    expect(result.reviewReasons.join("\n")).not.toContain("不属于该小问");
+  });
+
+  it("首轮判空时仍发起局部复核，复核确认答案存在后给满分", async () => {
+    installStagedResponses({
+      triage: triageResponse("missing", "", ["block-01"]),
+      local: localReviewResponse(expectedFinalAnswer),
+      point: pointReviewResponse()
+    });
+
+    const { result } = await runCase("staged-missing-correct");
+
+    expect(callStructured).toHaveBeenCalledTimes(3);
+    const localRequest = vi.mocked(callStructured).mock.calls.find((call) => call[1].schemaName === "direct_visual_review")?.[1];
+    expect(localRequest?.prompt).toContain("未写出最终答案");
+    expect(result.score).toBe(3);
+    expect(result.status).toBe("completed");
+    expect(result.subquestions[0]).toMatchObject({
+      finalAnswerStatus: "correct",
+      finalAnswerDecisionSource: "visual_local_review"
+    });
+  });
+
+  it("首轮判空且没有 OCR 区块绑定时锁定为无有效作答并跳过局部复核", async () => {
+    installStagedResponses({
+      triage: triageResponse("missing", "", []),
+      local: localReviewResponse(expectedFinalAnswer),
+      point: pointReviewResponse()
+    });
+
+    const { result } = await runCase("staged-missing-unmapped-correct");
 
     expect(callStructured).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(callStructured).mock.calls.some((call) => call[1].schemaName === "direct_visual_review")).toBe(false);
+    expect(result.score).toBe(0);
+    expect(result.status).toBe("completed");
+    expect(result.scoreResolved).toBe(true);
+    expect(result.reviewReasons).toEqual([]);
+    expect(result.subquestions[0]).toMatchObject({
+      finalAnswerStatus: "missing",
+      finalAnswerDecisionSource: "teacher_model"
+    });
+    expect(result.subquestions[0]?.decisions.every((decision) => decision.requiresReview === false)).toBe(true);
+  });
+
+  it("局部视觉复核不确定时只添加人工复核标记，不阻断并返回当前分数", async () => {
+    installStagedResponses({
+      triage: triageResponse("incorrect", wrongFinalAnswer),
+      local: localReviewResponse("uncertain", "insufficient_visual_evidence"),
+      point: pointReviewResponse()
+    });
+
+    const { result } = await runCase("staged-local-uncertain");
+
+    expect(callStructured).toHaveBeenCalledTimes(3);
+    expect(result.score).toBe(0);
+    expect(result.status).toBe("needs_review");
+    expect(result.maximumPossibleScore).toBe(0);
     expect(result.subquestions[0]).toMatchObject({
       finalAnswerStatus: "uncertain",
-      finalAnswerDecisionSource: "local_numeric_review"
+      finalAnswerDecisionSource: "visual_local_review"
     });
-    expect(result.subquestions[0].finalAnswerReason).toContain("不会使用教师模型密钥代替");
+    expect(result.directVisualReviewAudit?.results[0]).toMatchObject({
+      reviewId: "auto-final-answer-Q1",
+      certainty: "insufficient_visual_evidence"
+    });
+    expect(result.reviewReasons.join("\n")).toContain("需要人工复核");
+  });
+
+  it("小分审验失败时只保留人工复核标记，仍完成写分所需的评分结果", async () => {
+    installStagedResponses({
+      triage: triageResponse("incorrect", wrongFinalAnswer),
+      local: localReviewResponse(expectedFinalAnswer),
+      pointError: "小分审验服务失败"
+    });
+
+    const { result } = await runCase("staged-point-review-failed");
+
+    expect(callStructured).toHaveBeenCalledTimes(3);
+    expect(result.score).toBe(3);
     expect(result.status).toBe("needs_review");
+    expect(result.reviewReasons.join("\n")).toContain("小分审验调用失败");
+    expect(result.subquestions[0]).toMatchObject({
+      score: 3,
+      finalAnswerStatus: "correct"
+    });
+  });
+
+  it("局部复核确认确实没有最终答案时，结果为缺失而不是伪造的普通错误", async () => {
+    installStagedResponses({
+      triage: triageResponse("missing", "", ["block-01"]),
+      local: localReviewResponse("未写出最终答案"),
+      point: pointReviewResponse()
+    });
+
+    const { result } = await runCase("staged-missing-confirmed");
+
+    expect(callStructured).toHaveBeenCalledTimes(3);
+    expect(result.score).toBe(0);
+    expect(result.status).toBe("completed");
+    expect(result.subquestions[0]).toMatchObject({
+      finalAnswerStatus: "missing",
+      finalAnswerDecisionSource: "visual_local_review"
+    });
+  });
+
+  it("小分判空没有可定位搜索区块和缺失说明时强制复核", async () => {
+    const unauditedPointReview = pointReviewResponse();
+    for (const decision of unauditedPointReview.data.reviews[0].decisions) {
+      decision.evidenceBlockIds = [];
+      decision.reason = "没有";
+    }
+    installStagedResponses({
+      triage: triageResponse("missing", "", ["block-01"]),
+      local: localReviewResponse("未写出最终答案"),
+      point: unauditedPointReview
+    });
+
+    const { result } = await runCase("staged-missing-without-audit");
+
+    expect(result.status).toBe("needs_review");
+    expect(result.subquestions[0].decisions.every((decision) => decision.status === "unreadable")).toBe(true);
+    expect(result.reviewReasons.join("\n")).toContain("缺失审验依据");
+  });
+});
+
+describe("large-question workflow selector", () => {
+  beforeEach(() => {
+    vi.mocked(callStructured).mockReset();
+    vi.mocked(runPaddleOcr).mockReset();
+    vi.mocked(gradeLargeQuestionResponsesAgent).mockReset();
+  });
+
+  function inputFor(questionType: "large" | "small" = "large") {
+    return {
+      id: `workflow-${questionType}`,
+      studentId: "workflow-student",
+      fileName: "answer.png",
+      mimeType: "image/png",
+      imageBuffer: Buffer.from("image-not-decoded-by-agent-test"),
+      rubric: { ...structuredClone(rubric), questionType }
+    };
+  }
+
+  it("routes only a large question with responses_agent to the Agent and skips PaddleOCR", async () => {
+    const agentResult = {
+      id: "agent-result",
+      studentId: "workflow-student",
+      fileName: "answer.png",
+      score: 2,
+      maxScore: 2,
+      scoreResolved: true,
+      status: "completed" as const,
+      reviewReasons: [],
+      evidence: { lines: [], finalAnswers: [], ambiguities: [] },
+      subquestions: [],
+      metrics: { ruleCoverage: 1, evidenceTraceability: 1, autoDecisionRate: 1, ambiguityRate: 0, durationMs: 1 },
+      modelName: "responses-model",
+      gradingPipeline: "large_question_responses_agent" as const,
+      rubricVersion: rubric.version
+    };
+    const artifactSource = {
+      preprocessedStudentAnswer: { buffer: Buffer.from("agent-webp"), mimeType: "image/webp", fileName: "answer.webp" },
+      questionImages: [],
+      referenceImages: [],
+      rubric
+    };
+    vi.mocked(gradeLargeQuestionResponsesAgent).mockResolvedValueOnce({ result: agentResult, artifactSource });
+
+    const result = await gradeStudentAnswer({ ...config, largeQuestionWorkflow: "responses_agent" }, inputFor("large"));
+
+    expect(gradeLargeQuestionResponsesAgent).toHaveBeenCalledTimes(1);
+    expect(result.result.gradingPipeline).toBe("large_question_responses_agent");
+    expect(runPaddleOcr).not.toHaveBeenCalled();
+    expect(callStructured).not.toHaveBeenCalled();
+  });
+
+  it("keeps the stable large-question workflow on PaddleOCR when Agent mode is not selected", async () => {
+    vi.mocked(runPaddleOcr).mockRejectedValueOnce(new Error("stable PaddleOCR sentinel"));
+
+    await expect(gradeStudentAnswer({ ...config, gradingMode: "vision_direct", largeQuestionWorkflow: "staged" }, inputFor("large")))
+      .rejects.toThrow("stable PaddleOCR sentinel");
+
+    expect(runPaddleOcr).toHaveBeenCalledTimes(1);
+    expect(gradeLargeQuestionResponsesAgent).not.toHaveBeenCalled();
+    expect(callStructured).not.toHaveBeenCalled();
+  });
+
+  it("keeps the small-question workflow on PaddleOCR even when Agent mode is configured", async () => {
+    vi.mocked(runPaddleOcr).mockRejectedValueOnce(new Error("small PaddleOCR sentinel"));
+
+    await expect(gradeStudentAnswer({ ...config, largeQuestionWorkflow: "responses_agent" }, inputFor("small")))
+      .rejects.toThrow("small PaddleOCR sentinel");
+
+    expect(runPaddleOcr).toHaveBeenCalledTimes(1);
+    expect(gradeLargeQuestionResponsesAgent).not.toHaveBeenCalled();
+    expect(callStructured).not.toHaveBeenCalled();
   });
 });

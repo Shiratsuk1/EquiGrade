@@ -175,6 +175,7 @@ function assertExtractedImageSize(bytes: number) {
 
 export async function extractAnswerImage(context: AnswerImageContext): Promise<ExtractedImage> {
   const candidates = collectImageCandidates(context);
+  let lastFailure: string | undefined;
   for (const candidate of candidates) {
     try {
       let blob = await candidateToBlob(candidate, context.image);
@@ -192,12 +193,14 @@ export async function extractAnswerImage(context: AnswerImageContext): Promise<E
         source: candidate.source,
         bytes: bytes.byteLength
       };
-    } catch {
+    } catch (error) {
+      lastFailure = error instanceof Error ? error.message : String(error);
       try {
         const remote = await extractRemoteImage(candidate, context);
         if (remote) return remote;
-      } catch {
+      } catch (remoteError) {
         // A target site may expose the same image through several channels.
+        lastFailure = remoteError instanceof Error ? remoteError.message : String(remoteError);
       }
     }
   }
@@ -215,5 +218,6 @@ export async function extractAnswerImage(context: AnswerImageContext): Promise<E
       bytes: bytes.byteLength
     };
   }
-  throw new Error("未找到可提取的学生作答图片");
+  const reason = lastFailure ? `；最后一次尝试失败原因：${lastFailure}` : "（页面上没有出现候选答卷图片来源）";
+  throw new Error(`未找到可提取的学生作答图片（已尝试 ${candidates.length} 个候选来源${reason}）`);
 }

@@ -26,6 +26,7 @@ const errorEvents = new Set([
 
 const warningEvents = new Set([
   "page_skipped",
+  "page_review_flagged",
   "pipeline_paused",
   "pipeline_paused_stale_answer",
   "pipeline_force_stopped",
@@ -53,10 +54,12 @@ export function pipelineEventLabel(event: PipelineEvent): string {
   switch (event.type) {
     case "pipeline_started": return "流水线已启动";
     case "pipeline_template_bound": return "评分标准已绑定到当前任务";
+    case "pipeline_template_restored": return "已恢复当前评分标准绑定";
     case "plugin_preflight_completed": return "站点控件检查通过";
     case "plugin_preflight_failed": return "站点控件检查失败";
     case "image_extracted": return `已提取答卷 ${event.sourcePageKey || event.pageKey || "当前页"}`;
-    case "page_completed": return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分`;
+    case "page_review_flagged": return `已标记复核，继续写分 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分（${event.reviewCount ?? "?"} 项）`;
+    case "page_completed": return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分${event.requiresReview ? "（已标记复核）" : ""}`;
     case "pipeline_start_rejected": return `启动失败：${reason || "尚未选择批改任务"}`;
     case "page_failed": return `处理失败：${reason || "未知异常"}`;
     case "page_retry": return `自动重试 ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}：${reason || "正在重试当前答卷"}`;

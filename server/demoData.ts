@@ -10,6 +10,7 @@ export const demoRubric: Rubric = {
   recognizedQuestionText: "如图，质量为 $m$ 的滑块从圆弧槽顶端由静止滑下，圆弧半径为 $R$。不计摩擦，求滑块到达最低点 $C$ 时对圆弧槽的压力。",
   version: 2,
   status: "locked",
+  questionType: "large",
   totalScore: 8,
   warnings: [],
   subquestions: [{

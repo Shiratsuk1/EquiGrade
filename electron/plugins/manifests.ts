@@ -16,6 +16,14 @@ export const ZHIXUE_ADAPTER_MANIFEST: AdapterManifest = {
   matchPatterns: ["https://www.zhixue.com/*", "https://zhixue.com/*", "https://*.zhixue.com/*"]
 };
 
+export const RUIYA_ADAPTER_MANIFEST: AdapterManifest = {
+  id: "ruiya-grading",
+  name: "睿芽考试服务云适配器",
+  version: "1.0.0",
+  description: "适配睿芽考试服务云单题阅卷页的答卷图像、总分写入、提交和自动进入下一份流程。",
+  matchPatterns: ["https://ruiya.onlyets.com/mark/v*/view/*"]
+};
+
 export const GENERIC_ADAPTER_MANIFEST: AdapterManifest = {
   id: "generic-data-attributes",
   name: "通用阅卷网页适配器",

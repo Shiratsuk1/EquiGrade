@@ -16,8 +16,10 @@ function canRenderAsWholeFormula(value: string) {
   const text = value.trim();
   if (!text || text.length > 1600 || !isLikelyFormula(text)) return false;
   // Chinese labels inside \text{...} are valid LaTeX. Only reject prose
-  // when Chinese remains outside a recognized LaTeX text block.
-  return !containsCjk(removeLatexTextBlocks(text)) && Boolean(renderFormulaHtml(text));
+  // when Chinese remains outside a LaTeX group. Raw Chinese subscripts such as
+  // `S_{刹3}` are accepted by KaTeX and must stay one formula.
+  const withoutFormulaGroups = removeLatexTextBlocks(text).replace(/\{(?:[^{}]|\{[^{}]*\})*\}/g, "");
+  return !containsCjk(withoutFormulaGroups) && Boolean(renderFormulaHtml(text));
 }
 
 function canRenderAsMixedFormula(value: string) {
@@ -58,6 +60,12 @@ function splitMixedFormulaText(value: string): MathTextPart[] {
 
   for (const match of masked.matchAll(boundaryPattern)) {
     const index = match.index ?? 0;
+    let braceDepth = 0;
+    for (let cursor = 0; cursor < index; cursor += 1) {
+      if (masked[cursor] === "{") braceDepth += 1;
+      else if (masked[cursor] === "}") braceDepth = Math.max(0, braceDepth - 1);
+    }
+    if (braceDepth > 0) continue;
     appendFormulaCandidate(parts, masked.slice(cursor, index), protectedBlocks);
     parts.push({ type: "text", value: restoreProtectedText(match[0], protectedBlocks) });
     cursor = index + match[0].length;

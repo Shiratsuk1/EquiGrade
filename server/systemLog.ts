@@ -1,3 +1,6 @@
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import type {
   ActiveOperation,
   ModelCallHistoryEntry,
@@ -9,11 +12,21 @@ import type {
 
 const maxEntries = 1000;
 const maxCapturedOperations = 100;
-const entries: SystemLogEntry[] = [];
+const persistedLogPath = path.join(
+  process.env.APP_DATA_DIR?.trim() ? path.resolve(process.env.APP_DATA_DIR) : path.resolve(".data"),
+  "system-log.jsonl"
+);
+const isTestRuntime = process.env.NODE_ENV === "test"
+  || process.env.VITEST === "1"
+  || process.env.VITEST === "true"
+  || process.argv.some((argument) => /vitest/i.test(argument));
+const persistLogs = !isTestRuntime || process.env.HENGZHUN_PERSIST_SYSTEM_LOGS === "1";
 const activeOperations = new Map<string, ActiveOperation>();
 const operationControllers = new Map<string, AbortController>();
 const cancelledOperationIds = new Set<string>();
 const modelCallsByOperation = new Map<string, ModelCallHistoryEntry[]>();
+let persistenceQueue: Promise<void> = Promise.resolve();
+let persistedLineCount = 0;
 
 export class OperationCancelledError extends Error {
   constructor(message = "任务已被用户强制停止") {
@@ -31,6 +44,60 @@ function isModelCallEntry(entry: SystemLogEntry): entry is ModelCallHistoryEntry
   return entry.scope === "model" && entry.step === "model_call" && entry.details?.kind === "model_call";
 }
 
+function isSystemLogEntry(value: unknown): value is SystemLogEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Partial<SystemLogEntry>;
+  return typeof entry.id === "string"
+    && typeof entry.operationId === "string"
+    && typeof entry.timestamp === "string"
+    && typeof entry.level === "string"
+    && typeof entry.status === "string"
+    && typeof entry.scope === "string"
+    && typeof entry.step === "string"
+    && typeof entry.message === "string";
+}
+
+function loadPersistedEntries(): SystemLogEntry[] {
+  if (!persistLogs) return [];
+  try {
+    const lines = readFileSync(persistedLogPath, "utf8");
+    const loaded = lines.split(/\r?\n/).flatMap((line) => {
+      if (!line.trim()) return [];
+      try {
+        const entry = JSON.parse(line) as unknown;
+        return isSystemLogEntry(entry) && !isModelCallEntry(entry) ? [entry] : [];
+      } catch {
+        return [];
+      }
+    });
+    persistedLineCount = loaded.length;
+    return loaded.slice(-maxEntries);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      // A damaged or inaccessible log must not prevent the grading service from starting.
+      persistedLineCount = 0;
+    }
+    return [];
+  }
+}
+
+const entries: SystemLogEntry[] = loadPersistedEntries();
+
+function enqueuePersistedEntry(entry: SystemLogEntry) {
+  if (!persistLogs || isModelCallEntry(entry)) return;
+  persistenceQueue = persistenceQueue.then(async () => {
+    await mkdir(path.dirname(persistedLogPath), { recursive: true });
+    if (persistedLineCount >= maxEntries * 2) {
+      const compacted = entries.filter((candidate) => !isModelCallEntry(candidate)).slice(-maxEntries);
+      await writeFile(persistedLogPath, compacted.map((candidate) => JSON.stringify(candidate)).join("\n") + (compacted.length ? "\n" : ""), "utf8");
+      persistedLineCount = compacted.length;
+      return;
+    }
+    await appendFile(persistedLogPath, `${JSON.stringify(entry)}\n`, "utf8");
+    persistedLineCount += 1;
+  }).catch(() => undefined);
+}
+
 function captureModelCall(entry: ModelCallHistoryEntry) {
   if (!modelCallsByOperation.has(entry.operationId) && modelCallsByOperation.size >= maxCapturedOperations) {
     const oldestOperationId = modelCallsByOperation.keys().next().value;
@@ -45,6 +112,7 @@ function append(entry: SystemLogEntry) {
   entries.push(entry);
   if (isModelCallEntry(entry)) captureModelCall(entry);
   if (entries.length > maxEntries) entries.splice(0, entries.length - maxEntries);
+  enqueuePersistedEntry(entry);
 }
 
 export function beginOperation(
@@ -175,6 +243,17 @@ export function releaseOperationModelCalls(operationId: string): void {
   modelCallsByOperation.delete(operationId);
 }
 
+/** Wait until already-emitted durable log events have reached disk. */
+export async function flushPersistedLogs(): Promise<void> {
+  await persistenceQueue;
+}
+
 export function clearCompletedLogs() {
   entries.length = 0;
+  if (!persistLogs) return;
+  persistenceQueue = persistenceQueue.then(async () => {
+    await mkdir(path.dirname(persistedLogPath), { recursive: true });
+    await writeFile(persistedLogPath, "", "utf8");
+    persistedLineCount = 0;
+  }).catch(() => undefined);
 }

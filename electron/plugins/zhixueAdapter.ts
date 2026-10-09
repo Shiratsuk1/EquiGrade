@@ -2,7 +2,14 @@ import { extractAnswerImage } from "./imageExtractor.js";
 import { ZHIXUE_ADAPTER_MANIFEST } from "./manifests.js";
 import { StaleAnswerError } from "./pipelineSafety.js";
 import type { ScoreWritePayload, SiteAdapter } from "./types.js";
-import { buildZhixueScorePlan, matchesZhixueUrl, parseMarkingProgress, type ZhixueScoreField } from "./zhixueLogic.js";
+import {
+  buildZhixueScorePlan,
+  isZhixuePromptOrLoading,
+  isZhixueStaticUiImageUrl,
+  matchesZhixueUrl,
+  parseMarkingProgress,
+  type ZhixueScoreField
+} from "./zhixueLogic.js";
 
 type SubmissionSignal = "acknowledged" | "changed" | "progressed";
 
@@ -53,16 +60,40 @@ function gradingDocument() {
 }
 
 function answerCard(doc: Document) {
+  const realContainer = doc.querySelector<HTMLElement>("#img_containter");
+  if (realContainer && isRendered(realContainer)) return realContainer;
   return doc.querySelector<HTMLElement>("#topicImgContent .score_content")
     ?? doc.querySelector<HTMLElement>("#topicImgContent");
 }
 
 function answerImage(doc: Document) {
-  const scope = doc.querySelector("#topicImgContent") ?? doc;
-  const preferred = scope.querySelector<HTMLImageElement>("img.enhance-definition-bright");
-  if (preferred?.naturalWidth && preferred.naturalHeight) return preferred;
+  if (isZhixuePromptOrLoading(doc, isRendered)) return null;
+
+  const realContainer = doc.querySelector<HTMLElement>("#img_containter");
+  const scope: ParentNode = realContainer && isRendered(realContainer)
+    ? realContainer
+    : (doc.querySelector<HTMLElement>("#topicImgContent") ?? doc);
+
+  const preferred = scope.querySelector<HTMLImageElement>("img.enhance-definition-bright, img[data-grading-answer-image]");
+  if (
+    preferred
+    && isRendered(preferred)
+    && preferred.naturalWidth >= 200
+    && preferred.naturalHeight >= 200
+    && !isZhixueStaticUiImageUrl(preferred.currentSrc || preferred.src)
+    && !preferred.closest?.("#img_Tip, #imgBoxTip, .img-tip-div, #img_loading, .img_loading")
+  ) {
+    return preferred;
+  }
+
   return Array.from(scope.querySelectorAll<HTMLImageElement>("img"))
-    .filter((image) => image.naturalWidth >= 200 && image.naturalHeight >= 200)
+    .filter((image) => (
+      image.naturalWidth >= 200
+      && image.naturalHeight >= 200
+      && isRendered(image)
+      && !isZhixueStaticUiImageUrl(image.currentSrc || image.src)
+      && !image.closest?.("#img_Tip, #imgBoxTip, .img-tip-div, #img_loading, .img_loading")
+    ))
     .sort((left, right) => {
       const visibleDelta = Number(isRendered(right)) - Number(isRendered(left));
       if (visibleDelta) return visibleDelta;
@@ -131,16 +162,56 @@ function setInputValue(input: HTMLInputElement, value: string) {
   const view = inputWindow(input);
   const setter = view && Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value")?.set;
   if (!view || !setter) throw new Error("无法访问智学网分数输入框");
+  input.focus?.();
   setter.call(input, value);
   input.dispatchEvent(new view.Event("input", { bubbles: true, composed: true }));
   input.dispatchEvent(new view.Event("change", { bubbles: true, composed: true }));
   input.dispatchEvent(new view.Event("blur", { bubbles: true, composed: true }));
 }
 
+function isDisabled(element: HTMLElement | null) {
+  if (!element) return true;
+  const control = element as HTMLButtonElement | HTMLInputElement;
+  const className = typeof element.className === "string" ? element.className : "";
+  return control.disabled === true
+    || element.getAttribute("aria-disabled") === "true"
+    || /(?:^|\s)(?:unnext|unprev|unprevious|is-disabled|disabled)(?:\s|$)/i.test(className);
+}
+
+function findPageControl(doc: Document, direction: "previous" | "next") {
+  const isNext = direction === "next";
+  const title = isNext ? "下一份" : "上一份";
+  const selectors = isNext
+    ? ["a[title='下一份']", "[data-grading-next]", "a.next_btn", "a.btn_next", "button[title='下一份']"]
+    : ["a[title='上一份']", "[data-grading-prev]", "[data-grading-previous]", "a.prev_btn", "a.btn_prev", "button[title='上一份']"];
+  for (const selector of selectors) {
+    const el = doc.querySelector<HTMLElement>(selector);
+    if (el) return el;
+  }
+  const elements = Array.from(doc.querySelectorAll<HTMLElement>("a, button"));
+  return elements.find((el) => {
+    const text = (el.textContent ?? "").trim();
+    const elTitle = el.getAttribute("title") ?? "";
+    return elTitle === title || text === title || (isNext && text === "下一张") || (!isNext && text === "上一张");
+  }) ?? null;
+}
+
+function enabledPageControl(doc: Document, title: "上一份" | "下一份") {
+  const control = findPageControl(doc, title === "下一份" ? "next" : "previous");
+  if (!control || isDisabled(control)) return null;
+  return control;
+}
+
+function enabledNext(doc: Document) {
+  return enabledPageControl(doc, "下一份");
+}
+
 function pageFingerprint(doc: Document) {
+  if (isZhixuePromptOrLoading(doc, isRendered)) return undefined;
   const image = answerImage(doc);
+  if (!image) return undefined;
   const topic = doc.querySelector("#currentTopic")?.textContent?.replace(/\s+/g, " ").trim() ?? "";
-  const source = `${image?.currentSrc || image?.src || ""}|${topic}`;
+  const source = `${image.currentSrc || image.src || ""}|${topic}`;
   if (!source.replace("|", "")) return undefined;
   let hash = 2166136261;
   for (let index = 0; index < source.length; index += 1) {
@@ -160,25 +231,8 @@ function markingProgress(doc: Document) {
 function batchComplete(doc: Document) {
   const progress = markingProgress(doc);
   if (progress && progress.total > 0 && progress.completed >= progress.total) return true;
-  return /(任务量已全部完成|本题的当前任务量已完成)/.test(doc.body?.textContent ?? "");
-}
-
-function enabledNext(doc: Document) {
-  const next = doc.querySelector<HTMLElement>("a[title='下一份']");
-  if (!next) return null;
-  const className = typeof next.className === "string" ? next.className : "";
-  if (/unnext|disabled/i.test(className) || next.getAttribute("aria-disabled") === "true") return null;
-  return next;
-}
-
-function enabledPageControl(doc: Document, title: "上一份" | "下一份") {
-  const control = doc.querySelector<HTMLElement>(`a[title='${title}']`);
-  if (!control) return null;
-  const className = typeof control.className === "string" ? control.className : "";
-  if (/disabled/i.test(className) || control.getAttribute("aria-disabled") === "true") return null;
-  if (title === "下一份" && /unnext/i.test(className)) return null;
-  if (title === "上一份" && /unprev|unprevious/i.test(className)) return null;
-  return control;
+  const docs = collectDocuments(doc);
+  return docs.some((d) => /(任务量已全部完成|本题的当前任务量已完成)/.test(d.body?.textContent ?? ""));
 }
 
 function autoSubmitState(doc: Document) {
@@ -220,13 +274,14 @@ function submissionProbe(previousPageKey: string | undefined, previousProgress: 
   const deadline = Date.now() + 12_000;
   return new Promise<SubmissionSignal>((resolve, reject) => {
     const poll = () => {
+      const docs = collectDocuments(document);
+      const successText = docs.some((candidateDoc) => Array.from(candidateDoc.querySelectorAll<HTMLElement>(
+        ".el-message--success, .el-message__content, .topicTxt_errorTips, [class*='scoreTip']"
+      )).some((element) => /(保存成功|自动提交成功)/.test(element.textContent ?? "")));
+      if (successText) return resolve("acknowledged");
+
       const doc = gradingDocument();
       if (doc) {
-        const successText = Array.from(doc.querySelectorAll<HTMLElement>(
-          ".el-message--success, .el-message__content, .topicTxt_errorTips, [class*='scoreTip']"
-        )).some((element) => /(保存成功|自动提交成功)/.test(element.textContent ?? ""));
-        if (successText) return resolve("acknowledged");
-
         const currentKey = pageFingerprint(doc);
         if (previousPageKey && currentKey && currentKey !== previousPageKey) return resolve("changed");
 
@@ -253,8 +308,8 @@ export function createZhixueAdapter(): SiteAdapter {
     return token;
   };
   const observePageControls = (doc: Document) => {
-    ["上一份", "下一份"].forEach((title) => {
-      const control = doc.querySelector<HTMLElement>(`a[title='${title}']`);
+    (["previous", "next"] as const).forEach((direction) => {
+      const control = findPageControl(doc, direction);
       if (!control || typeof control.addEventListener !== "function" || observedControls.has(control)) return;
       observedControls.add(control);
       control.addEventListener("click", () => { pageEpoch += 1; }, { capture: true });
@@ -268,6 +323,8 @@ export function createZhixueAdapter(): SiteAdapter {
   const readCurrentAnswer = async () => {
     const doc = gradingDocument();
     if (!doc) throw new Error("未找到智学网阅卷子页面");
+    const promptIssue = isZhixuePromptOrLoading(doc, isRendered);
+    if (promptIssue) throw new Error(promptIssue);
     const card = answerCard(doc);
     const imageElement = answerImage(doc);
     if (!card || !imageElement) throw new Error("未找到智学网学生作答原图");
@@ -386,14 +443,15 @@ export function createZhixueAdapter(): SiteAdapter {
     matches: matchesZhixueUrl,
     async preflight() {
       const doc = gradingDocument();
+      const promptIssue = doc ? isZhixuePromptOrLoading(doc, isRendered) : undefined;
       const image = doc ? answerImage(doc) : null;
       const total = doc ? totalScoreInput(doc) : null;
-      const submit = doc?.querySelector<HTMLElement>("#bnt_save") ?? null;
-      const next = doc?.querySelector<HTMLElement>("a[title='下一份']") ?? null;
+      const submit = doc?.querySelector<HTMLElement>("#bnt_save, [data-grading-submit]") ?? null;
+      const next = doc ? findPageControl(doc, "next") : null;
       const pageKey = doc ? pageFingerprint(doc) : undefined;
       const completed = Boolean(doc && batchComplete(doc));
       const capabilities = {
-        answerImage: Boolean(image),
+        answerImage: Boolean(image) && !promptIssue,
         scoreInput: Boolean(total),
         submit: Boolean(submit),
         next: Boolean(next),
@@ -402,6 +460,7 @@ export function createZhixueAdapter(): SiteAdapter {
       };
       const issues: string[] = [];
       if (!doc) issues.push("未找到智学网阅卷子页面");
+      if (promptIssue) issues.push(promptIssue);
       if (!pageKey && !completed) issues.push("无法生成智学网当前答卷的稳定页面标识");
       if (!capabilities.answerImage) issues.push("未找到智学网学生作答原图");
       if (!capabilities.scoreInput) issues.push(`未找到唯一的智学网最终总分框；${doc ? scoreInputDiagnostics(doc) : "阅卷子页面不可用"}`);
@@ -494,10 +553,10 @@ export function createZhixueAdapter(): SiteAdapter {
     },
     async submitScore(payload) {
       const doc = await assertCurrentTarget(payload);
-      const submit = doc?.querySelector<HTMLButtonElement>("#bnt_save");
+      const submit = doc?.querySelector<HTMLElement>("#bnt_save, [data-grading-submit]");
       if (!doc || !submit) throw new Error("未找到智学网提交分数按钮");
       if (!writtenPayload) throw new Error("提交前尚未完成智学网分数写入校验");
-      if (submit.disabled) throw new Error("智学网提交分数按钮当前不可用");
+      if (isDisabled(submit)) throw new Error("智学网提交分数按钮当前不可用");
       submittedPageKey = pageFingerprint(doc);
       pendingSubmission = {
         previousPageKey: submittedPageKey,
@@ -515,12 +574,22 @@ export function createZhixueAdapter(): SiteAdapter {
       writtenPayload = undefined;
     },
     async goToNext() {
-      const transition = await waitForPageChange(submittedPageKey, 2_500);
-      if (transition || this.isBatchComplete()) return;
-      const doc = gradingDocument();
-      const next = doc ? enabledNext(doc) : null;
-      if (!next) throw new Error("智学网未自动进入下一份，且回评下一份控件不可用");
-      next.click();
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        if (this.isBatchComplete()) return;
+        const doc = gradingDocument();
+        if (doc) {
+          const currentKey = pageFingerprint(doc);
+          if (submittedPageKey && currentKey && currentKey !== submittedPageKey) return;
+          const next = enabledNext(doc);
+          if (next) {
+            next.click();
+            return;
+          }
+        }
+        await wait(200);
+      }
+      throw new Error("智学网未自动进入下一份，且回评下一份控件不可用");
     },
     async detectPageChange(previousPageKey) {
       const transition = await waitForPageChange(previousPageKey, 12_000);

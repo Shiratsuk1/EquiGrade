@@ -8,12 +8,22 @@ describe("deterministic formula validation", () => {
     })).toBeNull();
   });
 
-  it("reports the exact field for an invalid explicit formula", () => {
-    const issue = findInvalidFormulaPath({ answer: String.raw`$\frac{1}{2$` });
-    expect(issue?.path).toBe("$model.answer");
-  });
-
   it("does not reinterpret plain prose as a formula", () => {
     expect(findInvalidFormulaPath({ text: "价格为 $5，之后继续说明" })).toBeNull();
   });
+
+  it("accepts escaped left and right braces", () => {
+    expect(findInvalidFormulaPath({
+      evidenceQuote: String.raw`$\Delta x=\left\{x_1-x_2\right\}$`
+    })).toBeNull();
+  });
+
+  it("rejects unescaped braces paired with left and right delimiters", () => {
+    const issue = findInvalidFormulaPath({
+      evidenceQuote: String.raw`$\Delta x=\left{x_1-x_2\right}$`
+    });
+    expect(issue?.path).toBe("$model.evidenceQuote");
+    expect(issue?.reason).toContain("Expected '}'");
+  });
+
 });

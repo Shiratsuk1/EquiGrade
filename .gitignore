@@ -13,8 +13,11 @@ coverage/
 *.log
 *.tsbuildinfo
 tmp/
+grading-artifacts/
 
 deepseek-harness-app/
+
+.zcode/
 
 .DS_Store
 Thumbs.db

@@ -2,11 +2,11 @@ export const SAFE_LATEX_BACKSLASH_TOKEN = "[[LATEX_BS]]";
 
 export const SAFE_LATEX_PROTOCOL_INSTRUCTION = [
   "【公式 JSON 安全协议】",
-  `JSON 字符串中的每一个 LaTeX 反斜杠都必须写成 ${SAFE_LATEX_BACKSLASH_TOKEN}，严禁直接输出反斜杠字符。`,
-  `例如 \\frac{1}{2} 必须输出为 ${SAFE_LATEX_BACKSLASH_TOKEN}frac{1}{2}，${SAFE_LATEX_BACKSLASH_TOKEN} 本身不得省略或改写。`,
+  "公式字段请直接使用标准 LaTeX，例如 \\frac{1}{2}、\\sqrt{2gh}、\\mathrm{m/s}。不要自行改写反斜杠或添加传输占位符。",
+  "JSON 的反斜杠转义由本地程序负责；只输出严格 JSON，不要输出 Markdown 代码围栏。",
   "正文与公式混合时，行内公式使用 $...$，独立公式使用 $$...$$；公式块内部不得因换行、逗号或中文标点拆分。",
   "expression、expected、latex 等本身就是纯公式的字段不需要额外添加 $ 定界符。",
-  "只允许改变反斜杠的传输写法，不得改变数字、变量、运算符、单位、中文内容或公式结构。"
+  "本地程序只修复反斜杠的 JSON 传输写法，不得改变数字、变量、运算符、单位、中文内容或公式结构。"
 ].join("\n");
 
 export type FormulaTextBlock =
@@ -90,10 +90,26 @@ export function decodeSafeLatexTokens<T>(value: T): T {
   return value;
 }
 
-const unsafeLatexJsonEscapePattern = /(^|[^\\])\\(?:b(?=ar|eta|egin|ig|oldsymbol|inom|ullet|oxed|mod)|f(?=rac)|n(?=abla|eq|ot|u)|r(?=ight|ho|angle|brace|ceil|floor|m)|t(?=ext|imes|heta|au|an|riangle))/;
+const unsafeLatexJsonEscapePattern = /(^|[^\\])\\(?=(?:bar|beta|begin|big|boldsymbol|binom|bullet|boxed|bmod|frac|nabla|neq|not|nu|right|rho|rangle|rbrace|rceil|rfloor|mathrm|sqrt|text|times|theta|tau|tan|triangle))/;
+const unsafeLatexJsonEscapeGlobalPattern = /(^|[^\\])\\(?=(?:bar|beta|begin|big|boldsymbol|binom|bullet|boxed|bmod|frac|nabla|neq|not|nu|right|rho|rangle|rbrace|rceil|rfloor|mathrm|sqrt|text|times|theta|tau|tan|triangle))/g;
 
 export function hasUnsafeLatexJsonEscape(rawJson: string): boolean {
   return unsafeLatexJsonEscapePattern.test(rawJson);
+}
+
+/**
+ * Repairs the common model mistake of placing a LaTeX command backslash in a
+ * JSON string without JSON escaping it. Valid JSON escapes and already
+ * escaped LaTeX (`\\\\frac`) are left unchanged. Historical safe tokens are
+ * decoded after JSON.parse and are intentionally supported for old records.
+ */
+export function repairLatexJsonEscapes(rawJson: string): { json: string; repaired: boolean } {
+  let repaired = false;
+  const json = rawJson.replace(unsafeLatexJsonEscapeGlobalPattern, (_match, prefix: string) => {
+    repaired = true;
+    return `${prefix}\\\\`;
+  });
+  return { json, repaired };
 }
 
 const damagedLatexControlPattern = /(?:\u0008(?=ar|eta|egin|ig|oldsymbol|inom|ullet|oxed|mod)|\f(?=rac)|\n(?=abla|eq|ot|u)|\r(?=ight|ho|angle|brace|ceil|floor|m)|\t(?=ext|imes|heta|au|an|riangle))/;

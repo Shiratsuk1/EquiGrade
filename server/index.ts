@@ -5,13 +5,14 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { DEFAULT_GRADING_MODE, DEFAULT_TEACHER_REASONING_EFFORT, DEFAULT_UNREADABLE_REVIEW_THRESHOLD } from "../shared/types.js";
+import { DEFAULT_TEACHER_REASONING_EFFORT, DEFAULT_UNREADABLE_REVIEW_THRESHOLD, MAX_MODEL_SYSTEM_PROMPT_LENGTH, MODEL_ROUTE_KEYS } from "../shared/types.js";
 import type { Rubric } from "../shared/types.js";
 import { readModelConfig, requireModelConfig, saveModelConfig, toPublicConfig } from "./configStore.js";
 import { createDemoResults, demoQuestion, demoReference, demoRubric } from "./demoData.js";
 import { extractDocumentText } from "./documentExtractor.js";
 import { testModelConnection } from "./modelClient.js";
-import { assertSafeModelBaseUrl } from "./outboundUrlPolicy.js";
+import { testResponsesAgentConnection } from "./responsesAgentClient.js";
+import { assertSafeModelBaseUrl, assertSafePublicHttpsUrl } from "./outboundUrlPolicy.js";
 import {
   createLocalPipelineTask,
   getLocalPipelineTask,
@@ -19,10 +20,13 @@ import {
 } from "./localPipelineTaskStore.js";
 import { assertRubricIntegrity, rubricSchema } from "./schemas.js";
 import { gradeStudentAnswer, refineRubric, structureRubric } from "./workflows.js";
+import { loadCachedPaddleOcrAudit } from "./largeQuestionReplay.js";
+import { resolveGradingArtifactPath } from "./gradingArtifactStore.js";
 import {
   deleteGradingRecords,
   deleteTemplates,
   findGradingRecord,
+  getGradingRecordArtifacts,
   getRegradeContext,
   getTemplate,
   getGradingRecordModelCalls,
@@ -136,6 +140,24 @@ app.get("/api/model-config", asyncRoute(async (_req, res) => {
 }));
 
 app.put("/api/model-config", asyncRoute(async (req, res) => {
+  const routeSchema = z.object({
+    endpoint: z.enum(["teacher", "review"]),
+    model: z.string().trim().max(200),
+    reasoningEffort: z.enum(["disabled", "low", "medium", "high", "xhigh", "max", "ultra"]).optional(),
+    timeoutMs: z.number().int().min(1_000).max(300_000).optional(),
+    maxRetries: z.number().int().min(0).max(5).optional(),
+    maxOutputTokens: z.number().int().min(256).max(65_536).optional(),
+    systemPrompt: z.string().trim().max(MAX_MODEL_SYSTEM_PROMPT_LENGTH).optional(),
+    systemPromptMode: z.enum(["append", "replace"]).optional()
+  });
+  const modelRoutesSchema = z.record(z.string(), routeSchema).superRefine((routes, context) => {
+    const allowedRouteKeys = new Set<string>(MODEL_ROUTE_KEYS);
+    for (const key of Object.keys(routes)) {
+      if (!allowedRouteKeys.has(key)) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: `未知模型路由：${key}` });
+      }
+    }
+  });
   const schema = z.object({
     name: z.string().min(1), baseUrl: z.string().url(), apiKey: z.string().optional(),
     visionModel: z.string().min(1), textModel: z.string().min(1),
@@ -144,24 +166,60 @@ app.put("/api/model-config", asyncRoute(async (req, res) => {
     timeoutMs: z.number().int().min(1000).max(300000), maxRetries: z.number().int().min(0).max(5),
     maxConcurrency: z.number().int().min(1).max(20), maxOutputTokens: z.number().int().min(256).max(65536),
     unreadableReviewThreshold: z.number().min(0.5).max(100).multipleOf(0.5).default(DEFAULT_UNREADABLE_REVIEW_THRESHOLD),
-    gradingMode: z.enum(["vision_direct", "evidence_pipeline"]).default(DEFAULT_GRADING_MODE),
+    largeQuestionWorkflow: z.enum(["staged", "responses_agent"]).optional().default("staged"),
+    stagedLayoutEngine: z.enum(["paddleocr", "model_native"]).optional().default("paddleocr"),
     teacherReasoningEffort: z.enum(["disabled", "low", "medium", "high", "xhigh", "max", "ultra"]).default(DEFAULT_TEACHER_REASONING_EFFORT),
     reviewReasoningEffort: z.enum(["disabled", "low", "medium", "high", "xhigh", "max", "ultra"]).default("low"),
-    supportsJsonSchema: z.boolean(), supportsJsonObject: z.boolean(), supportsBase64Images: z.boolean(), enabled: z.boolean()
+    modelRoutes: modelRoutesSchema.optional(),
+    paddleOcr: z.object({
+      jobUrl: z.union([z.string().url(), z.literal("")]).optional(),
+      model: z.string().trim().min(1).max(200).optional(),
+      pollIntervalMs: z.number().int().min(0).max(60_000).optional(),
+      timeoutMs: z.number().int().min(1_000).max(1_800_000).optional(),
+      useDocOrientationClassify: z.boolean().optional(),
+      useDocUnwarping: z.boolean().optional(),
+      useChartRecognition: z.boolean().optional()
+    }).optional(),
+    responsesAgent: z.object({
+      baseUrl: z.string().url(),
+      apiKey: z.string().optional(),
+      model: z.string().trim().min(1).max(200),
+      reasoningEffort: z.enum(["disabled", "low", "medium", "high", "xhigh", "max", "ultra"]).optional(),
+      timeoutMs: z.number().int().min(1_000).max(300_000),
+      maxOutputTokens: z.number().int().min(256).max(65_536),
+      maxToolRounds: z.number().int().min(0).max(3),
+      maxRegions: z.number().int().min(0).max(6),
+      backendGuardrailsEnabled: z.boolean().optional().default(true),
+      independentVerifierEnabled: z.boolean(),
+      verifierBaseUrl: z.union([z.string().url(), z.literal("")]).optional(),
+      verifierApiKey: z.string().optional(),
+      verifierModel: z.string().trim().max(200).optional(),
+      verifierReasoningEffort: z.enum(["disabled", "low", "medium", "high", "xhigh", "max", "ultra"]).optional()
+    }).optional(),
+    // Kept in the request for compatibility with older clients. The server
+    // always persists strict JSON Schema and ignores both capability flags.
+    supportsJsonSchema: z.boolean().optional().default(true),
+    supportsJsonObject: z.boolean().optional().default(false),
+    supportsBase64Images: z.boolean(), enabled: z.boolean()
   });
   const config = schema.parse(req.body);
   await assertSafeModelBaseUrl(config.baseUrl);
   if (config.reviewBaseUrl) await assertSafeModelBaseUrl(config.reviewBaseUrl);
+  if (config.paddleOcr?.jobUrl) await assertSafePublicHttpsUrl(config.paddleOcr.jobUrl);
+  if (config.responsesAgent?.baseUrl) await assertSafeModelBaseUrl(config.responsesAgent.baseUrl);
+  if (config.responsesAgent?.verifierBaseUrl) await assertSafeModelBaseUrl(config.responsesAgent.verifierBaseUrl);
   res.json(await saveModelConfig(config));
 }));
 
 app.post("/api/model-config/test", asyncRoute(async (req, res) => {
-  const mode = z.enum(["text", "vision", "review"]).parse(req.body.mode);
-  const modeLabel = mode === "vision" ? "多模态" : mode === "review" ? "审验" : "文本";
+  const mode = z.enum(["text", "vision", "review", "agent"]).parse(req.body.mode);
+  const modeLabel = mode === "vision" ? "多模态" : mode === "review" ? "审验" : mode === "agent" ? "Responses Agent" : "文本";
   const operationId = beginOperation("model", `开始测试${modeLabel}模型连接`, "connection_test", { mode });
   try {
     const config = await requireModelConfig();
-    const result = await testModelConnection(config, mode, operationId);
+    const result = mode === "agent"
+      ? await testResponsesAgentConnection(config, operationId)
+      : await testModelConnection(config, mode, operationId);
     completeOperation(operationId, "model", "connection_ready", `${modeLabel}模型连接测试成功`, { model: result.model, durationMs: result.durationMs });
     res.json(result);
   } catch (error) {
@@ -179,7 +237,11 @@ app.post("/api/rubrics/structure", upload.fields([
   { name: "questionImages", maxCount: 10 },
   { name: "referenceImages", maxCount: 10 }
 ]), asyncRoute(async (req, res) => {
-  const input = z.object({ questionText: z.string().min(1), referenceText: z.string().min(1) }).parse(req.body);
+  const input = z.object({
+    questionText: z.string().min(1),
+    referenceText: z.string().min(1),
+    questionType: z.enum(["large", "small"]).default("large")
+  }).parse(req.body);
   const files = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
   const questionImages = files.questionImages ?? [];
   const referenceImages = files.referenceImages ?? [];
@@ -247,6 +309,15 @@ app.get("/api/history-records/:id/model-calls", asyncRoute(async (req, res) => {
     return;
   }
   res.json(modelCalls);
+}));
+
+app.get("/api/history-records/:id/artifacts", asyncRoute(async (req, res) => {
+  const artifacts = await getGradingRecordArtifacts(String(req.params.id));
+  if (!artifacts) {
+    res.status(404).json({ error: "找不到该批改记录" });
+    return;
+  }
+  res.json(artifacts);
 }));
 
 app.get("/api/pipeline/fixture", asyncRoute(async (_req, res) => {
@@ -320,6 +391,15 @@ app.get("/api/history-assets/:templateId/:fileName", (req, res) => {
   // This route only accepts allow-listed IDs and filenames, so assets inside
   // the hidden `.data` directory are safe to serve explicitly.
   res.sendFile(filePath, { dotfiles: "allow" });
+});
+
+app.get("/api/grading-artifacts/:resultId/:fileName", (req, res) => {
+  const filePath = resolveGradingArtifactPath(String(req.params.resultId), String(req.params.fileName));
+  if (!filePath) {
+    res.status(404).json({ error: "批改产物路径无效" });
+    return;
+  }
+  res.sendFile(filePath, { dotfiles: "deny" });
 });
 
 app.post("/api/templates", upload.fields([
@@ -405,7 +485,7 @@ app.post("/api/grading/grade", upload.fields([
   const templateId = String(req.body.templateId || "");
   try {
     if (templateId) {
-      await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: rubric, operationId: grading.operationId });
+      await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: rubric, operationId: grading.operationId, artifactSource: grading.artifactSource });
     }
   } finally {
     // 无模板的临时批改或保存失败时，释放该操作的模型调用记录，避免内存泄漏（幂等）。
@@ -441,7 +521,7 @@ app.post("/api/templates/:templateId/grade", upload.single("image"), asyncRoute(
     referenceImages: context.referenceImages.map((file, index) => toModelImage(file, `[参考答案图片 ${index + 1}：${file.fileName}]`))
   });
   try {
-    await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: context.rubric, operationId: grading.operationId });
+    await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: context.rubric, operationId: grading.operationId, artifactSource: grading.artifactSource });
   } finally {
     releaseOperationModelCalls(grading.operationId);
   }
@@ -481,7 +561,7 @@ app.post("/api/pipeline/grade", upload.single("image"), asyncRoute(async (req, r
     referenceImages: context.referenceImages.map((file, index) => toModelImage(file, `[参考答案图片 ${index + 1}：${file.fileName}]`))
   });
   try {
-    await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: context.rubric, operationId: grading.operationId });
+    await saveGradingRecord({ templateId, answerImage, result: grading.result, rubricSnapshot: context.rubric, operationId: grading.operationId, artifactSource: grading.artifactSource });
   } finally {
     releaseOperationModelCalls(grading.operationId);
   }
@@ -493,6 +573,7 @@ app.post("/api/pipeline/grade", upload.single("image"), asyncRoute(async (req, r
     score: grading.result.score,
     maxScore: grading.result.maxScore,
     status: grading.result.status,
+    scoreResolved: grading.result.scoreResolved,
     requiresReview: grading.result.status === "needs_review",
     result: grading.result
   });
@@ -537,7 +618,70 @@ app.post("/api/templates/:templateId/regrade", asyncRoute(async (req, res) => {
       templateId,
       sourceResultId: context.previousResultId,
       result: grading.result,
-      operationId: grading.operationId
+      operationId: grading.operationId,
+      artifactSource: grading.artifactSource
+    });
+  } finally {
+    releaseOperationModelCalls(grading.operationId);
+  }
+  res.json(grading.result);
+}));
+
+/**
+ * 用本条历史记录已保存的 OCR 审计结果重放大题链路。它仍然调用教师模型、
+ * 保存新的重批记录并进入当前 API 进程的运行日志，只跳过本次的 PaddleOCR 网络请求。
+ */
+app.post("/api/templates/:templateId/replay-cached-ocr", asyncRoute(async (req, res) => {
+  const input = z.object({
+    resultId: z.string().min(1),
+    reason: z.string().trim().min(1).max(300).optional()
+  }).parse(req.body);
+  const templateId = String(req.params.templateId);
+  const context = await getRegradeContext(templateId, input.resultId);
+  if (!context) {
+    res.status(404).json({ error: "找不到要重放的历史批改记录" });
+    return;
+  }
+  if ((context.rubric.questionType ?? "large") !== "large") {
+    res.status(400).json({ error: "缓存 OCR 回放仅适用于大题批改记录" });
+    return;
+  }
+  if (!context.ocrAudit?.rawJsonl?.trim()) {
+    res.status(400).json({ error: "本条历史记录没有保存同卷 OCR 审计，不能安全复用 OCR；请使用完整重新批改" });
+    return;
+  }
+  const ocrAudit = await loadCachedPaddleOcrAudit(context.ocrAudit);
+  const grading = await gradeStudentAnswer(await requireModelConfig(), {
+    id: crypto.randomUUID(),
+    studentId: context.studentId,
+    fileName: context.fileName,
+    mimeType: context.mimeType,
+    imageBuffer: context.imageBuffer,
+    ocrAudit,
+    rubric: context.rubric,
+    questionText: context.questionText,
+    referenceText: context.referenceText,
+    questionImages: context.questionImages.map((file, index) => ({
+      mimeType: file.mimeType,
+      base64: file.buffer.toString("base64"),
+      label: `[题目图片 ${index + 1}：${file.fileName}]`
+    })),
+    referenceImages: context.referenceImages.map((file, index) => ({
+      mimeType: file.mimeType,
+      base64: file.buffer.toString("base64"),
+      label: `[参考答案图片 ${index + 1}：${file.fileName}]`
+    })),
+    previousResultId: context.previousResultId,
+    regradedAt: new Date().toISOString(),
+    regradeReason: input.reason ?? "使用已保存 PaddleOCR 审计结果进行大题完整链路回放"
+  });
+  try {
+    await saveRegradedRecord({
+      templateId,
+      sourceResultId: context.previousResultId,
+      result: grading.result,
+      operationId: grading.operationId,
+      artifactSource: grading.artifactSource
     });
   } finally {
     releaseOperationModelCalls(grading.operationId);

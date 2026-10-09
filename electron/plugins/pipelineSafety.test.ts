@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertSameAnswer, commitFailureMessage, failureRequiresPause } from "./pipelineSafety.js";
+import { assertSameAnswer, canCommitGradingResult, commitFailureMessage, failureRequiresPause } from "./pipelineSafety.js";
 import type { ExtractedAnswer } from "./types.js";
 
 const answer: ExtractedAnswer = {
@@ -26,5 +26,13 @@ describe("pipeline commit safety", () => {
     expect(failureRequiresPause("score_written")).toBe(true);
     expect(failureRequiresPause("submit_started")).toBe(true);
     expect(commitFailureMessage("submit_started", "timeout")).toContain("保存状态无法确认");
+  });
+
+  it("allows a valid review-marked result to continue to score writing", () => {
+    expect(canCommitGradingResult({ status: "needs_review", score: 6, maxScore: 16 })).toBe(true);
+    expect(canCommitGradingResult({ status: "needs_review", score: 6, maxScore: 16, scoreResolved: false })).toBe(true);
+    expect(canCommitGradingResult({ status: "completed", score: 16, maxScore: 16 })).toBe(true);
+    expect(canCommitGradingResult({ status: "failed", score: 6, maxScore: 16 })).toBe(false);
+    expect(canCommitGradingResult({ status: "needs_review", score: 17, maxScore: 16 })).toBe(false);
   });
 });

@@ -32,7 +32,10 @@ import {
   windowMaterials
 } from "../shared/uiConstants.js";
 import { EmbeddedBrowserSession } from "./browserSession.js";
+import { PipelineTaskStore, type PersistedPipelineTaskSelection } from "./sessionPersistence.js";
 import { configureStableUserData } from "./userData.js";
+
+app.commandLine.appendSwitch("disable-gpu-sandbox");
 
 const userDataConfiguration = configureStableUserData(app);
 
@@ -60,6 +63,8 @@ let activePipelineTask: {
   targetUrl: string;
   context: PipelineTemplateContext;
 } | null = null;
+const pipelineTaskStore = new PipelineTaskStore(path.join(app.getPath("userData"), "target-session", "pipeline-task.json"));
+let pipelineTaskRestorePromise: Promise<void> | undefined;
 
 function startupLogCandidates() {
   const installDirectory = app.isPackaged
@@ -194,6 +199,37 @@ async function loadPipelineTemplate(selection: PipelineTaskSelection): Promise<P
   };
 }
 
+async function restorePipelineTask() {
+  if (activePipelineTask) return;
+  if (pipelineTaskRestorePromise) return pipelineTaskRestorePromise;
+  pipelineTaskRestorePromise = (async () => {
+    const saved = await pipelineTaskStore.load();
+    if (!saved) return;
+    const selection: PersistedPipelineTaskSelection = saved.mode === "test"
+      ? { mode: "test", targetUrl: `${localBaseUrl()}/zhixue-mock?embedded=1` }
+      : saved;
+    const context = await loadPipelineTemplate(selection);
+    const session = requireBrowserSession();
+    await session.initialize();
+    if (activePipelineTask) return;
+    const currentUrl = session.getState().url;
+    if (currentUrl !== selection.targetUrl) await session.setHomeUrl(selection.targetUrl, true);
+    if (activePipelineTask) return;
+    activePipelineTask = { mode: selection.mode, targetUrl: selection.targetUrl, context };
+    recordPipelineEvent({
+      type: "pipeline_template_restored",
+      mode: selection.mode,
+      templateId: context.templateId,
+      templateTitle: context.title,
+      totalScore: context.rubric.totalScore,
+      targetUrl: selection.targetUrl
+    });
+  })().finally(() => {
+    pipelineTaskRestorePromise = undefined;
+  });
+  return pipelineTaskRestorePromise;
+}
+
 function recordPipelineEvent(payload: Record<string, unknown>) {
   const entry = { timestamp: new Date().toISOString(), ...payload };
   recentPipelineEvents.push(entry);
@@ -271,21 +307,27 @@ async function startPackagedServer() {
 
 async function waitForHostServer() {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  const maxAttempts = isDevelopment ? 300 : 120;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       const response = await fetch(`${localBaseUrl()}/api/health`);
       if (response.ok) {
         recordStartupLog(`本地 API 已就绪：${localBaseUrl()}`);
         return;
       }
-      lastError = new Error(`工作台服务返回 ${response.status}`);
+      lastError = new Error(`工作台服务返回 HTTP ${response.status}`);
     } catch (error) {
       lastError = error;
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
   }
+  const targetUrl = localBaseUrl();
+  const detail = lastError instanceof Error ? lastError.message : String(lastError || "无响应");
+  const guidance = isDevelopment
+    ? `等待本地开发服务超时（已等待 30 秒，目标：${targetUrl}）。\n请确认是通过 "npm run electron:dev" 启动工作台，且终端中的 API 与 Vite 服务无报错。\n底层错误：${detail}`
+    : `等待本地 API 服务超时（目标：${targetUrl}）。\n底层错误：${detail}`;
   recordStartupLog("等待本地 API 超时", lastError);
-  throw lastError instanceof Error ? lastError : new Error("工作台服务启动超时");
+  throw new Error(guidance);
 }
 
 function createWindow() {
@@ -371,7 +413,7 @@ function createWindow() {
       encryptionAvailable: health.encryptionAvailable,
       vaultCookieCount: health.vaultCookieCount,
       restoredCookieCount: health.restoredCookieCount,
-      liveZhixueCookieCount: health.liveZhixueCookieCount,
+      liveTargetCookieCount: health.liveTargetCookieCount,
       persistentCookieCount: health.persistentCookieCount,
       sessionCookieCount: health.sessionCookieCount,
       cookieNames: health.cookieNames,
@@ -466,6 +508,7 @@ ipcMain.handle("pipeline:plugin-diagnostic", async (event, request: PluginDiagno
 
 ipcMain.handle("pipeline:dry-run", async (event, options: PipelineDryRunOptions) => {
   requireHostSender(event);
+  await restorePipelineTask();
   if (!activePipelineTask?.context.ready) throw new Error("请先选择真实评分标准");
   return requireBrowserSession().dryRunCurrentAnswer({ verifyWrite: Boolean(options?.verifyWrite) });
 });
@@ -487,6 +530,12 @@ ipcMain.handle("pipeline:select-task", async (event, selection: PipelineTaskSele
   }
   const currentUrl = session.getState().url;
   await session.setHomeUrl(targetUrl, currentUrl !== targetUrl);
+  const persistedSelection: PersistedPipelineTaskSelection = {
+    mode: selection.mode,
+    targetUrl,
+    ...(context.templateId ? { templateId: context.templateId } : {})
+  };
+  await pipelineTaskStore.save(persistedSelection);
   activePipelineTask = { mode: selection.mode, targetUrl, context };
   recordPipelineEvent({
     type: "pipeline_template_bound",
@@ -501,18 +550,21 @@ ipcMain.handle("pipeline:select-task", async (event, selection: PipelineTaskSele
 
 ipcMain.handle("pipeline:template-context", (event) => {
   requireHostSender(event);
-  return activePipelineTask?.context ?? null;
+  return restorePipelineTask().then(() => activePipelineTask?.context ?? null);
 });
 
 ipcMain.handle("pipeline:assert-task", (event) => {
-  const session = requireBrowserSession();
-  if (event.sender !== session.view.webContents) throw new Error("非目标网页进程不允许启动批改任务");
-  if (!activePipelineTask?.context.ready) throw new Error("尚未选择批改任务，请先在工作台绑定评分标准");
-  return {
-    templateId: activePipelineTask.context.templateId,
-    templateTitle: activePipelineTask.context.title,
-    mode: activePipelineTask.mode
-  };
+  return (async () => {
+    const session = requireBrowserSession();
+    if (event.sender !== session.view.webContents) throw new Error("非目标网页进程不允许启动批改任务");
+    await restorePipelineTask();
+    if (!activePipelineTask?.context.ready) throw new Error("尚未选择批改任务，请先在工作台绑定评分标准");
+    return {
+      templateId: activePipelineTask.context.templateId,
+      templateTitle: activePipelineTask.context.title,
+      mode: activePipelineTask.mode
+    };
+  })();
 });
 
 ipcMain.handle("pipeline:grade-image", async (event, payload: {
@@ -525,6 +577,7 @@ ipcMain.handle("pipeline:grade-image", async (event, payload: {
 }) => {
   const session = requireBrowserSession();
   if (event.sender !== session.view.webContents) throw new Error("非目标网页进程不允许提交答卷图像");
+  await restorePipelineTask();
   const task = activePipelineTask;
   if (!task?.context.ready) throw new Error("请先从批改任务或流水线测试入口选择任务");
   const imageController = new AbortController();
@@ -633,8 +686,9 @@ ipcMain.handle("window:set-material", (event, material: WindowMaterial) => {
     hostWindow.setBackgroundMaterial("none");
   }
 });
-ipcMain.handle("pipeline:control", (event, control: PipelineControl) => {
+ipcMain.handle("pipeline:control", async (event, control: PipelineControl) => {
   requireHostSender(event);
+  await restorePipelineTask();
   if (control === "start" && !activePipelineTask) {
     const reason = "尚未选择批改任务，请先在工作台绑定评分标准";
     recordPipelineEvent({ type: "pipeline_start_rejected", phase: "failed", reason });

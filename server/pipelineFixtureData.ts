@@ -14,6 +14,7 @@ export const pipelineFixtureRubric: Rubric = {
   recognizedQuestionText: pipelineFixtureQuestion,
   version: 3,
   status: "locked",
+  questionType: "large",
   totalScore: 18,
   warnings: [],
   subquestions: [

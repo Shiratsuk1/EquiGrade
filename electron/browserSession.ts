@@ -22,16 +22,18 @@ import type {
   TargetPageInspection
 } from "../shared/electron.js";
 import { EMPTY_PLUGIN_STATUS } from "../shared/electron.js";
-import { DEFAULT_START_URL, isLegacyMockStartUrl } from "../shared/startUrl.js";
+import { DEFAULT_START_URL, isLegacyDefaultStartUrl, isLegacyMockStartUrl } from "../shared/startUrl.js";
 import { MAX_IMAGE_BYTES } from "../shared/uiConstants.js";
+import { isAbortedNavigationError } from "./navigationErrors.js";
 import {
   EncryptedCookieVault,
-  selectZhixueCookies,
+  selectTargetCookies,
   TargetNavigationStore,
   toCookieSetDetails,
   type PersistedTargetCookie
 } from "./sessionPersistence.js";
 import { assertAllowedImageResource } from "./targetImagePolicy.js";
+import { readTargetImageBytes } from "./targetImageReader.js";
 
 type BrowserSessionOptions = {
   window: BrowserWindow;
@@ -112,6 +114,20 @@ function imageMimeType(bytes: Buffer) {
   if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
   if (bytes.subarray(0, 2).toString("ascii") === "BM") return "image/bmp";
   throw new Error("目标资源不是受支持的位图图片");
+}
+
+function buildTargetImage(bytes: Buffer, source: string) {
+  if (bytes.byteLength > MAX_TARGET_IMAGE_BYTES) throw new Error("答卷图片超过 25 MB 安全上限");
+  if (!bytes.byteLength) throw new Error("提取出的答卷图片为空");
+  const mimeType = imageMimeType(bytes);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  return {
+    dataUrl: `data:${mimeType};base64,${bytes.toString("base64")}`,
+    mimeType,
+    sha256,
+    source,
+    bytes: bytes.byteLength
+  };
 }
 
 function securityForUrl(value: string): BrowserSecurityState {
@@ -267,7 +283,7 @@ export class EmbeddedBrowserSession {
       const results = await Promise.allSettled(cookies.map((cookie) => this.targetSession.cookies.set(toCookieSetDetails(cookie))));
       this.restoredCookieCount = results.filter((result) => result.status === "fulfilled").length;
       const lastTargetUrl = await this.navigationStore.load();
-      if (lastTargetUrl && isLegacyMockStartUrl(lastTargetUrl)) {
+      if (lastTargetUrl && (isLegacyMockStartUrl(lastTargetUrl) || isLegacyDefaultStartUrl(lastTargetUrl))) {
         this.homeUrl = DEFAULT_START_URL;
         await this.navigationStore.save(DEFAULT_START_URL);
       } else if (lastTargetUrl) {
@@ -276,14 +292,14 @@ export class EmbeddedBrowserSession {
     } catch (error) {
       this.persistenceError = error instanceof Error ? error.message : "无法恢复目标网页会话";
     }
-    if (this.homeUrl) await this.view.webContents.loadURL(this.homeUrl);
+    if (this.homeUrl) await this.loadTargetUrl(this.homeUrl);
     this.scheduleAuthenticationSnapshot(0);
     return this.getSessionHealth();
   }
 
   async setHomeUrl(value: string, navigate = false) {
     this.homeUrl = normalizeNavigationUrl(value);
-    if (navigate) await this.view.webContents.loadURL(this.homeUrl);
+    if (navigate) await this.loadTargetUrl(this.homeUrl);
     return this.getState();
   }
 
@@ -338,11 +354,34 @@ export class EmbeddedBrowserSession {
     const url = normalizeNavigationUrl(value, this.view.webContents.getURL() || this.homeUrl);
     if (this.view.webContents.getURL() === url) return this.getState();
     if (this.pendingNavigation?.url === url) return this.pendingNavigation.promise;
-    const promise = this.view.webContents.loadURL(url).then(() => this.getState()).finally(() => {
+    const promise = this.loadTargetUrl(url, () => this.pendingNavigation?.url === url).finally(() => {
       if (this.pendingNavigation?.promise === promise) this.pendingNavigation = undefined;
     });
     this.pendingNavigation = { url, promise };
     return promise;
+  }
+
+  private async loadTargetUrl(url: string, isCurrentNavigation = () => true) {
+    const contents = this.view.webContents;
+    const previousUrl = contents.getURL();
+    try {
+      await contents.loadURL(url);
+    } catch (error) {
+      if (!isAbortedNavigationError(error) || !isCurrentNavigation()) throw error;
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline) {
+        if (contents.isDestroyed()) throw new Error("目标网页已关闭");
+        const currentUrl = contents.getURL();
+        const redirected = currentUrl
+          && currentUrl !== "about:blank"
+          && currentUrl !== previousUrl
+          && currentUrl !== url;
+        if (!contents.isLoading() && redirected) return this.getState();
+        await new Promise<void>((resolve) => setTimeout(resolve, 80));
+      }
+      throw error;
+    }
+    return this.getState();
   }
 
   async readTargetImage(urlValue: string, documentUrlValue: string) {
@@ -367,22 +406,21 @@ export class EmbeddedBrowserSession {
         const comparableDocumentUrl = comparableFrameUrl(documentUrl.href);
         const frame = frames.find((candidate) => comparableFrameUrl(candidate.url) === comparableDocumentUrl);
         if (!frame) throw new Error("答卷图片所属页面不在当前阅卷窗口中");
-        const cached = await client.sendCommand("Page.getResourceContent", {
-          frameId: frame.id,
-          url: resourceUrl.href
-        }) as { content: string; base64Encoded?: boolean };
-        const bytes = Buffer.from(cached.content, cached.base64Encoded ? "base64" : "utf8");
-        if (bytes.byteLength > MAX_TARGET_IMAGE_BYTES) throw new Error("答卷图片超过 25 MB 安全上限");
-        if (!bytes.byteLength) throw new Error("提取出的答卷图片为空");
-        const mimeType = imageMimeType(bytes);
-        const sha256 = createHash("sha256").update(bytes).digest("hex");
-        return {
-          dataUrl: `data:${mimeType};base64,${bytes.toString("base64")}`,
-          mimeType,
-          sha256,
-          source: "electron.resource-cache",
-          bytes: bytes.byteLength
-        };
+        const image = await readTargetImageBytes(
+          this.targetSession,
+          resourceUrl,
+          documentUrl,
+          async () => {
+            const cached = await client.sendCommand("Page.getResourceContent", {
+              frameId: frame.id,
+              url: resourceUrl.href
+            }) as { content: string; base64Encoded?: boolean };
+            const bytes = Buffer.from(cached.content, cached.base64Encoded ? "base64" : "utf8");
+            imageMimeType(bytes);
+            return bytes;
+          }
+        );
+        return buildTargetImage(image.bytes, image.source);
       } finally {
         if (attachedHere && client.isAttached()) client.detach();
       }
@@ -467,14 +505,14 @@ export class EmbeddedBrowserSession {
   }
 
   async getSessionHealth(): Promise<BrowserSessionHealth> {
-    const liveCookies = selectZhixueCookies((await this.targetSession.cookies.get({})).map((cookie) => this.toPersistedCookie(cookie)));
+    const liveCookies = selectTargetCookies((await this.targetSession.cookies.get({})).map((cookie) => this.toPersistedCookie(cookie)));
     return {
       userDataPath: app.getPath("userData"),
       partition: "persist:hengzhun-target",
       encryptionAvailable: this.cookieVault.isAvailable(),
       vaultCookieCount: this.vaultCookieCount,
       restoredCookieCount: this.restoredCookieCount,
-      liveZhixueCookieCount: liveCookies.length,
+      liveTargetCookieCount: liveCookies.length,
       persistentCookieCount: liveCookies.filter((cookie) => cookie.expirationDate !== undefined).length,
       sessionCookieCount: liveCookies.filter((cookie) => cookie.expirationDate === undefined).length,
       cookieNames: liveCookies.map((cookie) => cookie.name).sort(),

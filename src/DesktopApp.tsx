@@ -19,20 +19,31 @@ import { EMPTY_PLUGIN_STATUS } from "../shared/electron";
 import { buildPipelineScoreAlignment } from "../shared/pipelineSetup";
 import { pluginFontStacks, pluginMonoFontStacks } from "../shared/uiConstants";
 import {
-  DEFAULT_GRADING_MODE, DEFAULT_MODEL_TIMEOUT_MS, DEFAULT_REVIEW_REASONING_EFFORT, DEFAULT_TEACHER_REASONING_EFFORT,
-  DEFAULT_UNREADABLE_REVIEW_THRESHOLD
+  DEFAULT_MODEL_TIMEOUT_MS, DEFAULT_QUESTION_TYPE, DEFAULT_RESPONSES_AGENT_MAX_OUTPUT_TOKENS,
+  DEFAULT_RESPONSES_AGENT_MAX_REGIONS, DEFAULT_RESPONSES_AGENT_MAX_TOOL_ROUNDS, DEFAULT_RESPONSES_AGENT_TIMEOUT_MS,
+  DEFAULT_REVIEW_REASONING_EFFORT, DEFAULT_TEACHER_REASONING_EFFORT, DEFAULT_UNREADABLE_REVIEW_THRESHOLD
 } from "../shared/types";
 import type {
-  GradingHistoryRecord, GradingResult, GradingTemplateDetail, GradingTemplateSummary, ModelConfigInput,
-  ModelCallHistoryEntry, ModelCallLogDetails, PublicModelConfig, Rubric, SystemLogEntry, SystemLogSnapshot
+  GradingArtifact, GradingHistoryRecord, GradingResult, GradingTemplateDetail, GradingTemplateSummary, ModelConfigInput,
+  ModelCallHistoryEntry, ModelCallLogDetails, PublicModelConfig, QuestionType, Rubric, SystemLogEntry, SystemLogSnapshot
 } from "../shared/types";
 import { api, uploadDocument } from "./api";
 import { cleanPipelineError, pipelineEventLabel, pipelineEventTone } from "../shared/pipelineEvents";
-import { ModelCallDetails, ModelCallHistory, ResultDetail } from "./App";
+import { summarizeReviewSignals } from "../shared/reviewSignals";
+import { GradingArtifactList, GradingArtifactPreview, ResultDetail } from "./App";
+import { LogDetailsSummary, ModelCallDetails, ModelCallHistory, logScopeLabel, logStatusLabel } from "./logPresentation";
 import { MathText } from "./Formula";
+import { formulaWithUnit } from "./math";
 import { ScorePointGuidance } from "./ScorePointGuidance";
 import { directionFromPopState, pushRoute, runRouteTransition } from "./navigation";
-import { readStartUrl, START_URL_STORAGE_KEY } from "../shared/startUrl";
+import {
+  detectStartUrlPreset,
+  readStartUrl,
+  saveStartUrl,
+  START_URL_PRESETS,
+  type StartUrlPresetId
+} from "../shared/startUrl";
+import { ModelRoutingSettings } from "./ModelRoutingSettings";
 
 type DesktopRoute = {
   id: "dashboard" | "jobs" | "job" | "templates" | "template" | "history" | "record" | "logs" | "models" | "browser-debug" | "plugins-debug" | "settings";
@@ -50,6 +61,7 @@ type TemplateContext = {
 
 type PipelineSummary = {
   processed: number;
+  reviewed: number;
   skipped: number;
   failures: number;
   lastScore?: number;
@@ -63,6 +75,10 @@ type TemplateMaterialImage = {
   preview: string;
   source: "paste" | "upload";
 };
+
+function questionTypeLabel(questionType: QuestionType | undefined): string {
+  return questionType === "small" ? "小题" : "大题";
+}
 
 const desktopFontSizes = ["compact", "comfortable", "large"] as const;
 type DesktopFontSize = typeof desktopFontSizes[number];
@@ -183,7 +199,7 @@ function useSystemReducedMotion() {
 
 const routeTitles: Record<DesktopRoute["id"], { eyebrow: string; title: string; description: string }> = {
   dashboard: { eyebrow: "工作台", title: "智能阅卷", description: "查看当前任务、运行状态和需要处理的答卷。" },
-  jobs: { eyebrow: "批改任务", title: "任务管理", description: "创建任务并连接已经打开的智学网阅卷页面。" },
+  jobs: { eyebrow: "批改任务", title: "任务管理", description: "创建任务并连接已经打开的目标阅卷页面。" },
   job: { eyebrow: "当前任务", title: "实时批改", description: "对照评分标准查看网页，并控制连续批改进度。" },
   templates: { eyebrow: "评分资料", title: "评分标准", description: "管理已保存且可继续修改的题目、答案和逐点评分规则。" },
   template: { eyebrow: "评分资料", title: "评分标准详情", description: "核对题目、参考答案和每一个评分点。" },
@@ -208,6 +224,35 @@ const defaultBrowserState: EmbeddedBrowserState = {
   plugin: { ...EMPTY_PLUGIN_STATUS, capabilities: { ...EMPTY_PLUGIN_STATUS.capabilities } }
 };
 
+type ResponsesAgentFormConfig = NonNullable<ModelConfigInput["responsesAgent"]> & { backendGuardrailsEnabled?: boolean };
+
+const defaultResponsesAgentConfig: ResponsesAgentFormConfig = {
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: "",
+  model: "",
+  reasoningEffort: "disabled",
+  timeoutMs: DEFAULT_RESPONSES_AGENT_TIMEOUT_MS,
+  maxOutputTokens: DEFAULT_RESPONSES_AGENT_MAX_OUTPUT_TOKENS,
+  maxToolRounds: DEFAULT_RESPONSES_AGENT_MAX_TOOL_ROUNDS,
+  maxRegions: DEFAULT_RESPONSES_AGENT_MAX_REGIONS,
+  backendGuardrailsEnabled: true,
+  independentVerifierEnabled: false,
+  verifierBaseUrl: "",
+  verifierApiKey: "",
+  verifierModel: "",
+  verifierReasoningEffort: "low"
+};
+
+function normalizeResponsesAgentFormConfig(value: NonNullable<ModelConfigInput["responsesAgent"]>): ResponsesAgentFormConfig {
+  const config = value as ResponsesAgentFormConfig;
+  return {
+    ...config,
+    backendGuardrailsEnabled: config.backendGuardrailsEnabled !== false,
+    apiKey: "",
+    verifierApiKey: ""
+  };
+}
+
 const defaultModelConfig: ModelConfigInput = {
   name: "默认 OpenAI 兼容服务",
   baseUrl: "https://api.openai.com/v1",
@@ -222,11 +267,13 @@ const defaultModelConfig: ModelConfigInput = {
   maxConcurrency: 2,
   maxOutputTokens: 4096,
   unreadableReviewThreshold: DEFAULT_UNREADABLE_REVIEW_THRESHOLD,
-  gradingMode: DEFAULT_GRADING_MODE,
+  largeQuestionWorkflow: "staged",
+  stagedLayoutEngine: "paddleocr",
+  responsesAgent: defaultResponsesAgentConfig,
   teacherReasoningEffort: DEFAULT_TEACHER_REASONING_EFFORT,
   reviewReasoningEffort: DEFAULT_REVIEW_REASONING_EFFORT,
   supportsJsonSchema: true,
-  supportsJsonObject: true,
+  supportsJsonObject: false,
   supportsBase64Images: true,
   enabled: true
 };
@@ -317,13 +364,14 @@ function reducePipelineEvents(events: PipelineEvent[]): PipelineSummary {
     const next = { ...summary, events: [...summary.events, event].slice(-50) };
     if (event.type === "page_completed") {
       next.processed += 1;
+      if (event.requiresReview) next.reviewed += 1;
       next.lastScore = event.score;
       next.lastMaxScore = event.maxScore;
     }
     if (event.type === "page_skipped") next.skipped += 1;
     if (event.type === "page_failed") next.failures += 1;
     return next;
-  }, { processed: 0, skipped: 0, failures: 0, events: [] });
+  }, { processed: 0, reviewed: 0, skipped: 0, failures: 0, events: [] });
 }
 
 function phaseLabel(phase: PluginPhase) {
@@ -351,7 +399,7 @@ function formatTime(value: unknown) {
 
 function useElectronState() {
   const [browser, setBrowser] = useState(defaultBrowserState);
-  const [summary, setSummary] = useState<PipelineSummary>({ processed: 0, skipped: 0, failures: 0, events: [] });
+  const [summary, setSummary] = useState<PipelineSummary>({ processed: 0, reviewed: 0, skipped: 0, failures: 0, events: [] });
   useEffect(() => {
     const host = getHost();
     if (!host) return;
@@ -398,7 +446,7 @@ function DesktopSidebar({ route, browser }: { route: DesktopRoute; browser: Embe
     </nav>
     <div className="desktop-sidebar-status">
       <span className={browser.plugin.connected ? "desktop-live-dot online" : "desktop-live-dot"} />
-      <div><strong>{browser.plugin.connected ? "智学网已连接" : "等待连接智学网"}</strong><small>{browser.plugin.connected ? "登录状态已保存" : "打开阅卷页面后自动连接"}</small></div>
+      <div><strong>{browser.plugin.connected ? "目标阅卷网站已连接" : "等待连接目标阅卷网站"}</strong><small>{browser.plugin.connected ? "登录状态已保存" : "打开阅卷页面后自动连接"}</small></div>
     </div>
   </aside>;
 }
@@ -422,7 +470,7 @@ function MetricStrip({ browser, summary, template }: { browser: EmbeddedBrowserS
   return <section className="desktop-metric-strip" aria-label="流水线指标">
     <article className="status"><div className="desktop-metric-icon"><Activity size={18} /></div><div><span>当前状态</span><strong>{phaseLabel(browser.plugin.phase)}</strong><small>{browser.plugin.message}</small></div></article>
     <article className="completed"><div className="desktop-metric-icon"><ClipboardCheck size={18} /></div><div><span>本次已批改</span><strong>{summary.processed}</strong><small>最近 {summary.lastScore ?? "--"} / {summary.lastMaxScore ?? "--"} 分</small></div></article>
-    <article className="attention"><div className="desktop-metric-icon"><AlertTriangle size={18} /></div><div><span>需要关注</span><strong>{summary.failures + summary.skipped}</strong><small>失败 {summary.failures} · 跳过 {summary.skipped}</small></div></article>
+    <article className="attention"><div className="desktop-metric-icon"><AlertTriangle size={18} /></div><div><span>需要关注</span><strong>{summary.failures + summary.skipped + summary.reviewed}</strong><small>复核 {summary.reviewed} · 失败 {summary.failures} · 跳过 {summary.skipped}</small></div></article>
     <article className="rubric"><div className="desktop-metric-icon"><BookOpenCheck size={18} /></div><div><span>当前评分标准</span><strong>{template?.rubric.totalScore ?? "--"} 分</strong><small>{template?.title || "尚未绑定评分标准"}</small></div></article>
   </section>;
 }
@@ -430,7 +478,7 @@ function MetricStrip({ browser, summary, template }: { browser: EmbeddedBrowserS
 function RecentEvents({ events, limit = 8 }: { events: PipelineEvent[]; limit?: number }) {
   const visible = events.slice(-limit).reverse();
   return <ol className="desktop-event-list">
-    {visible.length === 0 ? <li className="empty"><span>--:--:--</span><div><strong>等待批改记录</strong><p>打开实时批改并检查智学网页面。</p></div></li> : visible.map((event, index) => <li key={`${event.timestamp || "event"}-${index}`}>
+    {visible.length === 0 ? <li className="empty"><span>--:--:--</span><div><strong>等待批改记录</strong><p>打开实时批改并检查目标阅卷页面。</p></div></li> : visible.map((event, index) => <li key={`${event.timestamp || "event"}-${index}`}>
       <span>{formatTime(event.timestamp)}</span><div><strong>{pipelineEventLabel(event)}</strong><p>{event.phase ? phaseLabel(event.phase) : String(event.adapterId || "系统")}</p></div>
     </li>)}
   </ol>;
@@ -453,7 +501,7 @@ function useTemplateContext() {
       host.getBrowserState()
     ]);
     if (!browserState.url || browserState.url === "about:blank") {
-      throw new Error("请先打开当前智学网阅卷页面，再绑定评分标准");
+      throw new Error("请先打开当前目标阅卷页面，再绑定评分标准");
     }
     const inspection = await host.inspectTargetPage();
     if (!inspection.scoreFields.length) throw new Error("当前阅卷页面没有可用于匹配的最终总分框");
@@ -511,7 +559,7 @@ function DashboardPage({ browser, summary, template, onEnterTest }: { browser: E
         <div className="desktop-readiness-line"><i style={{ width: `${readyCount * 25}%` }} /></div>
         <ul className="desktop-check-list">
           <li className={template?.ready ? "ok" : ""}>{template?.ready ? <Check size={15} /> : <XCircle size={15} />}评分标准已选择<span>{template?.title || "尚未选择评分标准"}</span></li>
-          <li className={browser.plugin.connected ? "ok" : ""}>{browser.plugin.connected ? <Check size={15} /> : <XCircle size={15} />}智学网页面已连接<span>{browser.plugin.adapterName || "等待打开阅卷页面"}</span></li>
+          <li className={browser.plugin.connected ? "ok" : ""}>{browser.plugin.connected ? <Check size={15} /> : <XCircle size={15} />}目标阅卷页面已连接<span>{browser.plugin.adapterName || "等待打开阅卷页面"}</span></li>
           <li className={pageReady ? "ok" : ""}>{pageReady ? <Check size={15} /> : <XCircle size={15} />}学生答卷可以读取<span>{pageReady ? "答卷、评分和翻页控件均已确认" : "需同时确认答卷、评分、提交和翻页控件"}</span></li>
           <li className={pageReady ? "ok" : ""}>{pageReady ? <Check size={15} /> : <XCircle size={15} />}最终总分框可以使用<span>{pageReady ? "提交后自动进入下一份" : "当前页面尚未通过完整检查"}</span></li>
         </ul>
@@ -523,7 +571,7 @@ function DashboardPage({ browser, summary, template, onEnterTest }: { browser: E
       </div>
     </section>
     <section className="desktop-section desktop-test-entry">
-      <div><span>无需配置端口</span><h2>先用本地模拟阅卷验证流程</h2><p>一键打开与智学网控件结构一致的测试页面，可直接测试图像读取、写入总分和翻页，不会访问真实网站。</p></div>
+      <div><span>无需配置端口</span><h2>先用本地模拟阅卷验证流程</h2><p>一键打开与目标阅卷控件结构一致的测试页面，可直接测试图像读取、写入总分和翻页，不会访问真实网站。</p></div>
       <TestEntryButton onEnterTest={onEnterTest} />
     </section>
     <section className="desktop-section desktop-current-template">
@@ -637,7 +685,7 @@ function PipelineControls({ browser, confirmBeforeStart }: { browser: EmbeddedBr
   const [pending, setPending] = useState<PipelineControl | null>(null);
   const [error, setError] = useState("");
   const send = async (control: PipelineControl) => {
-    if (control === "start" && confirmBeforeStart && !window.confirm("开始批改会向智学网写入并提交真实分数，确定继续吗？")) return;
+    if (control === "start" && confirmBeforeStart && !window.confirm("开始批改会向当前阅卷网站写入并提交真实分数，确定继续吗？")) return;
     setPending(control); setError("");
     try {
       const host = getHost();
@@ -743,15 +791,15 @@ function ActiveJobPage({ browser, summary, template, preferences }: { browser: E
 function JobsPage({ template, browser, onEnterTest }: { template: TemplateContext | null; browser: EmbeddedBrowserState; onEnterTest: () => Promise<unknown> }) {
   return <div className="desktop-page-body">
     <section className="desktop-section desktop-job-setup">
-      <div className="desktop-section-heading"><div><span>当前任务</span><h2>智学网自动批改</h2></div><span className="desktop-status-label active"><Activity size={13} />可启动</span></div>
+      <div className="desktop-section-heading"><div><span>当前任务</span><h2>阅卷网站自动批改</h2></div><span className="desktop-status-label active"><Activity size={13} />可启动</span></div>
       <div className="desktop-job-definition">
         <div><span>评分标准</span><strong>{template?.title || "尚未选择"}</strong><small>{template?.templateId || "--"}</small></div>
         <ChevronRight size={18} />
-        <div><span>阅卷页面</span><strong>{browser.title || "等待打开智学网"}</strong><small>{browser.url || "尚未连接网页"}</small></div>
+        <div><span>阅卷页面</span><strong>{browser.title || "等待打开目标阅卷网站"}</strong><small>{browser.url || "尚未连接网页"}</small></div>
         <ChevronRight size={18} />
         <div><span>执行策略</span><strong>自动写分并翻页</strong><small>{browser.plugin.capabilities.skip ? "异常自动重试，重试耗尽后跳过" : "异常自动重试，重试耗尽后暂停人工处理"}</small></div>
       </div>
-      <div className="desktop-callout"><ShieldCheck size={17} /><div><strong>学生数据与模型配置相互隔离</strong><p>系统只读取当前学生的答卷图像，并将模型给出的最终总分写回智学网；模型密钥始终保存在本机。</p></div></div>
+      <div className="desktop-callout"><ShieldCheck size={17} /><div><strong>学生数据与模型配置相互隔离</strong><p>系统只读取当前学生的答卷图像，并将模型给出的最终总分写回当前阅卷网站；模型密钥始终保存在本机。</p></div></div>
       <div className="desktop-job-actions"><a className="desktop-primary-action inline" href="/jobs/new?electron=1"><CirclePlay size={16} />引导配置新任务<ChevronRight size={15} /></a><TestEntryButton onEnterTest={onEnterTest} /></div>
     </section>
     <section className="desktop-section">
@@ -916,7 +964,7 @@ function GuidedSetupPage({ browser }: { browser: EmbeddedBrowserState }) {
     content = <>
       <div className="desktop-guide-heading"><span>步骤 2</span><h2>选择评分标准</h2><p>这里只显示已保存的真实评分标准；内置测试模板不能用于生产任务。</p></div>
       <div className="desktop-guide-template-list">
-        {templates.map((item) => <label key={item.id} className={templateId === item.id ? "selected" : ""}><input type="radio" name="guide-template" checked={templateId === item.id} onChange={() => setTemplateId(item.id)} /><div><strong>{item.title}</strong><span>{item.totalScore} 分 · 可编辑 · {item.gradingCount} 条历史记录</span></div><BookOpenCheck size={15} /></label>)}
+        {templates.map((item) => <label key={item.id} className={templateId === item.id ? "selected" : ""}><input type="radio" name="guide-template" checked={templateId === item.id} onChange={() => setTemplateId(item.id)} /><div><strong>{item.title}</strong><span>{questionTypeLabel(item.questionType)} · {item.totalScore} 分 · 可编辑 · {item.gradingCount} 条历史记录</span></div><BookOpenCheck size={15} /></label>)}
         {!templates.length && <div className="desktop-guide-empty"><AlertTriangle size={18} /><strong>还没有可用于真实任务的评分标准</strong><span>请先在评分标准编辑器中导入题目和评分依据。</span></div>}
       </div>
       <a className="desktop-secondary-action" href="/templates/new?electron=1"><Plus size={14} />新建评分标准</a>
@@ -929,19 +977,19 @@ function GuidedSetupPage({ browser }: { browser: EmbeddedBrowserState }) {
       <div className="desktop-form-actions"><button className="desktop-save-button" disabled={pending !== "" || !browser.url || browser.isLoading} onClick={() => void inspectTarget()}>{pending === "inspect" ? <LoaderCircle className="spin" size={15} /> : <ListChecks size={15} />}识别当前页面</button></div>
       {inspection && <div className="desktop-guide-inspection"><div><span>站点适配</span><strong>{inspection.adapterName}</strong></div><div><span>题目</span><strong>{inspection.questionLabel || inspection.pageTitle}</strong></div><div><span>评分栏</span><strong>{inspection.scoreFields.length} 个 / 满分 {inspection.fullScore ?? "--"}</strong></div><div><span>自动提交</span><strong className={inspection.autoSubmit ? "warning" : ""}>{inspection.autoSubmit === undefined ? "未检测到" : inspection.autoSubmit ? "已开启，必须关闭" : "已关闭"}</strong></div>{inspection.progress && <div><span>阅卷进度</span><strong>{inspection.progress.completed} / {inspection.progress.total}</strong></div>}</div>}
       {inspectionIssues.map((issue) => <p className="desktop-guide-warning" key={issue}><AlertTriangle size={14} />{issue}</p>)}
-      {inspection?.batchComplete && <div className="desktop-guide-caution desktop-guide-complete-override"><AlertTriangle size={17} /><div><strong>智学网报告当前批改任务已完成</strong><span>仍可继续做图像、字段和页面控制测试；正式流水线会把已完成状态视为批次终点。</span></div><button className="desktop-secondary-action" disabled={allowCompletedBatch} onClick={() => setAllowCompletedBatch(true)}>{allowCompletedBatch ? <Check size={14} /> : <ChevronRight size={14} />}{allowCompletedBatch ? "已允许继续" : "忽略完成状态，继续配置"}</button></div>}
+      {inspection?.batchComplete && <div className="desktop-guide-caution desktop-guide-complete-override"><AlertTriangle size={17} /><div><strong>目标阅卷网站报告当前批改任务已完成</strong><span>仍可继续做图像、字段和页面控制测试；正式流水线会把已完成状态视为批次终点。</span></div><button className="desktop-secondary-action" disabled={allowCompletedBatch} onClick={() => setAllowCompletedBatch(true)}>{allowCompletedBatch ? <Check size={14} /> : <ChevronRight size={14} />}{allowCompletedBatch ? "已允许继续" : "忽略完成状态，继续配置"}</button></div>}
     </>;
   } else if (step === 3) {
     content = <>
-      <div className="desktop-guide-heading"><span>步骤 4</span><h2>核对网页总分与模板</h2><p>网页只接收最终总分；小问得分和逐点评审保留在批改历史与运行日志中。</p></div>
+      <div className="desktop-guide-heading"><span>步骤 4</span><h2>核对网页总分与模板</h2><p>网页接收总分框中的最终分数；睿芽云多评页面会按小问顺序写入，小问逐点评审保留在批改历史与运行日志中。</p></div>
       {alignment && <div className="desktop-table-wrap"><table className="desktop-table desktop-guide-alignment"><thead><tr><th>网页输入</th><th>网页满分</th><th>本地匹配项</th><th>模板满分</th><th>状态</th></tr></thead><tbody>{alignment.rows.map((row) => <tr key={row.targetId}><td>{row.targetLabel}<small>{row.targetId}</small></td><td>{row.targetMaxScore ?? "--"}</td><td>{row.sourceLabel || "未匹配"}<small>{row.sourceId || "--"}</small></td><td>{row.sourceMaxScore ?? "--"}</td><td><GuideCheck ok={row.matched}>{row.matched ? "匹配" : "不一致"}</GuideCheck></td></tr>)}</tbody></table></div>}
       {alignment?.issues.map((issue) => <p className="desktop-guide-warning" key={issue}><AlertTriangle size={14} />{issue}</p>)}
-      {alignment?.ok && <div className="desktop-guide-success"><ShieldCheck size={17} /><div><strong>最终总分匹配</strong><span>网页只写入模型最终总分；不会填写任何小问或过程评分框。</span></div></div>}
+      {alignment?.ok && <div className="desktop-guide-success"><ShieldCheck size={17} /><div><strong>总分栏匹配</strong><span>网页只写入各小问最终总分；不会填写过程评分框。</span></div></div>}
     </>;
   } else if (step === 4) {
     content = <>
       <div className="desktop-guide-heading"><span>步骤 5</span><h2>执行不提交试运行</h2><p>读取当前答卷并请求教师模型。可选的写入测试会校验网页字段后立即恢复原值，绝不点击提交。</p></div>
-      <label className="desktop-guide-toggle"><input type="checkbox" checked={verifyWrite} onChange={(event) => { setVerifyWrite(event.target.checked); setDryRun(null); }} /><span><strong>同时验证最终总分写入并回滚</strong><small>只操作总分框；仅在网页自动提交关闭时使用</small></span></label>
+      <label className="desktop-guide-toggle"><input type="checkbox" checked={verifyWrite} onChange={(event) => { setVerifyWrite(event.target.checked); setDryRun(null); }} /><span><strong>同时验证最终总分写入并回滚</strong><small>只操作总分框；多评页面按小问顺序写入；仅在网页自动提交关闭时使用</small></span></label>
       <button className="desktop-save-button" disabled={pending !== ""} onClick={() => void runDryRun()}>{pending === "dry-run" ? <LoaderCircle className="spin" size={15} /> : <CirclePlay size={15} />}开始安全试运行</button>
       {dryRun && <div className="desktop-guide-dry-result"><div><span>模型得分</span><strong>{dryRun.score} / {dryRun.maxScore}</strong></div><div><span>原图</span><strong>{Math.round(dryRun.imageBytes / 1024)} KB</strong><small>{dryRun.imageHash.slice(0, 12)}…</small></div><div><span>人工复核</span><strong className={dryRun.requiresReview ? "warning" : ""}>{dryRun.requiresReview ? "需要复核" : "无需复核"}</strong></div><div><span>网页最终总分</span><strong>{dryRun.writeTest ? dryRun.writeTest.message : "未执行"}</strong></div></div>}
     </>;
@@ -1023,7 +1071,7 @@ function TemplateTable({ activeTemplateId, onBind, onEmpty }: {
     <div className="desktop-table-wrap"><table className="desktop-table desktop-template-table"><thead><tr><th className="desktop-selection-cell"><span className="desktop-visually-hidden">选择</span></th><th>模板</th><th>状态</th><th>满分</th><th>题目素材</th><th>批改记录</th><th>更新时间</th><th>当前任务</th><th /></tr></thead><tbody>
     {templates.map((item) => {
       const active = activeTemplateId === item.id;
-      return <tr className={`${active ? "bound" : ""} ${selectedIds.has(item.id) ? "selected" : ""}`} key={item.id}><td className="desktop-selection-cell"><input type="checkbox" aria-label={`选择评分标准 ${item.title}`} checked={selectedIds.has(item.id)} disabled={active || deleting} title={active ? "当前任务正在使用此评分标准，不能删除" : "选择评分标准"} onChange={() => toggle(item.id)} /></td><td><strong style={sharedElementStyle(sharedElementName("prism-template-title", item.id))}>{item.title}</strong><small>{item.id}</small></td><td><span className="desktop-status-label locked"><BookOpenCheck size={12} />可编辑</span></td><td><span style={sharedElementStyle(sharedElementName("prism-template-score", item.id))}>{item.totalScore} 分</span></td><td>{item.questionImageCount + item.referenceImageCount} 张</td><td>{item.gradingCount}</td><td>{new Date(item.updatedAt).toLocaleString("zh-CN", { hour12: false })}</td><td>{active ? <span className="desktop-status-label locked"><Link2 size={12} />已绑定</span> : <button className="desktop-template-bind-button" disabled={Boolean(pendingId) || deleting} onClick={() => void bind(item.id)}>{pendingId === item.id ? <LoaderCircle className="spin" size={13} /> : <Link2 size={13} />}{pendingId === item.id ? "正在匹配" : "绑定到当前任务"}</button>}</td><td><a title="打开模板" href={`/templates/${encodeURIComponent(item.id)}?electron=1`}><ChevronRight size={16} /></a></td></tr>;
+      return <tr className={`${active ? "bound" : ""} ${selectedIds.has(item.id) ? "selected" : ""}`} key={item.id}><td className="desktop-selection-cell"><input type="checkbox" aria-label={`选择评分标准 ${item.title}`} checked={selectedIds.has(item.id)} disabled={active || deleting} title={active ? "当前任务正在使用此评分标准，不能删除" : "选择评分标准"} onChange={() => toggle(item.id)} /></td><td><strong style={sharedElementStyle(sharedElementName("prism-template-title", item.id))}>{item.title}</strong><small>{item.id}</small></td><td><span className="desktop-status-label locked"><BookOpenCheck size={12} />{questionTypeLabel(item.questionType)} · 可编辑</span></td><td><span style={sharedElementStyle(sharedElementName("prism-template-score", item.id))}>{item.totalScore} 分</span></td><td>{item.questionImageCount + item.referenceImageCount} 张</td><td>{item.gradingCount}</td><td>{new Date(item.updatedAt).toLocaleString("zh-CN", { hour12: false })}</td><td>{active ? <span className="desktop-status-label locked"><Link2 size={12} />已绑定</span> : <button className="desktop-template-bind-button" disabled={Boolean(pendingId) || deleting} onClick={() => void bind(item.id)}>{pendingId === item.id ? <LoaderCircle className="spin" size={13} /> : <Link2 size={13} />}{pendingId === item.id ? "正在匹配" : "绑定到当前任务"}</button>}</td><td><a title="打开模板" href={`/templates/${encodeURIComponent(item.id)}?electron=1`}><ChevronRight size={16} /></a></td></tr>;
     })}
     {!templates.length && <tr><td colSpan={9} className="desktop-empty-cell">暂无评分模板</td></tr>}
   </tbody></table></div></>;
@@ -1100,6 +1148,7 @@ function RubricRefinement({ busy, message, onRefine }: {
 function TemplateCreatePage() {
   const [questionText, setQuestionText] = useState("");
   const [referenceText, setReferenceText] = useState("");
+  const [questionType, setQuestionType] = useState<QuestionType>(DEFAULT_QUESTION_TYPE);
   const [questionImages, setQuestionImages] = useState<TemplateMaterialImage[]>([]);
   const [referenceImages, setReferenceImages] = useState<TemplateMaterialImage[]>([]);
   const [rubric, setRubric] = useState<Rubric | null>(null);
@@ -1109,7 +1158,12 @@ function TemplateCreatePage() {
   const [error, setError] = useState("");
   const [refinementMessage, setRefinementMessage] = useState("");
   const materialReady = Boolean((questionText.trim() || questionImages.length) && (referenceText.trim() || referenceImages.length));
-  const invalidateRubric = () => { setRubric(null); setRubricJson(""); setEditingJson(false); };
+  const invalidateRubric = () => { setRubric(null); setRubricJson(""); setEditingJson(false); setRefinementMessage(""); };
+  const changeQuestionType = (next: QuestionType) => {
+    if (next === questionType) return;
+    setQuestionType(next);
+    if (rubric) invalidateRubric();
+  };
   const updateQuestionText = (value: string) => { setQuestionText(value); if (rubric) invalidateRubric(); };
   const updateReferenceText = (value: string) => { setReferenceText(value); if (rubric) invalidateRubric(); };
   const updateQuestionImages = (value: TemplateMaterialImage[]) => { setQuestionImages(value); if (rubric) invalidateRubric(); };
@@ -1130,6 +1184,7 @@ function TemplateCreatePage() {
       const form = new FormData();
       form.append("questionText", questionText.trim() || "题目文字见题目图片");
       form.append("referenceText", referenceText.trim() || "参考答案与评分标准见图片");
+      form.append("questionType", questionType);
       questionImages.forEach((image) => form.append("questionImages", image.file, image.file.name));
       referenceImages.forEach((image) => form.append("referenceImages", image.file, image.file.name));
       const generated = await api<Rubric>("/api/rubrics/structure", { method: "POST", body: form });
@@ -1142,6 +1197,7 @@ function TemplateCreatePage() {
     try {
       const next = JSON.parse(rubricJson) as Rubric;
       if (!next.title || !Array.isArray(next.subquestions) || !Number.isFinite(next.totalScore)) throw new Error("评分标准缺少标题、总分或小问");
+      if (next.questionType !== questionType) throw new Error("JSON 中的题型与上方选择不一致，请先切换题型后再应用");
       setRubric({ ...next, status: "draft" }); setEditingJson(false); setError("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "JSON 格式无效"); }
   };
@@ -1163,7 +1219,7 @@ function TemplateCreatePage() {
     if (!rubric) return;
     setBusy("save"); setError("");
     try {
-      const savedRubric: Rubric = { ...rubric, status: "saved" };
+      const savedRubric: Rubric = { ...rubric, questionType, status: "saved" };
       const form = new FormData();
       form.append("questionText", questionText);
       form.append("referenceText", referenceText);
@@ -1179,6 +1235,7 @@ function TemplateCreatePage() {
     {error && <div className="desktop-error-state"><AlertTriangle size={17} />{error}{/模型配置|API Key|模型/.test(error) && <a href="/models?electron=1">检查教师模型</a>}</div>}
     <section className="desktop-section desktop-template-import-section">
       <div className="desktop-section-heading"><div><span>步骤 1</span><h2>导入题目与评分依据</h2></div><span className="desktop-status-label">TXT · MD · DOCX · 文本型 PDF · 图片</span></div>
+      <fieldset className="desktop-question-type-picker"><legend>评分标准题型</legend><div className="desktop-question-type-options"><label className={questionType === "large" ? "selected" : ""}><input type="radio" name="template-question-type" checked={questionType === "large"} onChange={() => changeQuestionType("large")} /><span><strong>大题</strong><small>沿用现有教师模型批改链路</small></span></label><label className={questionType === "small" ? "selected" : ""}><input type="radio" name="template-question-type" checked={questionType === "small"} onChange={() => changeQuestionType("small")} /><span><strong>小题</strong><small>PaddleOCR → GPT 作答还原 → GPT 小题评分</small></span></label></div></fieldset>
       <div className="desktop-template-material-grid">
         <TemplateMaterialInput title="题目原文" icon={<FileText size={18} />} text={questionText} images={questionImages} placeholder="粘贴题目文字；有题图时可以添加图片或直接粘贴截图。" busy={busy === "question-document"} onText={updateQuestionText} onImages={updateQuestionImages} onDocument={(file) => void extractDocument(file, "question")} />
         <TemplateMaterialInput title="参考答案与评分标准" icon={<FileCheck2 size={18} />} text={referenceText} images={referenceImages} placeholder="粘贴参考答案和逐点给分要求；公式可以使用 LaTeX。" busy={busy === "reference-document"} onText={updateReferenceText} onImages={updateReferenceImages} onDocument={(file) => void extractDocument(file, "reference")} />
@@ -1190,7 +1247,7 @@ function TemplateCreatePage() {
       <div className="desktop-template-name-field"><label><span>评分标准名称</span><input value={rubric.title} onChange={(event) => { const next = { ...rubric, title: event.target.value, status: "draft" as const }; setRubric(next); setRubricJson(JSON.stringify(next, null, 2)); }} /></label><div><span>总分</span><strong>{rubric.totalScore} 分</strong></div><div><span>小问</span><strong>{rubric.subquestions.length}</strong></div><div><span>评分点</span><strong>{rubric.subquestions.reduce((total, item) => total + item.scorePoints.length, 0)}</strong></div></div>
       <RubricRefinement busy={busy === "refine"} message={refinementMessage} onRefine={refine} />
       {rubric.warnings.length > 0 && <div className="desktop-template-warning"><AlertTriangle size={17} /><div><strong>保存前请检查以下提示</strong>{rubric.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div></div>}
-      {editingJson ? <div className="desktop-template-json-editor"><textarea value={rubricJson} onChange={(event) => setRubricJson(event.target.value)} spellCheck={false} /><footer><button className="desktop-secondary-action" onClick={() => { setRubricJson(JSON.stringify(rubric, null, 2)); setEditingJson(false); }}>取消修改</button><button className="desktop-save-button" onClick={applyJson}><Check size={15} />应用修改</button></footer></div> : <div className="desktop-rubric-table desktop-template-rubric-preview">{rubric.subquestions.map((question) => <div key={question.id}><header><div><strong>{question.id} · {question.title}</strong><span>{question.scorePoints.length} 个评分点</span></div><b>{question.maxScore} 分</b></header>{question.finalAnswers.length > 0 && <div className="desktop-template-final-answers"><span>参考结果</span><div>{question.finalAnswers.map((answer, index) => <span key={`${answer.expression}-${index}`}><MathText value={answer.expression} formulaByDefault />{answer.unit && <small>{answer.unit}</small>}</span>)}</div></div>}{question.scorePoints.map((point) => <article key={point.id}><span>{point.id}</span><div><strong>{point.title}</strong><MathText value={point.description} formulaByDefault /><div className="desktop-rubric-expected"><span>判分依据</span><MathText value={point.expected} formulaByDefault /></div><ScorePointGuidance point={point} defaultOpen /></div><b>{point.score} 分</b></article>)}</div>)}</div>}
+      {editingJson ? <div className="desktop-template-json-editor"><textarea value={rubricJson} onChange={(event) => setRubricJson(event.target.value)} spellCheck={false} /><footer><button className="desktop-secondary-action" onClick={() => { setRubricJson(JSON.stringify(rubric, null, 2)); setEditingJson(false); }}>取消修改</button><button className="desktop-save-button" onClick={applyJson}><Check size={15} />应用修改</button></footer></div> : <div className="desktop-rubric-table desktop-template-rubric-preview">{rubric.subquestions.map((question) => <div key={question.id}><header><div><strong>{question.id} · {question.title}</strong><span>{question.scorePoints.length} 个评分点</span></div><b>{question.maxScore} 分</b></header>{question.finalAnswers.length > 0 && <div className="desktop-template-final-answers"><span>参考结果</span><div>{question.finalAnswers.map((answer, index) => <span key={`${answer.expression}-${index}`}><MathText value={formulaWithUnit(answer.expression, answer.unit)} formulaByDefault /></span>)}</div></div>}{question.scorePoints.map((point) => <article key={point.id}><span>{point.id}</span><div><strong>{point.title}</strong><MathText value={point.description} formulaByDefault /><div className="desktop-rubric-expected"><span>判分依据</span><MathText value={point.expected} formulaByDefault /></div><ScorePointGuidance point={point} defaultOpen /></div><b>{point.score} 分</b></article>)}</div>)}</div>}
     </section>}
   </div>;
 }
@@ -1281,6 +1338,7 @@ function TemplateDetailPage({ templateId }: { templateId?: string }) {
     try {
       const next = JSON.parse(rubricJson) as Rubric;
       if (!next.title || !Array.isArray(next.subquestions) || !Number.isFinite(next.totalScore)) throw new Error("评分标准缺少标题、总分或小问");
+      if (next.questionType !== rubric?.questionType) throw new Error("已保存评分标准的题型不可修改，请新建评分标准");
       applyRubric(next); setError("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "JSON 格式无效"); }
   };
@@ -1314,6 +1372,7 @@ function TemplateDetailPage({ templateId }: { templateId?: string }) {
   if (error && !template) return <div className="desktop-page-body"><div className="desktop-error-state"><AlertTriangle size={18} />{error}</div></div>;
   if (!template || !rubric) return <DesktopLoading label="正在读取模板详情" />;
   return <div className="desktop-page-body desktop-template-detail">
+    <div className="desktop-template-type-banner"><BookOpenCheck size={14} /><strong>{questionTypeLabel(rubric.questionType)}</strong><span>{rubric.questionType === "small" ? "固定走 PaddleOCR → GPT 作答还原 → GPT 小题评分链路" : "沿用现有教师模型批改链路"}</span></div>
     {error && <div className="desktop-error-state"><AlertTriangle size={17} />{error}</div>}
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>{template.id}</span><h2 style={sharedElementStyle(sharedElementName("prism-template-title", template.id))}>{rubric.title}</h2></div><div className="desktop-template-review-actions"><span className="desktop-status-label locked"><BookOpenCheck size={13} />评分标准 v{template.rubric.version} · 可编辑</span><button className="desktop-secondary-action" disabled={busy !== null} onClick={() => setEditingJson((value) => !value)}><Code2 size={14} />{editingJson ? "返回预览" : "高级编辑"}</button><button className="desktop-save-button" disabled={!changed || busy !== null || editingJson} onClick={() => void save()}>{busy === "save" ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{busy === "save" ? "正在保存" : changed ? `保存为 v${template.rubric.version + 1}` : "已保存"}</button></div></div><div className="desktop-template-summary"><div><span>满分</span><strong style={sharedElementStyle(sharedElementName("prism-template-score", template.id))}>{rubric.totalScore} 分</strong></div><div><span>小问</span><strong>{rubric.subquestions.length}</strong></div><div><span>历史答卷</span><strong>{template.records.length}</strong></div><div><span>素材</span><strong>{template.questionImageCount + template.referenceImageCount} 张</strong></div></div>{changed && <div className="desktop-template-unsaved"><AlertTriangle size={14} />当前修改尚未保存；上传评分仍使用已保存的 v{template.rubric.version}。</div>}<ManualTemplateGrade templateId={template.id} /></section>
     <div className="desktop-two-columns"><section className="desktop-section"><div className="desktop-section-heading"><div><span>题目</span><h2>识别原文</h2></div></div><div className="desktop-document-copy"><MathText value={template.questionText} formulaByDefault /></div></section><section className="desktop-section"><div className="desktop-section-heading"><div><span>参考答案</span><h2>标准解答</h2></div></div><div className="desktop-document-copy"><MathText value={template.referenceText} formulaByDefault /></div></section></div>
@@ -1381,7 +1440,10 @@ function HistoryPage() {
       <div className="desktop-history-toolbar"><label><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索答卷、学生编号或评分标准" /></label><span>{filtered.length} 条记录</span></div>
       <div className="desktop-bulk-toolbar"><label><input type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || deleting} onChange={toggleFiltered} /><span>全选当前结果</span></label><span>已选择 {selectedIds.size} 条</span><button className="desktop-danger-action" disabled={!selectedIds.size || deleting} onClick={() => void removeSelected()}>{deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deleting ? "正在删除" : "删除所选"}</button></div>
       <div className="desktop-table-wrap"><table className="desktop-table desktop-history-table"><thead><tr><th className="desktop-selection-cell"><span className="desktop-visually-hidden">选择</span></th><th>答卷</th><th>评分标准</th><th>得分</th><th>状态</th><th>模型</th><th>批改时间</th><th /></tr></thead><tbody>
-        {filtered.map(({ record, templateTitle }) => <tr className={selectedIds.has(record.id) ? "selected" : ""} key={record.id}><td className="desktop-selection-cell"><input type="checkbox" aria-label={`选择批改记录 ${record.result.fileName}`} checked={selectedIds.has(record.id)} disabled={deleting} onChange={() => toggleRecord(record.id)} /></td><td><strong>{record.result.fileName}</strong><small>{record.result.studentId || record.id}</small></td><td><span style={sharedElementStyle(sharedElementName("prism-record-template", record.id))}>{templateTitle}</span></td><td><b className="desktop-history-score" style={sharedElementStyle(sharedElementName("prism-record-score", record.id))}>{record.result.score} / {record.result.maxScore}</b></td><td><span className={`desktop-status-label ${record.result.status === "completed" ? "locked" : "warning"}`}>{record.result.status === "completed" ? <Check size={12} /> : <AlertTriangle size={12} />}{record.result.status === "completed" ? "已完成" : record.result.status === "needs_review" ? "待复核" : "失败"}</span></td><td>{record.result.modelName}<small>{record.modelCallCount} 次调用</small></td><td>{new Date(record.createdAt).toLocaleString("zh-CN", { hour12: false })}</td><td><a title="打开批改记录" href={`/history/${encodeURIComponent(record.id)}?electron=1`}><ChevronRight size={16} /></a></td></tr>)}
+        {filtered.map(({ record, templateTitle }) => {
+          const reviewSignals = summarizeReviewSignals(record.result);
+          return <tr className={selectedIds.has(record.id) ? "selected" : ""} key={record.id}><td className="desktop-selection-cell"><input type="checkbox" aria-label={`选择批改记录 ${record.result.fileName}`} checked={selectedIds.has(record.id)} disabled={deleting} onChange={() => toggleRecord(record.id)} /></td><td><strong>{record.result.fileName}</strong><small>{record.result.studentId || record.id}</small>{record.artifacts && <small>{record.artifacts.length} 个批改产物</small>}</td><td><span style={sharedElementStyle(sharedElementName("prism-record-template", record.id))}>{templateTitle}</span></td><td><b className="desktop-history-score" style={sharedElementStyle(sharedElementName("prism-record-score", record.id))}>{record.result.score} / {record.result.maxScore}</b></td><td><div className="desktop-history-status"><span className={`desktop-status-label ${record.result.status === "completed" ? "locked" : "warning"}`}>{record.result.status === "completed" ? <Check size={12} /> : <AlertTriangle size={12} />}{record.result.status === "completed" ? "已完成" : record.result.status === "needs_review" ? "待复核" : "失败"}</span>{record.result.status === "needs_review" && <small>低置信 {reviewSignals.totalLowConfidence} 项 · {reviewSignals.reviewReasons} 个原因</small>}</div></td><td>{record.result.modelName}<small>{record.modelCallCount} 次调用</small></td><td>{new Date(record.createdAt).toLocaleString("zh-CN", { hour12: false })}</td><td><div className="desktop-history-actions"><a className="desktop-history-open" title="打开批改记录，在详情中进行重新批改或 OCR 回放" aria-label={`打开批改记录 ${record.result.fileName}`} href={`/history/${encodeURIComponent(record.id)}?electron=1`}><ChevronRight size={16} /></a></div></td></tr>;
+        })}
         {!filtered.length && <tr><td colSpan={8} className="desktop-empty-cell">{loading ? "正在读取批改记录" : query ? "没有符合条件的批改记录" : "暂无批改记录"}</td></tr>}
       </tbody></table></div>
     </section>
@@ -1390,9 +1452,13 @@ function HistoryPage() {
 
 function RecordPage({ recordId }: { recordId?: string }) {
   const [record, setRecord] = useState<GradingHistoryRecord | null>(null);
+  const [templateId, setTemplateId] = useState("");
   const [templateTitle, setTemplateTitle] = useState("");
   const [rubric, setRubric] = useState<Rubric | null>(null);
   const [modelCalls, setModelCalls] = useState<ModelCallHistoryEntry[] | null>(null);
+  const [artifactPreview, setArtifactPreview] = useState<GradingArtifact | null>(null);
+  const [regrading, setRegrading] = useState(false);
+  const [cachedReplaying, setCachedReplaying] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
     if (!recordId) return;
@@ -1403,7 +1469,7 @@ function RecordPage({ recordId }: { recordId?: string }) {
         );
         const found = records[0];
         if (!found) throw new Error("找不到该批改记录");
-        setRecord(found.record); setTemplateTitle(found.templateTitle); setRubric(found.rubric);
+        setRecord(found.record); setTemplateId(found.templateId); setTemplateTitle(found.templateTitle); setRubric(found.rubric);
         try {
           setModelCalls(await api<ModelCallHistoryEntry[]>(`/api/history-records/${encodeURIComponent(found.record.id)}/model-calls`));
         } catch {
@@ -1412,8 +1478,43 @@ function RecordPage({ recordId }: { recordId?: string }) {
       } catch (reason) { setError(reason instanceof Error ? reason.message : "记录读取失败"); }
     })();
   }, [recordId]);
+  const regrade = async (resultId: string) => {
+    if (!templateId || regrading || cachedReplaying) return;
+    setRegrading(true);
+    setError("");
+    try {
+      const next = await api<GradingResult>(`/api/templates/${encodeURIComponent(templateId)}/regrade`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resultId, reason: "从批改记录发起重新批改" })
+      });
+      pushRoute(`/history/${encodeURIComponent(next.id)}?electron=1`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "历史答卷重新批改失败");
+    } finally {
+      setRegrading(false);
+    }
+  };
+  const replayCachedOcr = async (resultId: string) => {
+    if (!templateId || regrading || cachedReplaying) return;
+    setCachedReplaying(true);
+    setError("");
+    try {
+      const next = await api<GradingResult>(`/api/templates/${encodeURIComponent(templateId)}/replay-cached-ocr`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resultId, reason: "从批改记录详情发起缓存 OCR 完整链路回放" })
+      });
+      pushRoute(`/history/${encodeURIComponent(next.id)}?electron=1`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "缓存 OCR 回放失败");
+    } finally {
+      setCachedReplaying(false);
+    }
+  };
   if (error) return <div className="desktop-page-body"><div className="desktop-error-state"><AlertTriangle size={18} />{error}</div></div>;
   if (!record) return <DesktopLoading label="正在检索批改记录" />;
+  const cachedReplayAvailable = record.result.gradingPipeline === "large_question" && Boolean(record.result.ocrAudit?.rawJsonl?.trim());
   return <div className="desktop-page-body desktop-record-detail-page">
     <section className="desktop-record-overview">
       <div><span>评分标准</span><strong style={sharedElementStyle(sharedElementName("prism-record-template", record.id))}>{templateTitle}</strong></div>
@@ -1428,13 +1529,20 @@ function RecordPage({ recordId }: { recordId?: string }) {
         result={record.result}
         rubric={rubric ?? undefined}
         answerImageUrl={record.answerImage.url}
-        canRegrade={false}
-        regrading={false}
+        artifacts={record.artifacts}
+        canRegrade={Boolean(templateId)}
+        regrading={regrading}
         scoreViewTransitionName={sharedElementName("prism-record-score", record.id)}
-        onRegrade={async () => undefined}
+        onRegrade={regrade}
+        onPreviewArtifact={(artifact) => setArtifactPreview(artifact)}
+        onCachedReplay={cachedReplayAvailable ? replayCachedOcr : undefined}
+        cachedReplaying={cachedReplaying}
+        cachedReplayUnavailable={record.result.gradingPipeline === "large_question" && !cachedReplayAvailable}
       />
     </section>
     {modelCalls ? <ModelCallHistory calls={modelCalls} /> : <section className="model-call-history"><div className="model-call-history-empty">正在读取本题模型原始调用...</div></section>}
+    {record.artifacts && <GradingArtifactList resultId={record.result.id} artifacts={record.artifacts} onPreview={(artifact) => setArtifactPreview(artifact)} />}
+    {artifactPreview && <GradingArtifactPreview artifact={artifactPreview} onClose={() => setArtifactPreview(null)} />}
   </div>;
 }
 
@@ -1444,7 +1552,11 @@ function LogsPage() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [stoppingId, setStoppingId] = useState<string | null>(null);
   const [stopError, setStopError] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const reloadSequence = useRef(0);
   const reload = useCallback(() => {
+    const sequence = reloadSequence.current + 1;
+    reloadSequence.current = sequence;
     const host = getHost();
     void Promise.all([
       api<SystemLogSnapshot>("/api/logs?limit=400"),
@@ -1457,6 +1569,9 @@ function LogsPage() {
           .sort((left, right) => left.timestamp.localeCompare(right.timestamp))
           .slice(-500)
       });
+      if (sequence === reloadSequence.current) setLoadError("");
+    }).catch((error) => {
+      if (sequence === reloadSequence.current) setLoadError(error instanceof Error ? error.message : "日志读取失败");
     });
   }, []);
   useEffect(() => { reload(); if (!autoRefresh) return; const timer = window.setInterval(reload, 2000); return () => window.clearInterval(timer); }, [autoRefresh, reload]);
@@ -1476,7 +1591,8 @@ function LogsPage() {
   };
   const entries = useMemo(() => (snapshot?.entries || []).filter((entry) => `${entry.scope} ${entry.step} ${entry.message}`.toLowerCase().includes(query.toLowerCase())).slice().reverse(), [query, snapshot]);
   return <div className="desktop-page-body desktop-logs-page">
-    <section className="desktop-log-toolbar"><label><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选步骤、消息或作用域" /></label><button className={autoRefresh ? "active" : ""} onClick={() => setAutoRefresh((value) => !value)}><RefreshCw className={autoRefresh ? "spin-slow" : ""} size={14} />自动刷新</button><button title="立即刷新" onClick={reload}><RefreshCw size={15} /></button></section>
+    <section className="desktop-log-toolbar"><label><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选消息、步骤或范围" /></label><button className={autoRefresh ? "active" : ""} onClick={() => setAutoRefresh((value) => !value)}><RefreshCw className={autoRefresh ? "spin-slow" : ""} size={14} />自动刷新</button><button title="立即刷新" onClick={reload}><RefreshCw size={15} /></button></section>
+    {loadError && <div className="desktop-log-load-error"><AlertTriangle size={13} /><span>日志刷新失败：{loadError}</span><button type="button" onClick={reload}>重试</button></div>}
     {stopError && <div className="desktop-log-stop-error"><AlertTriangle size={13} />{stopError}</div>}
     <section className="desktop-log-layout"><aside><span>活动操作</span>{snapshot?.activeOperations.length ? snapshot.activeOperations.map((operation) => <div key={operation.id}><LoaderCircle className="spin" size={14} /><strong>{operation.label}</strong><small>{operation.step}</small>{operation.cancellable && <button className="desktop-force-stop" title="强制停止任务" disabled={stoppingId !== null} onClick={() => void forceStop(operation.id, operation.label, operation.scope)}>{stoppingId === operation.id ? <LoaderCircle className="spin" size={12} /> : <Square size={11} />}<span>{stoppingId === operation.id ? "正在停止" : "强制停止"}</span></button>}</div>) : <p>当前没有运行中的模型调用</p>}</aside><div className="desktop-log-stream">{entries.map((entry) => <LogEntry key={entry.id} entry={entry} />)}{!entries.length && <div className="desktop-empty-state"><TerminalSquare size={22} /><strong>暂无匹配日志</strong><span>运行任务后，模型调用和流水线步骤会显示在这里。</span></div>}</div></section>
   </div>;
@@ -1501,32 +1617,112 @@ function pipelineEventLogEntry(event: PipelineEvent, index: number): SystemLogEn
 function LogEntry({ entry }: { entry: SystemLogEntry }) {
   const [open, setOpen] = useState(false);
   const modelCall = entry.scope === "model" && entry.details?.kind === "model_call";
-  return <article className={`desktop-log-entry ${entry.level}`}><button onClick={() => setOpen((value) => !value)}><span>{formatTime(entry.timestamp)}</span><i>{entry.scope}</i><strong>{entry.message}</strong><em>{entry.status}</em><ChevronDown className={open ? "open" : ""} size={15} /></button>{open && (modelCall ? <div className="desktop-model-call-detail"><ModelCallDetails details={entry.details as unknown as ModelCallLogDetails} /></div> : <pre>{JSON.stringify(entry.details || { step: entry.step, operationId: entry.operationId }, null, 2)}</pre>)}</article>;
+  return <article className={`desktop-log-entry ${entry.level}`}><button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)}><span>{formatTime(entry.timestamp)}</span><i>{logScopeLabel(entry.scope)}</i><strong>{entry.message}</strong><em>{logStatusLabel(entry.status)}</em><ChevronDown className={open ? "open" : ""} size={15} /></button>{open && (modelCall ? <div className="desktop-model-call-detail"><ModelCallDetails details={entry.details as unknown as ModelCallLogDetails} compact /></div> : <LogDetailsSummary details={entry.details} />)}</article>;
+}
+
+type ModelConfigUpdater = <K extends keyof ModelConfigInput>(key: K, value: ModelConfigInput[K]) => void;
+
+function CurrentGradingFlow({ workflow, stagedLayoutEngine }: { workflow?: ModelConfigInput["largeQuestionWorkflow"]; stagedLayoutEngine?: ModelConfigInput["stagedLayoutEngine"] }) {
+  const isAgent = workflow === "responses_agent";
+  const isModelNative = stagedLayoutEngine === "model_native";
+  return <div className={`desktop-grading-flow-card ${isAgent ? "responses-agent-flow" : "stable-staged-flow"}`}>
+    <div className="desktop-grading-flow-heading">
+      <div><span>当前应用批改流程</span><strong>{isAgent ? "Responses Agent · 单主教师模型" : (isModelNative ? "模型原生分块的稳定分阶段链路" : "PaddleOCR 分块的稳定分阶段链路")}</strong></div>
+      <span className="desktop-status-label locked"><Activity size={12} />{isAgent ? "Agent 已选" : (isModelNative ? "原生分块" : "OCR 分块")}</span>
+    </div>
+    <small className="desktop-grading-flow-caption">{isAgent ? "仅大题切换到 Responses API；主 Agent 先看整页，按需调用只读局部图工具并继续判断。小题仍保留原有链路，最终总分始终由后端重算。" : (isModelNative ? "大题使用多模态模型原生视觉分块定位并提取逐小问答案高清切图，首轮先区分有效作答、扫描伪影和图像不可用；确认无有效作答时跳过局部视觉复核与评分点审验，只保留未作答审计占位；真实歧义才按需复核。" : "大题稳定链路使用 PaddleOCR 定位并提取逐小问答案高清切图，首轮先区分有效作答、扫描伪影和图像不可用；确认无有效作答时跳过局部视觉复核与评分点审验，只保留未作答审计占位；真实歧义才按需复核。")}</small>
+    <div className="desktop-grading-flow">
+      <div className="desktop-grading-flow-standards"><BookOpenCheck size={14} /><div><span>评分标准</span><strong>结构化 / 完善 → 锁定当前版本</strong></div></div>
+      <div className="desktop-grading-flow-connector"><ChevronDown size={13} /></div>
+      {isAgent ? <div className="desktop-grading-flow-node"><ImageDown size={14} /><div><span>按题型准备输入</span><strong>大题：灰度增强 → WebP q90</strong><small>大题本链路完全禁用 PaddleOCR；小题仍按原流程准备 OCR 输入</small></div></div> : (isModelNative ? <div className="desktop-grading-flow-node"><ImageDown size={14} /><div><span>答卷输入与定位</span><strong>大题：模型原生视觉分块 · 免 PaddleOCR</strong><small>由视觉大模型检测作答区域与 bbox，生成定位索引图供首轮判定</small></div></div> : <div className="desktop-grading-flow-node"><ImageDown size={14} /><div><span>共同前置</span><strong>答卷图像预处理 → PaddleOCR 整页识别</strong><small>保留原图、OCR 原始 JSONL、区块和 bbox 定位</small></div></div>)}
+      <div className="desktop-grading-flow-connector labeled"><span>按题型分流</span><ChevronDown size={13} /></div>
+      <div className="desktop-grading-flow-branches">
+        <article className={`desktop-grading-flow-branch large ${isAgent ? "agent" : ""}`}>
+          <header><span>大题</span><strong>{isAgent ? "整页视觉 → 自主局部工具" : (isModelNative ? "模型原生分块 → 教师首轮答案判定与切图" : "教师模型首轮判定与逐小问切图")}</strong></header>
+          <p>{isAgent ? "无 OCR 的视觉转录和最终答案判定" : "首轮转录、作答存在性归一化并提取小问答案切图；全对直接快速满分提交"}</p>
+          <div><b>{isAgent ? "之后" : "按需"}</b><span>{isAgent ? "可选独立审验（全新上下文）" : "仅对真实疑似作答或图像不可用的小问复核；扫描阴影锁定为未作答，评分点只保留审计占位，不产生复核阻断"}</span></div>
+        </article>
+        <article className="desktop-grading-flow-branch small">
+          <header><span>小题</span><strong>教师模型作答还原</strong></header>
+          <p>只依据预处理答卷图和 OCR 还原学生实际作答</p>
+          <div><b>随后</b><span>按题图/文字选择小题评分模型</span></div>
+        </article>
+      </div>
+      <div className="desktop-grading-flow-connector"><ChevronDown size={13} /></div>
+      <div className="desktop-grading-flow-node final"><ShieldCheck size={14} /><div><span>后端计分与提交</span><strong>重算总分 → 标记复核 → 写分、提交、回读</strong><small>模型不能改分或提交；复核标记不替代分数权威，提交状态不明时停止翻页</small></div></div>
+    </div>
+  </div>;
+}
+
+function ReviewServiceSettings({ form, current, update }: { form: ModelConfigInput; current: PublicModelConfig | null; update: ModelConfigUpdater }) {
+  return <details className="desktop-model-settings-details desktop-model-review-settings-details">
+    <summary><div><strong>独立审验 API</strong><span>{current?.hasReviewApiKey ? "已配置独立密钥 · 仅在复核步骤触发" : "未配置独立密钥 · 复核失败时保留人工复核"}</span></div><span className="desktop-model-review-settings-label">低频设置<ChevronDown size={14} /></span></summary>
+    <div className="desktop-model-settings-content desktop-model-review-settings-content">
+      <div className="desktop-form-grid"><label><span>默认审验模型</span><input value={form.reviewModel || ""} onChange={(event) => update("reviewModel", event.target.value)} placeholder="留空则保留人工复核标记" /></label><label className="wide"><span>API Base URL</span><input value={form.reviewBaseUrl || ""} onChange={(event) => update("reviewBaseUrl", event.target.value)} placeholder="留空则复用教师 API Base URL" /></label><label className="wide"><span>API Key</span><div className="desktop-input-with-icon"><ShieldCheck size={14} /><input type="password" value={form.reviewApiKey || ""} onChange={(event) => update("reviewApiKey", event.target.value)} placeholder={current?.hasReviewApiKey ? `保留现有审验密钥 ${current.reviewApiKeyMasked}` : "输入独立审验服务密钥"} /></div></label></div>
+      <small className="desktop-model-service-note">审验 API 只用于大题局部视觉复核和评分点审验，不会复用教师 API Key。</small>
+    </div>
+  </details>;
 }
 
 function ModelsPage() {
   const [form, setForm] = useState<ModelConfigInput>(defaultModelConfig);
   const [current, setCurrent] = useState<PublicModelConfig | null>(null);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState<"text" | "vision" | "review" | "agent" | null>(null);
   const [message, setMessage] = useState("");
-  useEffect(() => { void api<PublicModelConfig | null>("/api/model-config").then((value) => { setCurrent(value); if (value) setForm({ ...value, apiKey: "", reviewApiKey: "" }); }); }, []);
+  const [testResult, setTestResult] = useState<{ type: "ok" | "error"; text: string } | null>(null);
+  useEffect(() => { void api<PublicModelConfig | null>("/api/model-config").then((value) => { setCurrent(value); if (value) setForm({ ...value, apiKey: "", reviewApiKey: "", responsesAgent: value.responsesAgent ? normalizeResponsesAgentFormConfig(value.responsesAgent) : undefined }); }); }, []);
   const update = <K extends keyof ModelConfigInput>(key: K, value: ModelConfigInput[K]) => setForm((previous) => ({ ...previous, [key]: value }));
+  const applyCurrentConfig = async () => {
+    const saved = await api<PublicModelConfig>("/api/model-config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, supportsJsonSchema: true, supportsJsonObject: false }) });
+    setCurrent(saved);
+    setForm((value) => ({ ...value, apiKey: "", reviewApiKey: "", responsesAgent: value.responsesAgent ? { ...value.responsesAgent, apiKey: "", verifierApiKey: "" } : undefined }));
+  };
   const save = async () => {
-    setSaving(true); setMessage("");
+    setSaving(true); setMessage(""); setTestResult(null);
     try {
-      const saved = await api<PublicModelConfig>("/api/model-config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
-      setCurrent(saved); setForm((value) => ({ ...value, apiKey: "", reviewApiKey: "" })); setMessage("配置已应用到全局模型调用");
+      await applyCurrentConfig();
+      setMessage("配置已应用到全局模型调用");
     } catch (error) { setMessage(error instanceof Error ? error.message : "配置保存失败"); }
     finally { setSaving(false); }
   };
+  const test = async (mode: "text" | "vision" | "review" | "agent") => {
+    setTesting(mode); setMessage(""); setTestResult(null);
+    let applied = false;
+    try {
+      await applyCurrentConfig();
+      applied = true;
+      const result = await api<ModelConnectionTestResult>("/api/model-config/test", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode })
+      });
+      const duration = result.durationMs === undefined ? "" : `，${result.durationMs} ms`;
+      setTestResult({ type: result.ok ? "ok" : "error", text: `${result.model || "模型"}：${result.message}${duration}` });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "连接失败";
+      setTestResult({ type: "error", text: applied ? `配置已全局应用，但连接测试失败：${reason}` : `配置保存失败：${reason}` });
+    } finally { setTesting(null); }
+  };
+  const canTest = Boolean(form.baseUrl.trim() && form.visionModel.trim() && form.textModel.trim() && (form.apiKey?.trim() || current?.hasApiKey));
+  const canTestReview = Boolean(form.reviewModel?.trim() && (form.reviewApiKey?.trim() || current?.hasReviewApiKey));
+  const canTestAgent = Boolean(form.largeQuestionWorkflow === "responses_agent" && form.responsesAgent?.baseUrl?.trim() && form.responsesAgent.model?.trim() && (form.responsesAgent.apiKey?.trim() || current?.responsesAgent?.hasApiKey));
+  const teacherDefaultReasoning = form.teacherReasoningEffort ?? DEFAULT_TEACHER_REASONING_EFFORT;
+  const reviewDefaultReasoning = form.reviewReasoningEffort ?? DEFAULT_REVIEW_REASONING_EFFORT;
+  const reasoningSummary = (value: ModelConfigInput["teacherReasoningEffort"]) => value === "disabled" ? "不发送" : value || "未设置";
   return <div className="desktop-page-body desktop-model-page">
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>OpenAI 兼容接口</span><h2>全局连接信息</h2></div><span className={current?.enabled && current.hasApiKey ? "desktop-status-label locked" : "desktop-status-label warning"}>{current?.enabled && current.hasApiKey ? <Wifi size={13} /> : <WifiOff size={13} />}{current?.enabled && current.hasApiKey ? "已配置" : "待配置"}</span></div>
-      <div className="desktop-form-grid"><label><span>配置名称</span><input value={form.name} onChange={(event) => update("name", event.target.value)} /></label><label className="wide"><span>教师 API Base URL</span><input value={form.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://api.example.com/v1" /></label><label className="wide"><span>教师 API Key</span><div className="desktop-input-with-icon"><KeyRound size={14} /><input type="password" value={form.apiKey || ""} onChange={(event) => update("apiKey", event.target.value)} placeholder={current?.hasApiKey ? `保留现有密钥 ${current.apiKeyMasked}` : "输入教师服务密钥"} /></div></label><label><span>多模态教师模型</span><input value={form.visionModel} onChange={(event) => update("visionModel", event.target.value)} /></label><label><span>文本模型</span><input value={form.textModel} onChange={(event) => update("textModel", event.target.value)} /></label><label><span>局部审验模型</span><input value={form.reviewModel || ""} onChange={(event) => update("reviewModel", event.target.value)} placeholder="留空则不主动审验数值答案" /></label><label className="wide"><span>审验 API Base URL</span><input value={form.reviewBaseUrl || ""} onChange={(event) => update("reviewBaseUrl", event.target.value)} placeholder="留空则复用教师服务地址" /></label><label className="wide"><span>审验 API Key</span><div className="desktop-input-with-icon"><ShieldCheck size={14} /><input type="password" value={form.reviewApiKey || ""} onChange={(event) => update("reviewApiKey", event.target.value)} placeholder={current?.hasReviewApiKey ? `保留现有审验密钥 ${current.reviewApiKeyMasked}` : "输入独立审验服务密钥"} /></div></label></div>
+    <section className="desktop-section desktop-model-connection-section"><div className="desktop-section-heading"><div><span>服务连接与流程</span><h2>教师模型 API 与批改流程</h2><p className="desktop-section-description">教师模型名称是高频配置；右侧展示当前应用实际链路，审验服务在下方低频设置中调整。</p></div><span className={current?.enabled && current.hasApiKey ? "desktop-status-label locked" : "desktop-status-label warning"}>{current?.enabled && current.hasApiKey ? <Wifi size={13} /> : <WifiOff size={13} />}{current?.enabled && current.hasApiKey ? "教师 API 已配置" : "教师 API 待配置"}</span></div>
+      <div className="desktop-model-connection-grid">
+        <div className="desktop-model-service-panel desktop-model-teacher-service">
+          <div className="desktop-model-service-heading"><div><span>主服务</span><h3>教师模型 API</h3><p>用于评分标准、答案判定、作答还原和小题评分。</p></div><KeyRound size={16} /></div>
+          <div className="desktop-form-grid"><label><span>配置名称</span><input value={form.name} onChange={(event) => update("name", event.target.value)} /></label><label className="wide"><span>API Base URL</span><input value={form.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://api.example.com/v1" /></label><label className="wide"><span>API Key</span><div className="desktop-input-with-icon"><KeyRound size={14} /><input type="password" value={form.apiKey || ""} onChange={(event) => update("apiKey", event.target.value)} placeholder={current?.hasApiKey ? `保留现有密钥 ${current.apiKeyMasked}` : "输入教师服务密钥"} /></div></label><label><span>默认视觉模型</span><input value={form.visionModel} onChange={(event) => update("visionModel", event.target.value)} placeholder="用于视觉路由的默认模型" /></label><label><span>默认文本模型</span><input value={form.textModel} onChange={(event) => update("textModel", event.target.value)} placeholder="用于文字路由的默认模型" /></label></div>
+        </div>
+        <CurrentGradingFlow workflow={form.largeQuestionWorkflow} stagedLayoutEngine={form.stagedLayoutEngine} />
+      </div>
     </section>
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>调用策略</span><h2>批改参数</h2></div></div><div className="desktop-form-grid three"><label><span>批改模式</span><select value={form.gradingMode} onChange={(event) => update("gradingMode", event.target.value as ModelConfigInput["gradingMode"])}><option value="vision_direct">教师模型直看图像</option><option value="evidence_pipeline">证据转录流水线</option></select></label><label><span>教师模型推理强度</span><select value={form.teacherReasoningEffort} onChange={(event) => update("teacherReasoningEffort", event.target.value as ModelConfigInput["teacherReasoningEffort"])}><option value="disabled">不传 reasoning_effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select></label><label><span>审验模型推理强度</span><select value={form.reviewReasoningEffort} onChange={(event) => update("reviewReasoningEffort", event.target.value as ModelConfigInput["reviewReasoningEffort"])}><option value="disabled">不传 reasoning_effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select></label><label><span>超时（毫秒）</span><input type="number" min={1000} max={300000} value={form.timeoutMs} onChange={(event) => update("timeoutMs", Number(event.target.value))} /></label><label><span>最大重试</span><input type="number" min={0} max={5} value={form.maxRetries} onChange={(event) => update("maxRetries", Number(event.target.value))} /></label><label><span>并发数</span><input type="number" min={1} max={20} value={form.maxConcurrency} onChange={(event) => update("maxConcurrency", Number(event.target.value))} /></label><label><span>人工复核分值阈值</span><input type="number" step={0.5} min={0.5} value={form.unreadableReviewThreshold} onChange={(event) => update("unreadableReviewThreshold", Number(event.target.value))} /></label></div>
-      <div className="desktop-toggle-row"><label><input type="checkbox" checked={form.supportsJsonSchema} onChange={(event) => update("supportsJsonSchema", event.target.checked)} /><span>JSON Schema</span></label><label><input type="checkbox" checked={form.supportsJsonObject} onChange={(event) => update("supportsJsonObject", event.target.checked)} /><span>JSON Object</span></label><label><input type="checkbox" checked={form.supportsBase64Images} onChange={(event) => update("supportsBase64Images", event.target.checked)} /><span>Base64 图像</span></label><label><input type="checkbox" checked={form.enabled} onChange={(event) => update("enabled", event.target.checked)} /><span>启用此配置</span></label></div>
-      <div className="desktop-form-actions"><button className="desktop-save-button" disabled={saving} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}保存并全局应用</button>{message && <span>{message}</span>}</div>
-    </section>
+    <ModelRoutingSettings form={form} update={update} variant="desktop" />
+    <section className="desktop-section desktop-model-strategy-section"><div className="desktop-section-heading"><div><span>低频策略</span><h2>全局兜底与运行参数</h2><p className="desktop-section-description">只有路由没有单独覆盖时，这里的默认值才会生效。</p></div></div><details className="desktop-model-settings-details"><summary><div><strong>展开全局兜底、运行限制和接口能力</strong><span>教师默认：{reasoningSummary(teacherDefaultReasoning)} · 审验默认：{reasoningSummary(reviewDefaultReasoning)} · 超时：{form.timeoutMs} ms · 并发：{form.maxConcurrency}</span></div><ChevronDown size={15} /></summary><div className="desktop-model-settings-content"><div className="desktop-model-parameter-groups"><div className="desktop-model-parameter-group"><div className="desktop-model-parameter-heading"><strong>未单独配置路由时的默认推理</strong><small>只作为教师 API / 审验 API 路由的兜底值。</small></div><div className="desktop-form-grid"><label><span>教师 API 路由默认推理强度</span><select value={form.teacherReasoningEffort ?? DEFAULT_TEACHER_REASONING_EFFORT} onChange={(event) => update("teacherReasoningEffort", event.target.value as ModelConfigInput["teacherReasoningEffort"])}><option value="disabled">不发送 reasoning_effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select></label><label><span>审验 API 路由默认推理强度</span><select value={form.reviewReasoningEffort ?? DEFAULT_REVIEW_REASONING_EFFORT} onChange={(event) => update("reviewReasoningEffort", event.target.value as ModelConfigInput["reviewReasoningEffort"])}><option value="disabled">不发送 reasoning_effort</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select></label><label><span>全局最大输出 Token</span><input type="number" min={256} max={65536} value={form.maxOutputTokens} onChange={(event) => update("maxOutputTokens", Number(event.target.value))} /></label></div></div><div className="desktop-model-parameter-group"><div className="desktop-model-parameter-heading"><strong>模型调用与复核限制</strong><small>路由级限制不能超过这里的全局上限。</small></div><div className="desktop-form-grid"><label><span>全局超时（毫秒）</span><input type="number" min={1000} max={300000} value={form.timeoutMs} onChange={(event) => update("timeoutMs", Number(event.target.value))} /></label><label><span>全局失败重试</span><input type="number" min={0} max={5} value={form.maxRetries} onChange={(event) => update("maxRetries", Number(event.target.value))} /></label><label><span>模型调用最大并发</span><input type="number" min={1} max={20} value={form.maxConcurrency} onChange={(event) => update("maxConcurrency", Number(event.target.value))} /></label><label><span>人工复核分值阈值</span><input type="number" step={0.5} min={0.5} value={form.unreadableReviewThreshold} onChange={(event) => update("unreadableReviewThreshold", Number(event.target.value))} /></label></div></div></div><div className="desktop-model-capabilities"><div className="desktop-model-parameter-heading"><strong>接口能力</strong><small>JSON 输出格式为系统固定约束。</small></div><div className="desktop-toggle-row"><label><input type="checkbox" checked={true} disabled /><span>JSON Schema（强制）</span></label><label><input type="checkbox" checked={false} disabled /><span>JSON Object（已禁用）</span></label><label><input type="checkbox" checked={form.supportsBase64Images} onChange={(event) => update("supportsBase64Images", event.target.checked)} /><span>Base64 图像</span></label><label><input type="checkbox" checked={form.enabled} onChange={(event) => update("enabled", event.target.checked)} /><span>启用此配置</span></label></div></div></div></details></section>
+    <ReviewServiceSettings form={form} current={current} update={update} />
+    {testResult && <div className={`desktop-model-test-result ${testResult.type}`} role="status">{testResult.type === "ok" ? <Check size={15} /> : <AlertTriangle size={15} />}<span>{testResult.text}</span></div>}
+    <div className="desktop-form-actions desktop-model-actions desktop-model-action-bar"><div className="desktop-model-test-copy"><strong>连接测试</strong><span>测试前先保存配置；Responses Agent 测试会分步验证文本、视觉、工具调用和无状态续接，因此会产生多次最小调用。</span></div><button className="desktop-secondary-action" disabled={!canTest || saving || Boolean(testing)} onClick={() => void test("text")}>{testing === "text" ? <LoaderCircle className="spin" size={14} /> : <Code2 size={14} />}测试文本</button><button className="desktop-secondary-action" disabled={!canTest || saving || Boolean(testing)} onClick={() => void test("vision")}>{testing === "vision" ? <LoaderCircle className="spin" size={14} /> : <Wifi size={14} />}测试连接（多模态）</button><button className="desktop-secondary-action" disabled={!canTestReview || saving || Boolean(testing)} onClick={() => void test("review")}>{testing === "review" ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}测试审验模型</button>{form.largeQuestionWorkflow === "responses_agent" && <button className="desktop-secondary-action responses-agent-test-button" disabled={!canTestAgent || saving || Boolean(testing)} onClick={() => void test("agent")}>{testing === "agent" ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}测试 Responses Agent</button>}<button className="desktop-save-button" disabled={saving || Boolean(testing)} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}保存并全局应用</button>{message && <span className="desktop-model-action-message">{message}</span>}</div>
   </div>;
 }
 
@@ -1537,6 +1733,7 @@ function BrowserDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
   const [records, setRecords] = useState<Array<{ id: string; ok: boolean; title: string; message: string; detail?: string }>>([]);
   const host = getHost();
   const diagnosticsAvailable = typeof host?.runPluginDiagnostic === "function";
+  const independentNavigation = browser.plugin.adapterId !== "ruiya-grading";
   useEffect(() => {
     setInspection(null);
   }, [browser.url]);
@@ -1602,17 +1799,18 @@ function BrowserDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
     && inspection.pageKey === browser.plugin.pageKey;
   const capabilities = inspectionMatchesCurrentPage && inspection ? inspection.capabilities : browser.plugin.capabilities;
   const diagnosticsReady = browser.plugin.phase === "ready" && hasCompletePluginCapabilities(capabilities);
+  const singleDiagnosticScore = !inspectionMatchesCurrentPage || !inspection || inspection.scoreFields.length <= 1;
   return <div className="desktop-debug-browser-page"><BrowserToolbar browser={browser} /><div className="desktop-debug-browser-layout"><aside className="desktop-browser-diagnostics">
     <div className="desktop-browser-facts"><div><span>页面标题</span><strong>{browser.title || "--"}</strong></div><div><span>连接安全</span><strong>{browser.security}</strong></div><div><span>加载状态</span><strong>{browser.crashed ? "渲染进程异常" : browser.isLoading ? "正在加载" : "加载完成"}</strong></div><div><span>浏览器引擎</span><strong>Electron {host?.version || "--"}</strong></div><div><span>插件适配器</span><strong>{browser.plugin.adapterId}</strong></div><div><span>页面线索（非学生 ID）</span><strong title="由答卷图像地址和当前题目文字生成，只用于判断网页是否切换">{inspection?.pageKey || browser.plugin.pageKey || "--"}</strong></div></div>
-    <p className="desktop-browser-fingerprint-note"><AlertTriangle size={13} /><span><b>zhixue:xxxxxxxx</b> 是网页切换线索，不代表学生身份。提取答卷后系统会改用图像内容的 SHA-256 校验，作为真正的答卷唯一标识。</span></p>
+    <p className="desktop-browser-fingerprint-note"><AlertTriangle size={13} /><span><b>site:xxxxxxxx</b> 是网页切换线索，不代表学生身份。提取答卷后系统会改用图像内容的 SHA-256 校验，作为真正的答卷唯一标识。</span></p>
     <section className="desktop-plugin-test-panel">
       <div className="desktop-plugin-test-heading"><div><span>插件行为测试</span><strong>{inspection?.questionLabel || "当前答卷"}</strong></div><button title="重新检测当前页面" disabled={busy} onClick={() => void inspect()}>{pending === "inspect" ? <LoaderCircle className="spin" size={15} /> : <ListChecks size={15} />}</button></div>
       {!diagnosticsAvailable && <p className="desktop-plugin-test-notice"><AlertTriangle size={14} />主程序组件尚未载入本次更新，重启工作台后可执行下列动作。</p>}
       <div className="desktop-plugin-test-actions">
         <button disabled={busy || !diagnosticsAvailable || !diagnosticsReady} onClick={() => void runDiagnostic("extract-image")}><ImageDown size={15} />提取并保存图像</button>
-        <div className="desktop-plugin-page-actions"><button disabled={busy || !diagnosticsAvailable || !diagnosticsReady} onClick={() => void runDiagnostic("previous-page")}><ArrowLeft size={15} />上一份</button><button disabled={busy || !diagnosticsAvailable || !diagnosticsReady} onClick={() => void runDiagnostic("next-page")}>下一份<ArrowRight size={15} /></button></div>
+        <div className="desktop-plugin-page-actions"><button title={independentNavigation ? "测试独立翻页控件" : "睿芽云提交当前分数后自动装载下一份"} disabled={busy || !diagnosticsAvailable || !diagnosticsReady || !independentNavigation} onClick={() => void runDiagnostic("previous-page")}><ArrowLeft size={15} />上一份</button><button title={independentNavigation ? "测试独立翻页控件" : "睿芽云提交当前分数后自动装载下一份"} disabled={busy || !diagnosticsAvailable || !diagnosticsReady || !independentNavigation} onClick={() => void runDiagnostic("next-page")}>下一份<ArrowRight size={15} /></button></div>
       </div>
-      <div className="desktop-plugin-score-test"><label><span>测试总分{inspection?.fullScore !== undefined ? `（满分 ${inspection.fullScore}）` : ""}</span><input type="number" min={0} max={inspection?.fullScore} step="0.5" value={score} onChange={(event) => setScore(event.target.value)} placeholder="输入分数" /></label><div><button disabled={busy || !diagnosticsAvailable || !diagnosticsReady || !score.trim()} onClick={() => void runDiagnostic("write-score")}>写入</button><button title="清空网页最终总分框" disabled={busy || !diagnosticsAvailable || !diagnosticsReady} onClick={() => void runDiagnostic("clear-score")}><XCircle size={14} /></button></div><small>只修改最终总分框，不点击提交。</small></div>
+      <div className="desktop-plugin-score-test"><label><span>测试总分{inspection?.fullScore !== undefined ? `（满分 ${inspection.fullScore}）` : ""}</span><input type="number" min={0} max={inspection?.fullScore} step="0.5" value={score} onChange={(event) => setScore(event.target.value)} placeholder="输入分数" /></label><div><button disabled={busy || !diagnosticsAvailable || !diagnosticsReady || !singleDiagnosticScore || !score.trim()} onClick={() => void runDiagnostic("write-score")}>写入</button><button title="清空网页最终总分框" disabled={busy || !diagnosticsAvailable || !diagnosticsReady || !singleDiagnosticScore} onClick={() => void runDiagnostic("clear-score")}><XCircle size={14} /></button></div><small>{singleDiagnosticScore ? "只修改最终总分框，不点击提交。" : "当前是多评页面，诊断写分需在安全试运行中按小问结果验证，不使用单一总分。"}</small></div>
       <div className="desktop-plugin-test-log"><span>最近操作</span>{records.length ? records.map((record) => <article className={record.ok ? "ok" : "failed"} key={record.id}><div>{record.ok ? <Check size={13} /> : <XCircle size={13} />}<strong>{record.title}</strong></div><p>{record.message}</p>{record.detail && <code>{record.detail}</code>}</article>) : <p className="empty">尚未执行插件行为测试</p>}</div>
     </section>
     <p className="desktop-browser-session-note">目标站点使用独立持久化会话；诊断图像保存到项目的 <code>tmp/plugin-diagnostics</code> 目录。</p>
@@ -1622,12 +1820,20 @@ function BrowserDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
 function PluginsDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
   const capabilities = browser.plugin.capabilities;
   const isZhixue = browser.plugin.adapterId === "zhixue-grading";
+  const isRuiya = browser.plugin.adapterId === "ruiya-grading";
+  const specialized = isZhixue || isRuiya;
+  const imageSelector = isZhixue ? "#topicImgContent 原始作答图" : isRuiya ? "#imageFullScreen（睿芽云学生原图）" : "[data-grading-answer-image] / img / canvas";
+  const scoreSelector = isZhixue ? "可见总分/满分输入框（只写最终总分）" : isRuiya ? "#panelKey .ipt_score（按小题顺序写入最终总分）" : "[data-grading-score]";
+  const submitSelector = isZhixue ? "#bnt_save" : isRuiya ? "#submitMark" : "[data-grading-submit]";
+  const nextSelector = isZhixue ? "a[title='下一份']" : isRuiya ? "提交后由睿芽云自动装载下一份" : "[data-grading-next]";
+  const skipSelector = specialized ? "不支持（批完当前份前无法进入下一份）" : "未批完可翻页即支持";
+  const nextLabel = isRuiya ? "提交后续接" : "下一份按钮";
   const [pending, setPending] = useState(false);
   const preflight = async () => { setPending(true); try { await getHost()?.controlPipeline("preflight"); } finally { window.setTimeout(() => setPending(false), 300); } };
   return <div className="desktop-page-body desktop-plugin-debug">
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>当前适配器</span><h2>{browser.plugin.adapterName}</h2></div><span className={browser.plugin.connected ? "desktop-status-label locked" : "desktop-status-label warning"}>{browser.plugin.connected ? <Plug size={13} /> : <Unplug size={13} />}{phaseLabel(browser.plugin.phase)}</span></div><div className="desktop-plugin-meta"><div><span>ID</span><strong>{browser.plugin.adapterId}</strong></div><div><span>版本</span><strong>{browser.plugin.adapterVersion}</strong></div><div><span>页面线索</span><strong title="非学生 ID，仅用于判断智学网页面是否切换">{browser.plugin.pageKey || "未识别"}</strong></div><div><span>更新时间</span><strong>{formatTime(browser.plugin.updatedAt)}</strong></div></div><div className="desktop-form-actions"><button className="desktop-save-button" disabled={pending} onClick={() => void preflight()}>{pending ? <LoaderCircle className="spin" size={15} /> : <ListChecks size={15} />}重新执行页面检查</button><button className="desktop-secondary-action" onClick={() => void getHost()?.runBrowserAction("reload_plugin")}><RotateCcw size={14} />重载插件</button></div></section>
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>DOM 能力</span><h2>自动化控件检查</h2></div></div><div className="desktop-capability-grid"><Capability label="学生答卷图像" value={capabilities.answerImage} selector={isZhixue ? "#topicImgContent 原始作答图" : "[data-grading-answer-image] / img / canvas"} /><Capability label="最终总分输入框" value={capabilities.scoreInput} selector={isZhixue ? "可见总分/满分输入框（只写最终总分）" : "[data-grading-score]"} /><Capability label="提交按钮" value={capabilities.submit} selector={isZhixue ? "#bnt_save" : "[data-grading-submit]"} /><Capability label="下一份按钮" value={capabilities.next} selector={isZhixue ? "a[title='下一份']" : "[data-grading-next]"} /><Capability label="跳过当前答卷" value={capabilities.skip} selector={isZhixue ? "不支持（批完当前份前无法进入下一份）" : "未批完可翻页即支持"} /></div></section>
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>适配顺序</span><h2>预置插件</h2></div></div><div className="desktop-adapter-list"><div><span>01</span><div><strong>zhixue-grading</strong><p>智学网专用适配器；本地 `/zhixue-mock` 复刻真实阅卷 DOM，用于导入测试用例和回归验证。</p></div><b>专用</b></div><div><span>02</span><div><strong>mock-grading</strong><p>通用 `data-grading-*` 控件测试站，保留用于通用适配器回归。</p></div><b>启用</b></div><div><span>03</span><div><strong>generic-data-attributes</strong><p>真实网站通用适配器，使用稳定 data 属性定位答卷、写分与翻页控件。</p></div><b>后备</b></div></div></section>
+    <section className="desktop-section"><div className="desktop-section-heading"><div><span>当前适配器</span><h2>{browser.plugin.adapterName}</h2></div><span className={browser.plugin.connected ? "desktop-status-label locked" : "desktop-status-label warning"}>{browser.plugin.connected ? <Plug size={13} /> : <Unplug size={13} />}{phaseLabel(browser.plugin.phase)}</span></div><div className="desktop-plugin-meta"><div><span>ID</span><strong>{browser.plugin.adapterId}</strong></div><div><span>版本</span><strong>{browser.plugin.adapterVersion}</strong></div><div><span>页面线索</span><strong title="非学生 ID，仅用于判断阅卷页面是否切换">{browser.plugin.pageKey || "未识别"}</strong></div><div><span>更新时间</span><strong>{formatTime(browser.plugin.updatedAt)}</strong></div></div><div className="desktop-form-actions"><button className="desktop-save-button" disabled={pending} onClick={() => void preflight()}>{pending ? <LoaderCircle className="spin" size={15} /> : <ListChecks size={15} />}重新执行页面检查</button><button className="desktop-secondary-action" onClick={() => void getHost()?.runBrowserAction("reload_plugin")}><RotateCcw size={14} />重载插件</button></div></section>
+    <section className="desktop-section"><div className="desktop-section-heading"><div><span>DOM 能力</span><h2>自动化控件检查</h2></div></div><div className="desktop-capability-grid"><Capability label="学生答卷图像" value={capabilities.answerImage} selector={imageSelector} /><Capability label="最终总分输入框" value={capabilities.scoreInput} selector={scoreSelector} /><Capability label="提交按钮" value={capabilities.submit} selector={submitSelector} /><Capability label={nextLabel} value={capabilities.next} selector={nextSelector} /><Capability label="跳过当前答卷" value={capabilities.skip} selector={skipSelector} /></div></section>
+    <section className="desktop-section"><div className="desktop-section-heading"><div><span>适配顺序</span><h2>预置插件</h2></div></div><div className="desktop-adapter-list"><div><span>01</span><div><strong>zhixue-grading</strong><p>智学网专用适配器；按小题分步写分、提交并进入下一份。</p></div><b>默认</b></div><div><span>02</span><div><strong>ruiya-grading</strong><p>睿芽云专用适配器；识别学生原图、按小题顺序写入最终总分框，并等待提交后自动装载下一份。</p></div><b>专用</b></div><div><span>03</span><div><strong>mock-grading</strong><p>通用 `data-grading-*` 控件测试站，保留用于通用适配器回归。</p></div><b>启用</b></div><div><span>04</span><div><strong>generic-data-attributes</strong><p>真实网站通用适配器，使用稳定 data 属性定位答卷、写分与翻页控件。</p></div><b>后备</b></div></div></section>
   </div>;
 }
 
@@ -1640,7 +1846,22 @@ function SettingsPage({ preferences, onPreferencesChange }: { preferences: Deskt
   const [saved, setSaved] = useState(false);
   const [opening, setOpening] = useState(false);
   const [openMessage, setOpenMessage] = useState("");
-  const save = () => { localStorage.setItem(START_URL_STORAGE_KEY, startUrl); setSaved(true); window.setTimeout(() => setSaved(false), 1800); };
+  const save = () => {
+    saveStartUrl(localStorage, startUrl);
+    setSaved(true);
+    setOpenMessage("已保存启动地址");
+    window.setTimeout(() => setSaved(false), 1800);
+  };
+  const handleSelectPreset = (presetId: StartUrlPresetId) => {
+    const preset = START_URL_PRESETS.find((item) => item.id === presetId);
+    if (!preset) return;
+    setStartUrl(preset.url);
+    saveStartUrl(localStorage, preset.url);
+    setSaved(true);
+    setOpenMessage(`已切换为${preset.name}预设地址并保存`);
+    window.setTimeout(() => setSaved(false), 1800);
+  };
+  const activePreset = detectStartUrlPreset(startUrl);
   const openNow = async () => {
     const host = getHost();
     if (!host) { setOpenMessage("当前环境不支持打开网页（仅桌面工作台可用）"); return; }
@@ -1696,7 +1917,7 @@ function SettingsPage({ preferences, onPreferencesChange }: { preferences: Deskt
   ];
   return <div className="desktop-page-body desktop-settings-page">
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>外观</span><h2>界面显示</h2></div><span className="desktop-status-label active">即时生效</span></div>
-      <div className="desktop-setting-block"><div className="desktop-setting-copy"><strong>强调色</strong><span>同步应用到工作台和智学网页面内的阅卷插件。</span></div><div className="desktop-accent-picker" role="group" aria-label="界面强调色">{accentOptions.map((option) => <button key={option.value} className={preferences.accent === option.value ? "active" : ""} aria-pressed={preferences.accent === option.value} onClick={() => onPreferencesChange({ accent: option.value })}><i style={{ background: option.color }} /><span>{option.label}</span>{preferences.accent === option.value && <Check size={13} />}</button>)}</div></div>
+      <div className="desktop-setting-block"><div className="desktop-setting-copy"><strong>强调色</strong><span>同步应用到工作台和目标阅卷页面内的阅卷插件。</span></div><div className="desktop-accent-picker" role="group" aria-label="界面强调色">{accentOptions.map((option) => <button key={option.value} className={preferences.accent === option.value ? "active" : ""} aria-pressed={preferences.accent === option.value} onClick={() => onPreferencesChange({ accent: option.value })}><i style={{ background: option.color }} /><span>{option.label}</span>{preferences.accent === option.value && <Check size={13} />}</button>)}</div></div>
       <div className="desktop-setting-block vertical"><div className="desktop-setting-copy"><strong>材质模式</strong><span>Windows 11 优先使用原生 Mica；不支持时自动保持不透明浅灰回退。</span></div><div className="desktop-font-size-picker prism-material-picker" role="group" aria-label="材质模式">{materialOptions.map((option) => <button key={option.value} className={preferences.materialMode === option.value ? "active" : ""} aria-pressed={preferences.materialMode === option.value} onClick={() => onPreferencesChange({ materialMode: option.value })}><strong>{option.label}</strong><span>{option.description}</span></button>)}</div></div>
       <div className="desktop-setting-block vertical"><div className="desktop-setting-copy"><strong>动效强度</strong><span>动效集中在页面切换、状态变化和关键操作反馈，不改变控件尺寸。</span></div><div className="desktop-font-size-picker prism-motion-picker" role="group" aria-label="动效强度">{motionOptions.map((option) => <button key={option.value} className={preferences.motionIntensity === option.value ? "active" : ""} aria-pressed={preferences.motionIntensity === option.value} onClick={() => onPreferencesChange({ motionIntensity: option.value })}><strong>{option.label}</strong><span>{option.description}</span></button>)}</div></div>
       <div className="desktop-setting-block prism-range-grid"><label><span>透明度</span><input type="range" min="50" max="100" step="1" value={preferences.surfaceOpacity} disabled={preferences.materialMode === "solid"} title={preferences.materialMode === "solid" ? "纯色模式下不启用透明效果" : undefined} style={{ "--prism-range-fill": `${((preferences.surfaceOpacity - 50) / 50) * 100}%` } as CSSProperties} onChange={(event) => onPreferencesChange({ surfaceOpacity: Number(event.target.value) })} /><output>{preferences.surfaceOpacity}%</output></label><label><span>模糊强度</span><input type="range" min="12" max="28" step="2" value={preferences.blurStrength} disabled={preferences.materialMode === "solid"} title={preferences.materialMode === "solid" ? "纯色模式下不启用模糊效果" : undefined} style={{ "--prism-range-fill": `${((preferences.blurStrength - 12) / 16) * 100}%` } as CSSProperties} onChange={(event) => onPreferencesChange({ blurStrength: Number(event.target.value) })} /><output>{preferences.blurStrength}px</output></label>{preferences.materialMode === "solid" ? <p className="desktop-setting-hint">当前为纯色模式，透明与模糊不生效；切换为 Mica 或 Acrylic 后启用。</p> : <p className="desktop-setting-hint">透明度与模糊作用于整个页面（侧栏、页头、内容卡片与表格），向下拖动可透出背景光斑。</p>}</div>
@@ -1718,12 +1939,58 @@ function SettingsPage({ preferences, onPreferencesChange }: { preferences: Deskt
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>工作区</span><h2>启动与任务信息</h2></div></div>
       <label className="desktop-setting-switch"><div><strong>显示实时任务消息</strong><span>在当前批改页面顶部展示最近四条流水线状态。</span></div><input type="checkbox" checked={preferences.showLiveMessages} onChange={(event) => onPreferencesChange({ showLiveMessages: event.target.checked })} /><i /></label>
       <label className="desktop-setting-switch"><div><strong>启动时打开默认阅卷网站</strong><span>关闭后保留嵌入式浏览器当前状态，只有手动操作才会导航。</span></div><input type="checkbox" checked={preferences.autoOpenStartUrl} onChange={(event) => onPreferencesChange({ autoOpenStartUrl: event.target.checked })} /><i /></label>
-      <div className="desktop-setting-block vertical"><div className="desktop-setting-copy"><strong>默认阅卷网站</strong><span>用于主页按钮和启用自动打开时的启动地址。</span></div><div className="desktop-form-grid"><label className="wide"><span>启动地址</span><input value={startUrl} onChange={(event) => setStartUrl(event.target.value)} /></label></div><div className="desktop-form-actions"><button className="desktop-save-button" onClick={save}>{saved ? <Check size={15} /> : <Save size={15} />}{saved ? "已保存" : "保存地址"}</button><button className="desktop-secondary-action" disabled={opening} onClick={() => void openNow()}>{opening ? <LoaderCircle className="spin" size={14} /> : <Globe2 size={14} />}{opening ? "正在打开" : "立即打开"}</button>{openMessage && <span className="desktop-setting-hint">{openMessage}</span>}</div></div>
+      <div className="desktop-setting-block">
+        <div className="desktop-setting-copy">
+          <strong>阅卷平台预设</strong>
+          <span>一键切换智学网或睿芽网预设地址；切换后自动保存，点击下方「立即打开」即可载入。</span>
+        </div>
+        <div className="desktop-segment-control" role="group" aria-label="阅卷平台预设">
+          {START_URL_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              className={activePreset === preset.id ? "active" : ""}
+              aria-pressed={activePreset === preset.id}
+              onClick={() => handleSelectPreset(preset.id)}
+            >
+              {preset.name}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="desktop-setting-block vertical">
+        <div className="desktop-setting-copy">
+          <strong>默认阅卷网站</strong>
+          <span>用于主页按钮和启用自动打开时的启动地址，支持自定义学校具体任务网址。</span>
+        </div>
+        <div className="desktop-form-grid">
+          <label className="wide">
+            <span>启动地址</span>
+            <input value={startUrl} onChange={(event) => setStartUrl(event.target.value)} />
+          </label>
+        </div>
+        <div className="desktop-form-actions">
+          <button className="desktop-save-button" onClick={save}>
+            {saved ? <Check size={15} /> : <Save size={15} />}
+            {saved ? "已保存" : "保存地址"}
+          </button>
+          <button className="desktop-secondary-action" disabled={opening} onClick={() => void openNow()}>
+            {opening ? <LoaderCircle className="spin" size={14} /> : <Globe2 size={14} />}
+            {opening ? "正在打开" : "立即打开"}
+          </button>
+          {openMessage && <span className="desktop-setting-hint">{openMessage}</span>}
+        </div>
+        <div className="desktop-setting-hint">
+          {activePreset === "zhixue" && "当前匹配：智学网专用适配器（zhixue-grading），支持多小题逐题分步写分、提交与翻页。"}
+          {activePreset === "ruiya" && "当前匹配：睿芽云专用适配器（ruiya-grading），支持单题总分写入与提交后自动换卷。"}
+          {!activePreset && "当前为自定义地址，系统将根据访问域名自动匹配对应的专用或通用适配器。"}
+        </div>
+      </div>
     </section>
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>网页插件</span><h2>浮动控制器</h2></div><span className="desktop-status-label locked">跟随全局配色</span></div>
       <label className="desktop-setting-switch"><div><strong>在阅卷网页中显示插件</strong><span>隐藏后仍可从工作台控制批改流程。</span></div><input type="checkbox" checked={preferences.visible} onChange={(event) => onPreferencesChange({ visible: event.target.checked })} /><i /></label>
       <label className="desktop-setting-switch"><div><strong>插件默认折叠</strong><span>只保留标题栏，减少对答卷和评分区的遮挡。</span></div><input type="checkbox" checked={preferences.defaultCollapsed} onChange={(event) => onPreferencesChange({ defaultCollapsed: event.target.checked })} /><i /></label>
-      <div className="desktop-setting-block"><div className="desktop-setting-copy"><strong>插件位置</strong><span>固定在网页底部，选择避开智学网操作区的一侧。</span></div><div className="desktop-segment-control" role="group" aria-label="网页插件位置"><button className={preferences.position === "bottom-left" ? "active" : ""} aria-pressed={preferences.position === "bottom-left"} onClick={() => onPreferencesChange({ position: "bottom-left" })}>左下角</button><button className={preferences.position === "bottom-right" ? "active" : ""} aria-pressed={preferences.position === "bottom-right"} onClick={() => onPreferencesChange({ position: "bottom-right" })}>右下角</button></div></div>
+      <div className="desktop-setting-block"><div className="desktop-setting-copy"><strong>插件位置</strong><span>固定在网页底部，选择避开目标阅卷网站操作区的一侧。</span></div><div className="desktop-segment-control" role="group" aria-label="网页插件位置"><button className={preferences.position === "bottom-left" ? "active" : ""} aria-pressed={preferences.position === "bottom-left"} onClick={() => onPreferencesChange({ position: "bottom-left" })}>左下角</button><button className={preferences.position === "bottom-right" ? "active" : ""} aria-pressed={preferences.position === "bottom-right"} onClick={() => onPreferencesChange({ position: "bottom-right" })}>右下角</button></div></div>
       <label className="desktop-setting-switch"><div><strong>开始批改前再次确认</strong><span>同时作用于工作台和网页插件，防止误触后提交真实分数。</span></div><input type="checkbox" checked={preferences.confirmBeforeStart} onChange={(event) => onPreferencesChange({ confirmBeforeStart: event.target.checked })} /><i /></label>
     </section>
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>异常策略</span><h2>流水线保护</h2></div></div><div className="desktop-policy-list"><div><span>提交前失败</span><strong>记录原因；连续 3 次失败后自动暂停</strong></div><div><span>写分或提交后失败</span><strong>停留在当前答卷，等待人工核对</strong></div><div><span>本地数据</span><strong>模板、历史、日志与模型配置保存在本机</strong></div><div><span>本地服务</span><strong>仅监听回环地址，并在启动时分配受保护端口</strong></div></div></section>
@@ -1827,6 +2094,10 @@ export default function DesktopApp() {
       const anchor = (event.target as Element | null)?.closest<HTMLAnchorElement>("a[href]");
       if (!anchor || anchor.target || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       const target = new URL(anchor.href, window.location.href);
+      if (target.origin === window.location.origin && target.pathname.startsWith("/api/grading-artifacts/") && !anchor.hasAttribute("download")) {
+        event.preventDefault();
+        return;
+      }
       if (target.origin !== window.location.origin || target.searchParams.get("electron") !== "1") return;
       event.preventDefault();
       pushRoute(`${target.pathname}?electron=1`);

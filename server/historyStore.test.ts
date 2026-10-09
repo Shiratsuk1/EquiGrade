@@ -3,7 +3,26 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { GradingResult, Rubric } from "../shared/types.js";
-import { countCurrentGradingResults, matchesStoredRecordId, normalizeLegacyReviewState, normalizeUploadedFileName, shouldDeleteAnswerAsset } from "./historyStore.js";
+import { countCurrentGradingResults, matchesStoredRecordId, migrateHistoryDatabase, normalizeLegacyReviewState, normalizeUploadedFileName, shouldDeleteAnswerAsset } from "./historyStore.js";
+
+const smallRubric: Rubric = {
+  title: "小题测试模板",
+  recognizedQuestionText: "小题题目",
+  version: 1,
+  status: "saved",
+  questionType: "small",
+  totalScore: 2,
+  subquestions: [{
+    id: "Q1",
+    title: "第一问",
+    maxScore: 2,
+    finalAnswerPolicy: "full_credit",
+    finalAnswers: [{ expression: "x=2" }],
+    scorePoints: [],
+    deductions: []
+  }],
+  warnings: []
+};
 
 describe("normalizeUploadedFileName", () => {
   it("repairs UTF-8 filenames decoded as Latin-1", () => {
@@ -172,6 +191,26 @@ describe("legacy review-state compatibility", () => {
   });
 });
 
+describe("question type history migration", () => {
+  it("backfills large for both template rubrics and record snapshots", () => {
+    const legacyRubric = { ...smallRubric };
+    delete (legacyRubric as Partial<Rubric>).questionType;
+    const legacySnapshot = { ...smallRubric, questionType: undefined };
+    const legacy = {
+      templates: [{
+        id: "legacy-template",
+        rubric: legacyRubric,
+        records: [{ rubricSnapshot: legacySnapshot }]
+      }]
+    };
+
+    const migrated = migrateHistoryDatabase(legacy as unknown as Parameters<typeof migrateHistoryDatabase>[0]);
+
+    expect(migrated.templates[0]?.rubric.questionType).toBe("large");
+    expect(migrated.templates[0]?.records[0]?.rubricSnapshot?.questionType).toBe("large");
+  });
+});
+
 describe("aggregated history record queries", () => {
   // historyStore 在模块加载时读取 APP_DATA_DIR，因此每次用例都用新临时目录重新加载模块。
   let tempDirectory: string;
@@ -182,13 +221,14 @@ describe("aggregated history record queries", () => {
     return await import("./historyStore.js");
   }
 
-  async function saveSampleRecord(store: typeof import("./historyStore.js"), overrides: { resultId?: string; rubric?: Rubric }) {
+  async function saveSampleRecord(store: typeof import("./historyStore.js"), overrides: { resultId?: string; rubric?: Rubric; resultPatch?: Partial<GradingResult> }) {
     const now = new Date().toISOString();
     const rubric: Rubric = overrides.rubric ?? {
       title: "测试模板",
       recognizedQuestionText: "题目",
       version: 1,
       status: "saved",
+      questionType: "large",
       totalScore: 2,
       subquestions: [{
         id: "Q1", title: "第一问", maxScore: 2, finalAnswerPolicy: "full_credit",
@@ -216,7 +256,8 @@ describe("aggregated history record queries", () => {
       subquestions: [],
       metrics: { ruleCoverage: 1, evidenceTraceability: 1, autoDecisionRate: 1, ambiguityRate: 0, durationMs: 1 },
       modelName: "teacher",
-      rubricVersion: 1
+      rubricVersion: 1,
+      ...overrides.resultPatch
     };
     const image = {
       buffer: Buffer.from("fake-png"),
@@ -230,7 +271,7 @@ describe("aggregated history record queries", () => {
       rubricSnapshot: rubric,
       operationId: crypto.randomUUID()
     });
-    return { summary, result, createdAt: now };
+    return { summary, result, rubric, image, createdAt: now };
   }
 
   async function withTempStore(operation: (store: typeof import("./historyStore.js")) => Promise<void>) {
@@ -257,6 +298,96 @@ describe("aggregated history record queries", () => {
       expect(rows[0].templateTitle).toBe("测试模板");
       expect(rows[0].rubric.title).toBe("测试模板");
       expect(rows[0].record.modelCallCount).toBe(0);
+    });
+  });
+
+  it("returns small question type in summaries and details", async () => {
+    await withTempStore(async (store) => {
+      const saved = await saveSampleRecord(store, { rubric: smallRubric });
+      const detail = await store.getTemplate(saved.summary.id);
+      const rows = await store.listGradingRecords(10);
+
+      expect(saved.summary.questionType).toBe("small");
+      expect(detail?.questionType).toBe("small");
+      expect(detail?.rubric.questionType).toBe("small");
+      expect(rows[0]?.rubric.questionType).toBe("small");
+    });
+  });
+
+  it("persists the complete OCR audit and keeps it across a regrade record", async () => {
+    await withTempStore(async (store) => {
+      const originalAudit = {
+        provider: "paddleocr" as const,
+        model: "PaddleOCR-VL-1.6",
+        jobId: "ocr-original",
+        rawJsonl: "{\"original\":true}\n",
+        markdownText: "原始识别",
+        durationMs: 10
+      };
+      const saved = await saveSampleRecord(store, {
+        rubric: smallRubric,
+        resultPatch: {
+          gradingPipeline: "small_question_ocr",
+          ocrAudit: originalAudit
+        }
+      });
+      const regradedAudit = { ...originalAudit, jobId: "ocr-regraded", rawJsonl: "{\"regraded\":true}\n", markdownText: "重新识别" };
+      const regradedResult: GradingResult = {
+        ...saved.result,
+        id: "result-regraded",
+        previousResultId: saved.result.id,
+        regradedAt: new Date().toISOString(),
+        regradeReason: "重新核对",
+        gradingPipeline: "small_question_ocr",
+        ocrAudit: regradedAudit
+      };
+
+      await store.saveRegradedRecord({
+        templateId: saved.summary.id,
+        sourceResultId: saved.result.id,
+        result: regradedResult,
+        operationId: crypto.randomUUID()
+      });
+
+      const detail = await store.getTemplate(saved.summary.id);
+      expect(detail?.records).toHaveLength(2);
+      expect(detail?.records[0]?.result.ocrAudit?.rawJsonl).toBe(regradedAudit.rawJsonl);
+      expect(detail?.records[1]?.result.ocrAudit?.rawJsonl).toBe(originalAudit.rawJsonl);
+      expect(detail?.records[0]?.result.previousResultId).toBe(saved.result.id);
+    });
+  });
+
+  it("links repeated grading of the same student image and rubric version", async () => {
+    await withTempStore(async (store) => {
+      const first = await saveSampleRecord(store, { resultId: "result-original" });
+      const secondResult: GradingResult = {
+        ...first.result,
+        id: "result-duplicate",
+        score: 0
+      };
+      await store.saveGradingRecord({
+        templateId: first.summary.id,
+        answerImage: first.image,
+        result: secondResult,
+        rubricSnapshot: first.rubric,
+        operationId: crypto.randomUUID()
+      });
+
+      const rows = await store.listGradingRecords(10);
+      expect(rows.map((row) => row.record.result.id)).toEqual(["result-duplicate", "result-original"]);
+      expect(rows[0]?.record.result.duplicateOfResultId).toBe("result-original");
+    });
+  });
+
+  it("rejects changing a saved template question type", async () => {
+    await withTempStore(async (store) => {
+      const saved = await saveSampleRecord(store, {});
+
+      await expect(store.updateTemplateRubric({
+        templateId: saved.summary.id,
+        rubric: { ...smallRubric, status: "draft" },
+        operationId: crypto.randomUUID()
+      })).rejects.toThrow("题型保存后不可修改，请新建评分标准");
     });
   });
 

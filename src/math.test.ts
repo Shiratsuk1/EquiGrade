@@ -64,8 +64,29 @@ describe("formula rendering", () => {
     expect(formulaWithUnit("v=2", "m/s")).toBe(String.raw`v=2\;\mathrm{m/s}`);
   });
 
+  it("does not append a unit that is already present in the expression", () => {
+    expect(formulaWithUnit(String.raw`a_1=6\mathrm{m/s^{2}}`, "m/s^2")).toBe(String.raw`a_1=6\mathrm{m/s^{2}}`);
+    expect(formulaWithUnit("a_1=6 m/s²", "m/s^2")).toBe("a_1=6 m/s²");
+    expect(formulaWithUnit(String.raw`L=9m`, "m")).toBe(String.raw`L=9m`);
+  });
+
+  it("renders legacy safe-token formulas at the display boundary", () => {
+    expect(renderFormulaHtml("v=[[LATEX_BS]]frac{1}{2}mv^2")).toContain("katex");
+  });
+
+  it("keeps a bare final-answer unit slash inline", () => {
+    const value = String.raw`v_1=\frac{\sqrt{10}}5 m/s`;
+    expect(normalizeLatex(value)).toBe(String.raw`v_1=\frac{\sqrt{10}}5 \mathrm{m/s}`);
+    expect(renderFormulaHtml(value)).toContain("katex");
+  });
+
   it("does not strip delimiters around multiple inline formulas as one formula", () => {
     const value = String.raw`$v_A=\sqrt{gR/3}$, $v_C=2\sqrt{gR/3}$`;
     expect(normalizeLatex(value)).toContain("$, $");
+  });
+
+  it("renders formula labels containing Chinese subscripts", () => {
+    const value = String.raw`S_{刹3}=(2\sqrt{14}+9)\rm m`;
+    expect(renderFormulaHtml(value)).toContain("katex");
   });
 });

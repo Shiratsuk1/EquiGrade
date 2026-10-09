@@ -1,9 +1,10 @@
 import katex from "katex";
+import { decodeSafeLatexTokens, SAFE_LATEX_BACKSLASH_TOKEN } from "../shared/formulaProtocol";
 
 export function isLikelyFormula(value: string): boolean {
   const text = value.trim();
   if (!text) return false;
-  return /\\[a-zA-Z]+|[=^_]|[+*/<>]|√|\d\s*[a-zA-Z]|[a-zA-Z]\s*\d/.test(text);
+  return text.includes(SAFE_LATEX_BACKSLASH_TOKEN) || /\\[a-zA-Z]+|[=^_]|[+*/<>]|√|\d\s*[a-zA-Z]|[a-zA-Z]\s*\d/.test(text);
 }
 
 function readBalancedGroup(value: string, start: number, open: string, close: string): { content: string; end: number } | null {
@@ -92,7 +93,7 @@ function restoreDamagedLatexCommands(value: string): string {
 }
 
 export function normalizeLatex(value: string): string {
-  let formula = value.trim()
+  let formula = decodeSafeLatexTokens(value).trim()
     .replace(/^```(?:latex|tex)?\s*/i, "")
     .replace(/\s*```$/, "");
 
@@ -153,6 +154,20 @@ export function normalizeLatex(value: string): string {
     return `__FORMULA_PROTECTED_${index}__`;
   });
 
+  // Model answers often append a bare unit such as `m/s` after the expression.
+  // Keep that slash as a unit separator; a mathematical `U/I`-style quotient
+  // is still handled by the fraction rules below.
+  const unitToken = String.raw`(?:[fpnumkMGT]?m|s|min|h|Hz|N|J|W|Pa|V|A|K|mol|L|Ω)`;
+  const bareUnitSlashPattern = new RegExp(
+    `(?<![A-Za-z\\\\])(${unitToken}\\s*\\/\\s*${unitToken}(?:\\s*\\^\\s*\\{?\\d+\\}?)?)(?![A-Za-z])`,
+    "g"
+  );
+  formula = formula.replace(bareUnitSlashPattern, (match) => {
+    const normalizedUnit = match.replace(/\s*\/\s*/g, "/");
+    const index = protectedGroups.push(`\\mathrm{${normalizedUnit}}`) - 1;
+    return `__FORMULA_PROTECTED_${index}__`;
+  });
+
   // Convert parenthesized and simple atom fractions to real LaTeX fractions.
   formula = formula.replace(/\(([^()\n]+)\)\s*\/\s*\(([^()\n]+)\)/g, "\\frac{$1}{$2}");
   formula = formula.replace(/(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/g, "\\frac{$1}{$2}");
@@ -195,6 +210,31 @@ export function renderFormulaHtml(value: string, displayMode = false): string | 
 
 export function formulaWithUnit(expression: string, unit?: string): string {
   if (!unit) return expression;
+  const canonicalizeUnit = (value: string) => decodeSafeLatexTokens(value)
+    .replaceAll("²", "^2")
+    .replaceAll("³", "^3")
+    .replaceAll("⁰", "^0")
+    .replaceAll("¹", "^1")
+    .replaceAll("⁴", "^4")
+    .replaceAll("⁵", "^5")
+    .replaceAll("⁶", "^6")
+    .replaceAll("⁷", "^7")
+    .replaceAll("⁸", "^8")
+    .replaceAll("⁹", "^9")
+    .replaceAll("\\mathrm", "")
+    .replaceAll("\\text", "")
+    .replaceAll("\\rm", "")
+    .replaceAll("\\;", "")
+    .replaceAll("\\,", "")
+    .replaceAll(" ", "")
+    .replaceAll("{", "")
+    .replaceAll("}", "")
+    .replaceAll("$", "")
+    .replaceAll("^", "")
+    .replaceAll("_", "")
+    .replaceAll("\\", "");
+  const canonicalUnit = canonicalizeUnit(unit);
+  if (canonicalUnit && canonicalizeUnit(expression).endsWith(canonicalUnit)) return expression;
   const safeUnit = unit.replace(/([{}\\])/g, "\\$1");
   return `${expression}\\;\\mathrm{${safeUnit}}`;
 }

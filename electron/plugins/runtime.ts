@@ -24,9 +24,11 @@ import {
 } from "../../shared/uiConstants.js";
 import { createGenericDataAdapter } from "./genericDataAdapter.js";
 import { createMockAdapter } from "./mockAdapter.js";
+import { createRuiyaAdapter } from "./ruiyaAdapter.js";
 import { createZhixueAdapter } from "./zhixueAdapter.js";
 import {
   assertSameAnswer,
+  canCommitGradingResult,
   commitFailureMessage,
   failureRequiresPause,
   isStaleAnswerError,
@@ -47,11 +49,12 @@ type GradingResponse = {
   maxScore: number;
   status: string;
   requiresReview: boolean;
+  scoreResolved?: boolean;
   imageHash?: string;
   result?: GradingResult;
 };
 
-const adapters = [createMockAdapter(), createZhixueAdapter(), createGenericDataAdapter()];
+const adapters = [createMockAdapter(), createZhixueAdapter(), createRuiyaAdapter(), createGenericDataAdapter()];
 let adapter: SiteAdapter = selectAdapter();
 let status: PluginStatus = {
   ...EMPTY_PLUGIN_STATUS,
@@ -172,7 +175,7 @@ function ensureWidget() {
     widget!.querySelector<HTMLButtonElement>("[data-hz-collapse]")!.textContent = widget!.classList.contains("hz-collapsed") ? "+" : "−";
   });
   widget.querySelector<HTMLButtonElement>("[data-hz-start]")!.addEventListener("click", () => {
-    if (pluginPreferences.confirmBeforeStart && !window.confirm("开始批改会向智学网写入并提交真实分数，确定继续吗？")) return;
+    if (pluginPreferences.confirmBeforeStart && !window.confirm("开始批改会向当前阅卷网站写入并提交真实分数，确定继续吗？")) return;
     void control("start");
   });
   widget.querySelector<HTMLButtonElement>("[data-hz-pause]")!.addEventListener("click", () => void control("pause"));
@@ -266,7 +269,7 @@ async function runPreflight() {
 }
 
 /** 流水线内部中断信号。使用带 code 的错误类而非魔法字符串，避免错误被包装/改写后控制流失效。 */
-type PipelineInterruptCode = "stopped" | "paused" | "skip" | "review";
+type PipelineInterruptCode = "stopped" | "paused" | "skip";
 
 class PipelineInterruptError extends Error {
   readonly code: PipelineInterruptCode;
@@ -368,6 +371,7 @@ async function runPipeline() {
   try {
     if (!(await runPreflight())) return;
     let unsafeRetryAttempt = 0;
+    let lastHandledPageKey: string | undefined;
     while (!stopRequested && !pauseRequested) {
       if (adapter.isBatchComplete()) {
         phase("completed", "本批次答卷已全部提交");
@@ -382,8 +386,12 @@ async function runPipeline() {
         checkInterruption();
         phase("extracting", "正在读取当前学生答卷原始图像", { pageKey: fallbackPageKey });
         answer = await adapter.getCurrentAnswer();
-        unsafeRetryAttempt = 0;
-        const transitionKey = answer.sourcePageKey ?? answer.pageKey;
+        const currentAnswerPageKey = answer.sourcePageKey ?? answer.pageKey;
+        if (currentAnswerPageKey !== lastHandledPageKey) {
+          unsafeRetryAttempt = 0;
+          lastHandledPageKey = currentAnswerPageKey;
+        }
+        const transitionKey = currentAnswerPageKey;
         record({
           type: "image_extracted",
           pageKey: answer.pageKey,
@@ -396,9 +404,23 @@ async function runPipeline() {
         checkInterruption();
         const grading = await gradeCurrent(answer);
         checkInterruption();
-        if (grading.status !== "completed" || grading.requiresReview) throw new PipelineInterruptError("review", "教师模型要求人工复核");
-        if (!Number.isFinite(grading.score) || !Number.isFinite(grading.maxScore)) throw new Error("教师模型返回的分数无效");
+        if (!canCommitGradingResult(grading)) throw new Error("教师模型未返回可写入的有效分数");
         if (grading.imageHash && grading.imageHash !== answer.imageHash) throw new Error("批改结果与当前答卷图像哈希不一致");
+        const reviewRequired = grading.requiresReview || grading.status === "needs_review";
+        if (reviewRequired) {
+          const reviewReasons = grading.result?.reviewReasons ?? [];
+          phase("grading", `本份已标记复核，仍继续写入 ${grading.score} 分`, { pageKey: transitionKey });
+          record({
+            type: "page_review_flagged",
+            pageKey: answer.pageKey,
+            sourcePageKey: answer.sourcePageKey,
+            imageHash: grading.imageHash ?? answer.imageHash,
+            score: grading.score,
+            maxScore: grading.maxScore,
+            reviewCount: reviewReasons.length,
+            reviewReasons: reviewReasons.slice(0, 20)
+          });
+        }
         await confirmCurrentAnswer(answer);
         const score = scorePayload(grading, answer);
 
@@ -421,6 +443,8 @@ async function runPipeline() {
           imageHash: grading.imageHash ?? answer.imageHash,
           score: grading.score,
           maxScore: grading.maxScore,
+          requiresReview: reviewRequired,
+          reviewCount: grading.result?.reviewReasons.length ?? (reviewRequired ? 1 : 0),
           segments: score.segments
         });
         publish({ consecutiveFailures: 0, lastScore: grading.score, maxScore: grading.maxScore });
@@ -433,6 +457,8 @@ async function runPipeline() {
           record({ type: "pipeline_completed" });
           return;
         }
+        unsafeRetryAttempt = 0;
+        lastHandledPageKey = undefined;
         await runPreflight();
       } catch (error) {
         const reason = readableRemoteError(error, "当前答卷处理失败");
@@ -477,17 +503,6 @@ async function runPipeline() {
               phase("paused", "流水线已按要求暂停");
               record({ type: "pipeline_paused", reason: "用户暂停", consecutiveFailures: status.consecutiveFailures });
               return;
-            case "review": {
-              const reviewKey = answer?.sourcePageKey ?? answer?.pageKey ?? fallbackPageKey;
-              phase("paused", "教师模型要求人工复核，已停留在当前答卷", { pageKey: reviewKey });
-              record({
-                type: "pipeline_paused",
-                pageKey: reviewKey,
-                reason: "教师模型结果需要人工复核",
-                consecutiveFailures: status.consecutiveFailures
-              });
-              return;
-            }
             case "skip":
               skipRequested = false;
               break;
@@ -523,9 +538,11 @@ async function runPipeline() {
           }
           // 等待退避期间页面已切换：不重试旧卷，重置计数后按新答卷正常继续。
           unsafeRetryAttempt = 0;
+          lastHandledPageKey = undefined;
           continue;
         }
         unsafeRetryAttempt = 0;
+        lastHandledPageKey = undefined;
         const currentKey = answer?.sourcePageKey ?? answer?.pageKey ?? fallbackPageKey;
         const skipped = error instanceof PipelineInterruptError && error.code === "skip";
         const failures = skipped ? status.consecutiveFailures : status.consecutiveFailures + 1;
@@ -537,7 +554,7 @@ async function runPipeline() {
           return;
         }
         if (!status.capabilities.skip) {
-          // 当前阅卷页面批完前无法进入下一份（如智学网）：跳过不可行，直接暂停等人工，
+          // 当前阅卷页面批完前无法进入下一份（如智学网、睿芽云）：跳过不可行，直接暂停等人工，
           // 避免一次注定失败的翻页尝试。
           const message = `当前答卷处理失败且页面不支持跳过，请人工处理：${reason}`;
           phase("paused", message, { pageKey: currentKey });
@@ -597,17 +614,13 @@ async function runDryRun(options: PipelineDryRunOptions): Promise<PipelineDryRun
   });
   phase("grading", "试运行：教师模型正在评分，不会提交成绩", { pageKey: answer.sourcePageKey ?? answer.pageKey });
   const grading = await gradeCurrent(answer);
-  if (!Number.isFinite(grading.score) || !Number.isFinite(grading.maxScore)) throw new Error("教师模型返回的分数无效");
+  if (!canCommitGradingResult(grading)) throw new Error("教师模型未返回可写入的有效分数");
   if (grading.imageHash && grading.imageHash !== answer.imageHash) throw new Error("批改结果与当前答卷图像哈希不一致");
   await confirmCurrentAnswer(answer);
   const payload = scorePayload(grading, answer);
-  const writeTest = options.verifyWrite
-    ? grading.requiresReview
-      ? (() => { throw new Error("教师模型要求人工复核，本次试运行未写入网页评分栏"); })()
-      : await adapter.testScoreWrite(payload)
-    : undefined;
+  const writeTest = options.verifyWrite ? await adapter.testScoreWrite(payload) : undefined;
   phase("ready", options.verifyWrite
-    ? "试运行完成：评分栏写入校验成功并已恢复原值，未提交成绩"
+    ? `试运行完成：${grading.requiresReview ? "结果已标记复核；" : ""}评分栏写入校验成功并已恢复原值，未提交成绩`
     : "试运行完成：原图与模型评分正常，未写入或提交成绩", {
     pageKey: answer.sourcePageKey ?? answer.pageKey,
     lastScore: grading.score,

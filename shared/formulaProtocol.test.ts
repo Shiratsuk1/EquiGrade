@@ -4,6 +4,7 @@ import {
   decodeSafeLatexTokens,
   findDamagedLatexControlPath,
   hasUnsafeLatexJsonEscape,
+  repairLatexJsonEscapes,
   splitFormulaTextBlocks
 } from "./formulaProtocol.js";
 
@@ -23,6 +24,14 @@ describe("safe formula protocol", () => {
     expect(hasUnsafeLatexJsonEscape(String.raw`{"latex":"\right)"}`)).toBe(true);
     expect(hasUnsafeLatexJsonEscape(String.raw`{"latex":"\\right)"}`)).toBe(false);
     expect(hasUnsafeLatexJsonEscape(`{"latex":"${SAFE_LATEX_BACKSLASH_TOKEN}right)"}`)).toBe(false);
+  });
+
+  it("repairs model-produced raw LaTeX backslashes locally before JSON parsing", () => {
+    const raw = String.raw`{"latex":"\frac{1}{2} + \sqrt{2gh}","text":"换行\\n保留"}`;
+    const repaired = repairLatexJsonEscapes(raw);
+    expect(repaired.repaired).toBe(true);
+    expect(JSON.parse(repaired.json)).toEqual({ latex: String.raw`\frac{1}{2} + \sqrt{2gh}`, text: String.raw`换行\n保留` });
+    expect(repairLatexJsonEscapes(String.raw`{"latex":"\\frac{1}{2}"}`).repaired).toBe(false);
   });
 
   it("detects control-character damage after parsing", () => {

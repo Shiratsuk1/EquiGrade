@@ -65,6 +65,35 @@ function localReviewEvidenceLineIds(evidence: AnswerEvidence, lineIds: string[])
   });
 }
 
+/**
+ * A `not_present` decision needs a locatable absence audit.  An empty list of
+ * evidence IDs only says that the model did not find a matching line; it does
+ * not prove that the answer area was actually inspected.  Crossed-out lines
+ * are valid absence evidence, while uncertain/low-confidence lines are not.
+ */
+function hasAuditableNotPresentEvidence(evidence: AnswerEvidence, lineIds: string[]): boolean {
+  const uniqueLineIds = [...new Set(lineIds)];
+  if (uniqueLineIds.length === 0) return false;
+  const linesById = new Map(evidence.lines.map((line) => [line.id, line]));
+  return uniqueLineIds.every((lineId) => {
+    const line = linesById.get(lineId);
+    const isStructuredAbsenceAudit = Boolean(
+      line
+      && line.status === "uncertain"
+      && line.text.trim().startsWith("缺失审验锚点：")
+      && line.region
+    );
+    if (isStructuredAbsenceAudit) return true;
+    return Boolean(
+      line
+      && line.status !== "uncertain"
+      && (line.text.trim() || line.latex?.trim())
+      && line.confidence >= REVIEW_CONFIDENCE_THRESHOLD
+      && line.region
+    );
+  });
+}
+
 export function normalizeEvidenceReferences(input: AnswerEvidence): AnswerEvidence {
   const seenLineIds = new Set<string>();
   const ambiguities = [...input.ambiguities];
@@ -155,6 +184,7 @@ export function calculateGrade(input: {
   unreadableReviewThreshold?: number;
   evidenceValidationMode?: "extracted_text" | "direct_visual";
   gradingMode?: GradingMode;
+  pointScoreOverrides?: ReadonlyMap<string, number> | Readonly<Record<string, number>>;
 }): GradingResult {
   const reviewReasons = new Set<string>();
   const deductions = input.appliedDeductions ?? [];
@@ -170,6 +200,8 @@ export function calculateGrade(input: {
       ? "unreadable_local_review" as const
       : modelJudgement?.decisionSource === "local_numeric_review"
         ? "local_numeric_review" as const
+        : modelJudgement?.decisionSource === "visual_local_review"
+          ? "visual_local_review" as const
         : modelJudgement ? "teacher_model" as const : "missing_teacher_judgement" as const;
     const finalAnswerJudgement: FinalAnswerJudgement = modelJudgement ?? {
       subquestionId: subquestion.id,
@@ -182,7 +214,7 @@ export function calculateGrade(input: {
     };
     const finalAnswerStatus = finalAnswerJudgement.status;
     const finalEvidenceCheck = inspectEvidenceLineIds(input.evidence, finalAnswerJudgement.evidenceLineIds);
-    const finalAnswerEvidenceLineIds = finalAnswerDecisionSource === "unreadable_local_review" || finalAnswerDecisionSource === "local_numeric_review"
+    const finalAnswerEvidenceLineIds = finalAnswerDecisionSource === "unreadable_local_review" || finalAnswerDecisionSource === "local_numeric_review" || finalAnswerDecisionSource === "visual_local_review"
       ? localReviewEvidenceLineIds(input.evidence, finalAnswerJudgement.evidenceLineIds)
       : finalEvidenceCheck.validLineIds;
     if (!modelJudgement) {
@@ -193,7 +225,7 @@ export function calculateGrade(input: {
         : `${subquestion.title}最终答案经视觉复查后仍无法可靠确认，需要人工复核。`);
     } else if (input.evidenceValidationMode === "direct_visual"
       && (finalAnswerStatus === "correct" || finalAnswerStatus === "incorrect")
-      && (finalAnswerDecisionSource === "unreadable_local_review" || finalAnswerDecisionSource === "local_numeric_review"
+      && (finalAnswerDecisionSource === "unreadable_local_review" || finalAnswerDecisionSource === "local_numeric_review" || finalAnswerDecisionSource === "visual_local_review"
         ? localReviewEvidenceLineIds(input.evidence, finalAnswerJudgement.evidenceLineIds)
         : directVisualEvidenceLineIds(input.evidence, finalAnswerJudgement.evidenceLineIds)).length === 0) {
       reviewReasons.add(`${subquestion.title}的教师模型最终答案判定缺少可定位的图像证据，需要人工复核。`);
@@ -202,6 +234,8 @@ export function calculateGrade(input: {
     // The teacher model is the sole authority for final-answer correctness.
     // Process work is still audited, but cannot reduce a correct final answer.
     const grantsFullCredit = finalAnswerStatus === "correct";
+    const confirmedNoEffectiveAnswer = finalAnswerStatus === "missing"
+      && finalAnswerJudgement.answerPresence === "no_effective_answer";
     if (input.operationId) {
       logEvent(input.operationId, "grading", "final_answer_authority_decision", `${subquestion.title}：教师模型判定最终答案为${finalAnswerStatus}`, {
         subquestionId: subquestion.id,
@@ -229,8 +263,8 @@ export function calculateGrade(input: {
           evidenceQuote: "",
           reason: "模型未返回该评分点的判断，当前按未提供可确认的评分证据计0分。",
           confidence: 0,
-          requiresReview: true,
-          reviewReason: "评分点缺少判断结果",
+          requiresReview: !confirmedNoEffectiveAnswer,
+          ...(confirmedNoEffectiveAnswer ? {} : { reviewReason: "评分点缺少判断结果" }),
           decisionSource: "synthetic_missing"
         };
       } else {
@@ -246,25 +280,57 @@ export function calculateGrade(input: {
         }
       }
       const isUnreadable = decision.status === "unreadable" || decision.status === "insufficient_evidence";
-      const isMissingModelDecision = decision.decisionSource === "synthetic_missing";
+      const isMissingModelDecision = decision.decisionSource === "synthetic_missing" && !confirmedNoEffectiveAnswer;
+      const isPendingVisualReview = (decision.decisionSource === "visual_local_review" || decision.decisionSource === "large_question_point_review") && decision.requiresReview;
+      const isExcludedFromProcessAudit = decision.decisionSource === "synthetic_missing" || decision.decisionSource === "final_answer_authority";
+      const isUnauditedNotPresent = decision.status === "not_present"
+        && !isExcludedFromProcessAudit
+        && !hasAuditableNotPresentEvidence(input.evidence, decision.evidenceLineIds);
+      if (isUnauditedNotPresent && !grantsFullCredit) {
+        decision = {
+          ...decision,
+          requiresReview: true,
+          reviewReason: decision.reviewReason || "未提供可定位的缺失审验证据，无法确认该评分点确实未作答"
+        };
+      }
       // Unreadable points are candidates until the whole-paper affected score is
       // known. A clear model status cannot independently force human review.
-      const requiresReview = isMissingModelDecision;
-      if (!isUnreadable && !isMissingModelDecision && (decision.requiresReview || decision.reviewReason)) {
+      const requiresReview = isMissingModelDecision
+        || (!isUnreadable && isPendingVisualReview)
+        || (isUnauditedNotPresent && !grantsFullCredit);
+      if (!isUnreadable && !isMissingModelDecision && !isPendingVisualReview && !isUnauditedNotPresent && (decision.requiresReview || decision.reviewReason)) {
         decision = { ...decision, requiresReview: false, reviewReason: undefined };
       }
+      const pointKey = `${subquestion.id}:${point.id}`;
+      const overrideValue = input.pointScoreOverrides && "get" in input.pointScoreOverrides
+        ? (input.pointScoreOverrides as ReadonlyMap<string, number>).get(pointKey)
+        : input.pointScoreOverrides
+          ? (input.pointScoreOverrides as Readonly<Record<string, number>>)[pointKey]
+          : undefined;
+      const hasScoreOverride = overrideValue !== undefined && Number.isFinite(overrideValue);
+      const reviewedScore = hasScoreOverride
+        ? Math.max(0, Math.min(point.score, Number(overrideValue)))
+        : undefined;
+      const hasModelScore = decision.awardedScore !== undefined && Number.isFinite(decision.awardedScore);
+      const modelScore = hasModelScore
+        ? Math.max(0, Math.min(point.score, Number(decision.awardedScore)))
+        : undefined;
       const scoringDisposition = grantsFullCredit
         ? "not_deducted_by_final_answer" as const
-        : decision.status === "satisfied"
-          ? "awarded" as const
-          : "not_awarded" as const;
-      if (isMissingModelDecision) reviewReasons.add(decision.reviewReason || `${point.title}缺少评分判断，需要人工复核`);
+        : reviewedScore !== undefined
+          ? reviewedScore > 0 ? "awarded_by_visual_review" as const : "not_awarded_by_visual_review" as const
+          : modelScore !== undefined
+            ? modelScore > 0 && modelScore < point.score ? "partially_awarded" as const : modelScore > 0 ? "awarded" as const : "not_awarded" as const
+          : decision.status === "satisfied"
+            ? "awarded" as const
+            : "not_awarded" as const;
+      if (requiresReview) reviewReasons.add(decision.reviewReason || `${point.title}需要人工复核`);
       return {
         ...decision,
         requiresReview,
         scoringDisposition,
         maxScore: point.score,
-        awardedScore: grantsFullCredit || decision.status === "satisfied" ? point.score : 0,
+        awardedScore: grantsFullCredit ? point.score : reviewedScore ?? modelScore ?? (decision.status === "satisfied" ? point.score : 0),
         uncertainScore: 0
       };
     });
@@ -364,6 +430,7 @@ export function calculateGrade(input: {
       maximumPossibleScore,
       uncertainScore,
       finalAnswerStatus,
+      answerPresence: finalAnswerJudgement.answerPresence,
       finalAnswerReason: finalAnswerJudgement.reason,
       finalAnswerConfidence: finalAnswerJudgement.confidence,
       finalAnswerDecisionSource,
@@ -420,12 +487,22 @@ export function calculateGrade(input: {
 
   const allDecisions = subquestions.flatMap((item) => item.decisions);
   const expectedDecisionCount = input.rubric.subquestions.reduce((sum, item) => sum + item.scorePoints.length, 0);
-  const executedDecisions = allDecisions.filter((item) => item.decisionSource !== "synthetic_missing");
-  const traceable = executedDecisions.filter((item) => {
+  const executedDecisions = allDecisions.filter((item) => item.decisionSource !== "synthetic_missing" && item.decisionSource !== "final_answer_authority");
+  // These ratios describe decisions that actually attempted a process-point
+  // audit.  Authority decisions and synthetic placeholders are intentionally
+  // outside the denominator: neither is evidence that the process point was
+  // inspected.  A zero denominator means process auditing was not applicable
+  // (for example, a final-answer-authority full-credit result), so expose a
+  // neutral 100% rather than manufacturing a low rate from excluded rows.
+  const metricDecisions = executedDecisions.filter((item) => item.status !== "not_required");
+  const traceable = metricDecisions.filter((item) => {
+    if (item.status === "not_present") {
+      return hasAuditableNotPresentEvidence(input.evidence, item.evidenceLineIds);
+    }
     if (input.evidenceValidationMode === "direct_visual") {
-      return (item.decisionSource === "unreadable_local_review"
-        ? localReviewEvidenceLineIds(input.evidence, item.evidenceLineIds)
-        : directVisualEvidenceLineIds(input.evidence, item.evidenceLineIds)).length > 0;
+        return (item.decisionSource === "unreadable_local_review" || item.decisionSource === "visual_local_review" || item.decisionSource === "large_question_point_review"
+          ? localReviewEvidenceLineIds(input.evidence, item.evidenceLineIds)
+          : directVisualEvidenceLineIds(input.evidence, item.evidenceLineIds)).length > 0;
     }
     const evidenceCheck = inspectEvidenceLineIds(input.evidence, item.evidenceLineIds);
     return evidenceCheck.validLineIds.length > 0
@@ -434,24 +511,26 @@ export function calculateGrade(input: {
       && evidenceCheck.uncertainLineIds.length === 0
       && evidenceCheck.lowConfidenceLineIds.length === 0;
   }).length;
-  const automatic = executedDecisions.filter((item) => {
+  const automatic = metricDecisions.filter((item) => {
     const evidenceCheck = inspectEvidenceLineIds(input.evidence, item.evidenceLineIds);
     const evidenceSupportsStatus = item.status === "not_present"
-      || (input.evidenceValidationMode === "direct_visual"
-        ? (item.decisionSource === "unreadable_local_review"
+      ? hasAuditableNotPresentEvidence(input.evidence, item.evidenceLineIds)
+      : input.evidenceValidationMode === "direct_visual"
+        ? (item.decisionSource === "unreadable_local_review" || item.decisionSource === "visual_local_review" || item.decisionSource === "large_question_point_review"
           ? localReviewEvidenceLineIds(input.evidence, item.evidenceLineIds)
           : directVisualEvidenceLineIds(input.evidence, item.evidenceLineIds)).length > 0
         : evidenceCheck.validLineIds.length > 0
           && evidenceCheck.missingLineIds.length === 0
           && evidenceCheck.crossedOutLineIds.length === 0
           && evidenceCheck.uncertainLineIds.length === 0
-          && evidenceCheck.lowConfidenceLineIds.length === 0);
-    return (item.decisionSource === "model" || item.decisionSource === "unreadable_local_review")
+          && evidenceCheck.lowConfidenceLineIds.length === 0;
+    return (item.decisionSource === "model" || item.decisionSource === "unreadable_local_review" || item.decisionSource === "visual_local_review")
       && !item.requiresReview
       && item.status !== "unreadable"
       && item.status !== "insufficient_evidence"
       && evidenceSupportsStatus;
   }).length;
+  const processMetricDenominator = metricDecisions.length;
   const ambiguousLineIds = new Set([
     ...input.evidence.lines.filter((line) => line.status === "uncertain").map((line) => line.id),
     ...input.evidence.ambiguities
@@ -460,6 +539,26 @@ export function calculateGrade(input: {
   ]);
   const score = subquestions.reduce((sum, item) => sum + item.score, 0);
   const maximumPossibleScore = score;
+  const scoreResolutionReasons = subquestions.flatMap((subquestion) => {
+    if (subquestion.finalAnswerStatus === "correct") return [];
+    const reasons: string[] = [];
+    if (subquestion.finalAnswerStatus === "uncertain") {
+      reasons.push(`${subquestion.title}最终答案仍不确定，复核可能改变该小问得分`);
+    }
+    for (const decision of subquestion.decisions) {
+      if (decision.decisionSource === "synthetic_missing" && subquestion.answerPresence !== "no_effective_answer") {
+        reasons.push(`${subquestion.title}/${decision.pointId}缺少实际评分决定`);
+      } else if ((decision.status === "unreadable" || decision.status === "insufficient_evidence") && (unreadableReviewTriggered || decision.requiresReview)) {
+        reasons.push(`${subquestion.title}/${decision.pointId}的评分证据无法确定`);
+      } else if (decision.status === "not_present"
+        && subquestion.answerPresence !== "no_effective_answer"
+        && !hasAuditableNotPresentEvidence(input.evidence, decision.evidenceLineIds)) {
+        reasons.push(`${subquestion.title}/${decision.pointId}的未作答结论没有可定位缺失审验`);
+      }
+    }
+    return reasons;
+  });
+  const uniqueScoreResolutionReasons = [...new Set(scoreResolutionReasons)];
 
   return {
     id: input.id,
@@ -468,14 +567,16 @@ export function calculateGrade(input: {
     score,
     maxScore: input.rubric.totalScore,
     maximumPossibleScore,
+    scoreResolved: uniqueScoreResolutionReasons.length === 0,
+    scoreResolutionReasons: uniqueScoreResolutionReasons,
     status: reviewReasons.size > 0 ? "needs_review" : "completed",
     reviewReasons: [...reviewReasons],
     evidence: input.evidence,
     subquestions,
     metrics: {
       ruleCoverage: expectedDecisionCount ? executedDecisions.length / expectedDecisionCount : 1,
-      evidenceTraceability: expectedDecisionCount ? traceable / expectedDecisionCount : 1,
-      autoDecisionRate: expectedDecisionCount ? automatic / expectedDecisionCount : 1,
+      evidenceTraceability: processMetricDenominator ? traceable / processMetricDenominator : 1,
+      autoDecisionRate: processMetricDenominator ? automatic / processMetricDenominator : 1,
       ambiguityRate: input.evidence.lines.length ? ambiguousLineIds.size / input.evidence.lines.length : 0,
       durationMs: input.durationMs
     },
