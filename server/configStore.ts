@@ -16,8 +16,7 @@ import {
   DEFAULT_STAGED_LAYOUT_ENGINE,
   TEACHER_REASONING_EFFORTS
 } from "../shared/types.js";
-import type { GradingMode, LargeQuestionWorkflow, ModelConfigInput, PublicModelConfig, ResponsesAgentConfigInput, StagedLayoutEngine, TeacherReasoningEffort } from "../shared/types.js";
-import { mergeModelRoutes } from "../shared/modelRouting.js";
+import type { GradingMode, LargeQuestionWorkflow, ModelConfigInput, ModelRouteConfig, ModelRouteKey, PublicModelConfig, ResponsesAgentConfigInput, StagedLayoutEngine, TeacherReasoningEffort } from "../shared/types.js";
 import {
   DEFAULT_PADDLEOCR_JOB_URL,
   DEFAULT_PADDLEOCR_MODEL,
@@ -76,6 +75,21 @@ async function decrypt(payload: EncryptedPayload): Promise<StoredConfig> {
     decipher.final()
   ]);
   return JSON.parse(decrypted.toString("utf8")) as StoredConfig;
+}
+
+function normalizeStoredModelRoutes(
+  routes: Partial<Record<ModelRouteKey, ModelRouteConfig>> | undefined
+): Partial<Record<ModelRouteKey, ModelRouteConfig>> {
+  if (!routes) return {};
+  const normalized: Partial<Record<ModelRouteKey, ModelRouteConfig>> = {};
+  for (const [key, route] of Object.entries(routes) as Array<[ModelRouteKey, ModelRouteConfig]>) {
+    if (!route) continue;
+    normalized[key] = {
+      ...route,
+      model: route.model?.trim() ?? ""
+    };
+  }
+  return normalized;
 }
 
 function withConfigDefaults(config: StoredConfig): StoredConfig {
@@ -174,7 +188,7 @@ function withConfigDefaults(config: StoredConfig): StoredConfig {
     gradingMode,
     largeQuestionWorkflow,
     stagedLayoutEngine,
-    modelRoutes: mergeModelRoutes(config),
+    modelRoutes: normalizeStoredModelRoutes(config.modelRoutes),
     paddleOcr,
     responsesAgent
   };

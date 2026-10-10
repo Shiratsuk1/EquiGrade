@@ -69,9 +69,14 @@ const MODEL_ROUTE_GROUPS: ReadonlyArray<{
   },
   {
     key: "small-question",
-    label: "小题批改",
-    description: "先还原卷面作答，再按材料类型选择评分模型",
-    routeKeys: ["small_question_reconstruction", "small_question_grading_vision", "small_question_grading_text"]
+    label: "小题批改（切片双路核验）",
+    description: "原生分空定位后，盲审 A 与挑刺 B 双路并发核验，初检分歧按需终审",
+    routeKeys: [
+      "small_question_blank_layout",
+      "small_question_blind_transcription",
+      "small_question_skeptic_assessment",
+      "small_question_escalated_review"
+    ]
   }
 ];
 
@@ -83,23 +88,29 @@ const routeTriggerLabels: Partial<Record<ModelRouteKey, string>> = {
   large_question_answer_triage: "稳定大题批改首轮，必经",
   large_question_visual_review: "稳定链路首轮判错、判空或不确定时，按需",
   large_question_point_review: "稳定链路首轮判错、判空或不确定的小问，按需",
-  small_question_reconstruction: "小题批改第一阶段",
-  small_question_grading_vision: "题目或参考答案含图片时",
-  small_question_grading_text: "题目和参考答案均为文字时"
+  small_question_blank_layout: "小题各空手写定位，第一阶段必经",
+  small_question_blind_transcription: "切片盲审转录，不知参考答案，必经",
+  small_question_skeptic_assessment: "切片挑刺审查，对照参考答案，必经",
+  small_question_escalated_review: "初检分歧或疑点时，拉满思考预算终审，按需"
 };
 
-function routeFallback(form: ModelConfigInput, key: ModelRouteKey): ModelRouteConfig {
+function routeFallback(_form: ModelConfigInput, key: ModelRouteKey): ModelRouteConfig {
   const definition = ACTIVE_MODEL_ROUTE_DEFINITIONS.find((item) => item.key === key);
-  if (!definition) return { endpoint: "teacher", model: "" };
-  const legacyModel = form[definition.modelField];
   return {
-    endpoint: definition.endpoint,
-    model: typeof legacyModel === "string" ? legacyModel : ""
+    endpoint: definition?.endpoint ?? "teacher",
+    model: ""
   };
 }
 
 function routeValue(form: ModelConfigInput, key: ModelRouteKey): ModelRouteConfig {
-  return form.modelRoutes?.[key] ?? routeFallback(form, key);
+  const configured = form.modelRoutes?.[key];
+  if (configured) {
+    return {
+      ...configured,
+      model: configured.model ?? ""
+    };
+  }
+  return routeFallback(form, key);
 }
 
 function defaultReasoning(form: ModelConfigInput, endpoint: ModelRouteConfig["endpoint"]): TeacherReasoningEffort {
@@ -107,10 +118,12 @@ function defaultReasoning(form: ModelConfigInput, endpoint: ModelRouteConfig["en
   return configured ?? (endpoint === "review" ? "low" : "disabled");
 }
 
-function modelPlaceholder(modelField: "visionModel" | "textModel" | "reviewModel"): string {
-  if (modelField === "reviewModel") return "留空继承默认审验模型";
-  if (modelField === "textModel") return "留空继承默认文本模型";
-  return "留空继承默认视觉模型";
+function modelPlaceholder(modelField: "visionModel" | "textModel" | "reviewModel", form: ModelConfigInput): string {
+  const inherited = form[modelField]?.trim();
+  const name = inherited ? `当前：${inherited}` : "未配置";
+  if (modelField === "reviewModel") return `留空继承默认审验模型（${name}）`;
+  if (modelField === "textModel") return `留空继承默认文本模型（${name}）`;
+  return `留空继承默认视觉模型（${name}）`;
 }
 
 function createAgentDefaults(form: ModelConfigInput): ResponsesAgentFormConfig {
@@ -317,7 +330,32 @@ function StableRouteGroups({ form, update, includeLargeQuestion }: { form: Model
     {groups.map((group) => {
       const definitions = group.routeKeys.map((key) => ACTIVE_MODEL_ROUTE_DEFINITIONS.find((definition) => definition.key === key)).filter((definition): definition is typeof ACTIVE_MODEL_ROUTE_DEFINITIONS[number] => Boolean(definition));
       return <div className="model-route-group" key={group.key}>
-        <div className="model-route-group-heading"><div><span>{group.label}</span><strong>{group.description}</strong></div><small>{definitions.length} 条业务路由</small></div>
+        <div className="model-route-group-heading">
+          <div>
+            <span>{group.label}</span>
+            <strong>{group.description}</strong>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <small>{definitions.length} 条业务路由</small>
+            {definitions.some((d) => routeValue(form, d.key).model.trim() !== "") && (
+              <button
+                type="button"
+                className="model-route-reset-prompt"
+                style={{ padding: "2px 8px", fontSize: "11px", height: "auto" }}
+                title="将本组所有步骤清空，恢复继承主模型"
+                onClick={() => {
+                  const nextRoutes = { ...(form.modelRoutes ?? {}) };
+                  for (const d of definitions) {
+                    nextRoutes[d.key] = { ...routeValue(form, d.key), model: "" };
+                  }
+                  update("modelRoutes", nextRoutes);
+                }}
+              >
+                恢复继承主模型
+              </button>
+            )}
+          </div>
+        </div>
         <div className="model-route-list">
           {definitions.map((definition) => {
             const route = routeValue(form, definition.key);
@@ -329,7 +367,30 @@ function StableRouteGroups({ form, update, includeLargeQuestion }: { form: Model
             const promptEditorValue = isReplacingPrompt ? route.systemPrompt ?? selectedPromptVariant.prompt : route.systemPrompt ?? "";
             return <article className="model-route-card" key={definition.key}>
               <div className="model-route-card-heading"><div><span className="model-route-step-label">实际步骤</span><strong>{definition.label}</strong><small>{definition.description}</small></div><div className="model-route-card-meta"><span>{routeTriggerLabels[definition.key] ?? "按当前流程调用"}</span><code>{definition.key}</code></div></div>
-              <div className="model-route-fields model-route-basic-fields"><label className="model-route-model-field"><span>本步骤使用模型</span><input value={route.model} onChange={(event) => updateRoute(definition.key, { model: event.target.value })} placeholder={modelPlaceholder(definition.modelField)} /></label><label><span>本步骤推理强度</span><select value={route.reasoningEffort ?? "inherit"} onChange={(event) => updateRoute(definition.key, { reasoningEffort: event.target.value === "inherit" ? undefined : event.target.value as ModelRouteConfig["reasoningEffort"] })}><option value="inherit">继承{endpointLabels[route.endpoint]}默认（当前：{reasoningLabels[inheritedReasoning]}）</option>{TEACHER_REASONING_EFFORTS.map((effort) => <option value={effort} key={effort}>{effort === "disabled" ? "本步骤不发送 reasoning_effort" : effort}</option>)}</select><small className="model-route-effective-note">当前生效：{reasoningLabels[effectiveReasoning]}</small></label></div>
+              <div className="model-route-fields model-route-basic-fields">
+                <label className="model-route-model-field">
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>本步骤使用模型</span>
+                    {route.model.trim() !== "" && (
+                      <button
+                        type="button"
+                        className="model-route-reset-prompt"
+                        style={{ padding: "1px 6px", fontSize: "11px", height: "auto" }}
+                        title="清空此项以继承主模型"
+                        onClick={() => updateRoute(definition.key, { model: "" })}
+                      >
+                        清空继承
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    value={route.model}
+                    onChange={(event) => updateRoute(definition.key, { model: event.target.value })}
+                    placeholder={modelPlaceholder(definition.modelField, form)}
+                  />
+                </label>
+                <label><span>本步骤推理强度</span><select value={route.reasoningEffort ?? "inherit"} onChange={(event) => updateRoute(definition.key, { reasoningEffort: event.target.value === "inherit" ? undefined : event.target.value as ModelRouteConfig["reasoningEffort"] })}><option value="inherit">继承{endpointLabels[route.endpoint]}默认（当前：{reasoningLabels[inheritedReasoning]}）</option>{TEACHER_REASONING_EFFORTS.map((effort) => <option value={effort} key={effort}>{effort === "disabled" ? "本步骤不发送 reasoning_effort" : effort}</option>)}</select><small className="model-route-effective-note">当前生效：{reasoningLabels[effectiveReasoning]}</small></label>
+              </div>
               <details className="model-route-advanced"><summary><span>服务来源、System Prompt 与低频参数</span><small>{endpointLabels[route.endpoint]} · {route.systemPrompt?.trim() ? (route.systemPromptMode === "replace" ? "已替换提示词" : "已追加提示词") : "使用内置提示词"}</small></summary><div className="model-route-fields model-route-advanced-fields"><label><span>API 服务</span><select value={route.endpoint} onChange={(event) => updateRoute(definition.key, { endpoint: event.target.value as ModelRouteConfig["endpoint"] })}><option value="teacher">{endpointLabels.teacher}</option><option value="review">{endpointLabels.review}</option></select></label><label><span>超时（毫秒）</span><input type="number" min={1000} max={300000} value={route.timeoutMs ?? ""} placeholder="继承全局" onChange={(event) => setNumber(definition.key, "timeoutMs", event.target.value)} /></label><label><span>最大输出 Token</span><input type="number" min={256} max={65536} value={route.maxOutputTokens ?? ""} placeholder="继承全局" onChange={(event) => setNumber(definition.key, "maxOutputTokens", event.target.value)} /></label><label><span>本链路重试上限</span><input type="number" min={0} max={5} value={route.maxRetries ?? ""} placeholder="不超过全局" onChange={(event) => setNumber(definition.key, "maxRetries", event.target.value)} /></label><label><span>System Prompt 调整方式</span><select value={route.systemPromptMode ?? "append"} onChange={(event) => updateRoute(definition.key, { systemPromptMode: event.target.value as ModelSystemPromptMode })}>{MODEL_SYSTEM_PROMPT_MODES.map((mode) => <option value={mode} key={mode}>{systemPromptModeLabels[mode]}</option>)}</select></label>{promptVariants.length > 1 && <label className="model-route-prompt-variant-field"><span>替换模式内置版本</span><select value={selectedPromptVariant.key} onChange={(event) => setPromptPreviewKeys((current) => ({ ...current, [definition.key]: event.target.value }))}>{promptVariants.map((item) => <option value={item.key} key={item.key}>{item.label}</option>)}</select></label>}<label className="model-route-system-prompt-field"><div className="model-route-system-prompt-heading"><span>{isReplacingPrompt ? "本步骤完整 System Prompt（可直接编辑）" : "本步骤追加指令"}</span><button type="button" className="model-route-reset-prompt" disabled={!route.systemPrompt?.trim()} onClick={() => updateRoute(definition.key, { systemPrompt: undefined, systemPromptMode: undefined })}>恢复内置提示词</button></div><textarea value={promptEditorValue} maxLength={MAX_MODEL_SYSTEM_PROMPT_LENGTH} rows={6} onChange={(event) => updateRoute(definition.key, { systemPrompt: event.target.value })} placeholder={isReplacingPrompt ? "当前内置提示词会显示在这里，可直接修改" : "不追加时留空"} /><small>{isReplacingPrompt ? "替换模式下这里直接显示并保存完整提示词；恢复内置提示词会清除本步骤覆盖。" : "追加模式只保存你补充的内容；需要查看或编辑完整内置提示词时切换为替换模式。"} LaTeX 安全协议仍由系统追加。</small></label></div></details>
             </article>;
           })}
