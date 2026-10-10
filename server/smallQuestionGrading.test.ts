@@ -248,4 +248,60 @@ describe("server/smallQuestionGrading", () => {
     expect(rec?.decisionSource).toBe("escalated_review_c");
     expect(rec?.escalatedReview?.finalExtractedAnswer).toBe("3.86");
   });
+
+  it("accurately classifies blank semantic domains via detectBlankDomain", async () => {
+    const { detectBlankDomain } = await import("./smallQuestionGrading.js");
+    expect(detectBlankDomain([{ expression: "A" }])).toBe("choice_letter");
+    expect(detectBlankDomain([{ expression: "B" }, { expression: "C" }])).toBe("choice_letter");
+    expect(detectBlankDomain([{ expression: "3.80" }])).toBe("numeric");
+    expect(detectBlankDomain([{ expression: "-2.5" }])).toBe("numeric");
+    expect(detectBlankDomain([{ expression: "1.2*10^3" }])).toBe("numeric");
+    expect(detectBlankDomain([{ expression: "甲" }])).toBe("chinese_text");
+    expect(detectBlankDomain([{ expression: "增大" }])).toBe("chinese_text");
+    expect(detectBlankDomain([{ expression: "\\frac{U}{I}" }])).toBe("formula");
+    expect(detectBlankDomain([{ expression: "mg/k" }])).toBe("formula");
+    expect(detectBlankDomain([{ expression: "R_1" }])).toBe("formula");
+    expect(detectBlankDomain([{ expression: "\\sqrt{2gh}" }])).toBe("formula");
+  });
+
+  it("handles physics literal algebraic formula correctly with consensus", async () => {
+    const formulaRubric: Rubric = {
+      ...rubric,
+      totalScore: 3,
+      subquestions: [
+        {
+          id: "sq-formula",
+          title: "第(1)空 表达式",
+          maxScore: 3,
+          finalAnswerPolicy: "full_credit",
+          finalAnswers: [{ expression: "\\frac{U}{I}" }],
+          scorePoints: [{ id: "p1", title: "公式", description: "欧姆定律表达式", score: 3, type: "formula", expected: "\\frac{U}{I}" }],
+          deductions: []
+        }
+      ]
+    };
+
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({
+        data: {
+          blanks: [{ subquestionId: "sq-formula", coordinate: [100, 200, 300, 400], hasAnswer: true }]
+        },
+        durationMs: 100
+      } as any)
+      .mockResolvedValueOnce({
+        data: { extractedAnswer: "\\frac{U}{I}", confidence: 0.95, visualNotes: "分式形式 U 比 I" },
+        durationMs: 50
+      } as any)
+      .mockResolvedValueOnce({
+        data: { extractedAnswer: "\\frac{U}{I}", status: "correct", confidence: 0.98, issues: [], reason: "符合参考答案" },
+        durationMs: 50
+      } as any);
+
+    const result = await gradeSmallQuestionStaged(dummyConfig, { ...input, rubric: formulaRubric }, "op-formula", prepared);
+
+    expect(result.score).toBe(3);
+    expect(result.maxScore).toBe(3);
+    expect(result.subquestions[0].finalAnswerStatus).toBe("correct");
+    expect(result.subquestions[0].studentFinalAnswer).toBe("\\frac{U}{I}");
+  });
 });

@@ -154,10 +154,40 @@ export const smallQuestionEscalatedReviewJsonSchema = {
   }
 };
 
+export type BlankSemanticDomain = "choice_letter" | "numeric" | "chinese_text" | "formula" | "general";
+
+/**
+ * 自动根据参考答案推断空位的语义类型与字符域
+ */
+export function detectBlankDomain(rules: readonly FinalAnswerRule[] | undefined): BlankSemanticDomain {
+  if (!rules || rules.length === 0) return "general";
+  const expressions = rules.map((r) => r.expression.trim()).filter(Boolean);
+  if (expressions.length === 0) return "general";
+
+  // 单选或多选字母（如 A, B, C, D 或 AB）
+  const isChoiceLetter = expressions.every((e) => /^[A-Ga-g]{1,4}$/.test(e));
+  if (isChoiceLetter) return "choice_letter";
+
+  // 纯中文汉字/词语（如 甲、增大、顺时针）
+  const isChinese = expressions.every((e) => /^[\u4e00-\u9fa5\s]+$/.test(e));
+  if (isChinese) return "chinese_text";
+
+  // 纯数值（包含小数、科学计数法等，如 3.80, 2, 1.5e-3）
+  const isNumeric = expressions.every((e) => /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(e) || /^[+-]?(?:\d+\.?\d*|\.\d+)\s*[×x*]\s*10\^?\{?[+-]?\d+\}?$/.test(e));
+  if (isNumeric) return "numeric";
+
+  // 包含公式字符（反斜杠、上下标、运算符、等号等，或字母代数式如 U/I, mg/k, R1+R2）
+  const isFormula = expressions.some((e) => /[\\_^={}+*/]/.test(e) || /[a-zA-Z]/.test(e));
+  if (isFormula) return "formula";
+
+  return "general";
+}
+
 interface BlankCropInternal {
   subquestionId: string;
   title: string;
   finalAnswers: readonly FinalAnswerRule[];
+  domain: BlankSemanticDomain;
   criteriaGuidance?: string;
   cropBuffer: Buffer;
   cropBase64: string;
@@ -262,11 +292,13 @@ ${subquestionsList}
   for (const sq of input.rubric.subquestions) {
     const blank = layout.blanks.find((b) => b.subquestionId === sq.id);
     const finalAnswers = sq.finalAnswers ?? [];
+    const domain = detectBlankDomain(finalAnswers);
     if (!blank || !blank.coordinate || !blank.hasAnswer || !imageWidth || !imageHeight) {
       crops.push({
         subquestionId: sq.id,
         title: sq.title,
         finalAnswers,
+        domain,
         cropBuffer: Buffer.alloc(0),
         cropBase64: "",
         cropWidth: 0,
@@ -312,6 +344,7 @@ ${subquestionsList}
       subquestionId: sq.id,
       title: sq.title,
       finalAnswers,
+      domain,
       criteriaGuidance,
       cropBuffer,
       cropBase64: cropBuffer.length ? cropBuffer.toString("base64") : "",
@@ -390,24 +423,55 @@ ${subquestionsList}
       base64: crop.cropBase64
     }];
 
+    let domainHintA = "";
+    if (crop.domain === "choice_letter") {
+      domainHintA = `\n【题型与字符域提示】：本空为选择题，考生的合法作答预期为单字母选项（如 A、B、C、D 等）。
+请仔细观察手写笔迹，重点辨别考生的单字母书写意图。注意区分中学生快速答题时的常见草写习惯（如左竖右弧圈、单笔开环或手写体a形态），严禁脱离单选题背景将单字母潦草笔迹误读为多位数字。`;
+    } else if (crop.domain === "formula") {
+      domainHintA = `\n【题型与字符域提示】：本空为物理量/字母代数式公式填空，作答预期为物理字母、公式表达式（包含分式、根式、上下标、希腊字母等）。
+请输出标准 LaTeX 表达式。仔细区分物理常用字母与相近数字（例如：重力加速度 g 与数字 9/字母 q、长度 l 与数字 1/大写 I、时间 t 与加号 +、速度 v 与 u/ν）；即使上下标位置略有平移（如 v0、t2），亦请客观按物理公式逻辑识别规范上下标。`;
+    } else if (crop.domain === "numeric") {
+      domainHintA = `\n【题型与字符域提示】：本空为数值计算或读数填空，作答预期为纯数字（包含小数点、负号或有效数字尾数0）。
+请客观照实记录数字与有效数字位数，注意区分笔画闭合。`;
+    } else if (crop.domain === "chinese_text") {
+      domainHintA = `\n【题型与字符域提示】：本空为文字/物理术语填空，作答预期为汉字词语。请照实识别汉字笔迹。`;
+    }
+
     // 盲审 A：严禁给出参考答案
     const promptBlind = `请客观像素级识别该切片中学生实际写出的答案。
-对应小题：${crop.title}
+对应小题：${crop.title}${domainHintA}
 
 要求：
 1. 仔细观察手写笔迹，严格照实输出字符、数字或公式；
 2. 严禁主观猜测，严禁根据外部经验纠正或补写学生笔迹；
 3. 给出识别出的完整手写作答与置信度。`;
 
-    // 挑刺 B：对照参考答案与评分要求严查
-    const promptSkeptic = `请严加挑刺审查该切片中学生手写作答与参考答案及评分要求。
+    let domainGuidanceB = "";
+    if (crop.domain === "choice_letter") {
+      domainGuidanceB = `\n【选择题阅卷善意推定与排除法原则】：
+1. 物理阅卷考查学科理解而非书法比赛，对笔迹应秉持考场善意推定原则；
+2. 中学生在快速书写选项大写字母时常有明显草写变形（例如字母 A 常有左竖右弧圈、手写体 a、α 式运笔，或单笔环连）；
+3. 判定重点在于“排除实质错误”：重点排查考生是否明确选择了其他相冲突的选项（如明确写了 B、C、D），或存在严重涂改冲突；
+4. 若卷面无涂改，且未观察到考生明确选择了其他相冲突选项的特征，整体笔势符合参考答案（${formatFinalAnswers(crop.finalAnswers)}），应认定为满足评分要求（status: correct），严禁因非标准印刷体字形苛求扣分。`;
+    } else if (crop.domain === "formula") {
+      domainGuidanceB = `\n【字母公式题阅卷准则与代数等价放行原则】：
+1. 代数恒等放行：凡在数学/物理上代数恒等的形式（包括乘除系数提取如 1/2*at^2 与 at^2/2、因式展开与合并如 mg(1-cosθ) 与 mg-mg*cosθ、分式与斜杠表达如 U/I 与 \\frac{U}{I}、加减乘项顺序交换等），只要使用的物理量符号符合要求，必须无条件判定为 correct；
+2. 物理量已知量先验：结合高中物理常见符号，对书写形似字符采取善意对齐（例如：表达式中的重力加速度 g 尾部带勾不应误判为数字 9 或 q；长度 l 不应误判为 1；速度 v 不应误判为 u）；
+3. 容差与排除法：若根号线、分数线略短但覆盖范围无歧义，或上下标略有下沉但无其他物理含义，应认定为正确；仅在表达式存在物理量缺失、错误运算、量纲不符或明显涂改冲突时，才判定为错误。`;
+    } else if (crop.domain === "numeric") {
+      domainGuidanceB = `\n【数值题阅卷准则】：
+重点排查数值大小是否正确、有效数字位数是否满足评分要求、小数点位置是否明确。连笔造成的轻微笔迹粘连或拖尾（如末位0与8连笔略扁），只要能辨识出对应数字且符合有效数字要求，应倾向于认定正确。`;
+    }
+
+    // 挑刺 B：对照参考答案与评分要求审验
+    const promptSkeptic = `请依据高中物理阅卷标准审查该切片中学生手写作答与参考答案及评分要求。
 对应小题：${crop.title}
 参考答案（满足任一即为正确）：${formatFinalAnswers(crop.finalAnswers)}
-${crop.criteriaGuidance ? `评分规则与特殊要求：${crop.criteriaGuidance}\n` : ""}
+${crop.criteriaGuidance ? `评分规则与特殊要求：${crop.criteriaGuidance}\n` : ""}${domainGuidanceB}
 要求：
-1. 重点查找潜在错误：有效数字位数是否不足或多出？正负号/上下标是否混淆？是否有涂改未清？是否违反上述评分规则？
-2. 只有在完全没有任何漏洞且完全符合参考答案与评分要求时，status 才能为 correct；
-3. 发现任何瑕疵在 issues 中明确列出。`;
+1. 仔细核对学生作答是否符合参考答案与评分要求；
+2. 排查实质性错误（如选错选项、物理符号实质错误、代数表达式不等价、有效数字位数错误、运算错误或涂改未清）；
+3. 发现任何明确实质性瑕疵在 issues 中列出，若完全符合或笔势合理支持正确答案则判定为 correct。`;
 
     // 并发发起双路请求 A 和 B
     const [responseA, responseB] = await Promise.all([
@@ -491,21 +555,39 @@ ${crop.criteriaGuidance ? `评分规则与特殊要求：${crop.criteriaGuidance
         triggerReason: localComparisonReason
       }, "warning");
 
-      const cStart = performance.now();
-      const responseC = await callStructured(reviewRoute.config, {
-        model: reviewRoute.model,
-        routeKey: reviewRoute.routeKey,
-        system: getBuiltInSystemPrompt(reviewRoute.routeKey),
-        prompt: `请对该切片手写作答进行拉满思考预算的终审裁决。
+      let domainGuardC = "";
+      if (crop.domain === "choice_letter") {
+        domainGuardC = `\n【终审重要警示与常识约束】：
+1. 考场理性人假定：本空为单项选择题，考生的合法作答仅为单个大写字母选项（如 A、B、C、D）。初检中若出现脱离字母域的无关多位数字（如 18、19 等），属于典型的计算机视觉对草写单字母的跨域误读。严禁将单字母的潦草笔迹脑补为脱离单选题常识的无关数字或题号！
+2. 假设检验与意图优先：请以“验证考生是否书写了参考答案（${formatFinalAnswers(crop.finalAnswers)}）”为优先检验假设。微观分析该笔划轨迹是否符合学生一气呵成书写该字母时的动态手写变形习惯（例如大写 A 笔画分体、左竖右圈、或手写体 a 轮廓）；
+3. 排除法裁决：若卷面笔迹非涂改，且没有确凿证据表明学生实际书写了其他选项字母（如 B/C/D），整体书写动态倾向于参考答案，必须纠偏并判定为正确（status: correct）。`;
+      } else if (crop.domain === "formula") {
+        domainGuardC = `\n【代数公式题终审裁决准则】：
+1. 物理上下文与已知量先验：结合高中物理试题常规已知量，微观审视考生书写的符号到底是物理变量还是数字（例如分母/因数中的 g 绝非数字 9 或字母 q，分子中的 l 绝非数字 1）。严禁脱离物理试题背景进行孤立字符误读；
+2. 严格代数恒等推导：在数学上验证学生的表达式是否与参考答案恒等（允许系数外提、因式展开/分解、多项式换序等）。只要物理意义和代数关系完全一致，无论形式如何，终审必须判定为正确（status: correct）；
+3. 根号与分式容错：只要能判断考生书写的物理意图完整，不因根号横线未拉至末尾或分数线轻微断连而苛求判错。`;
+      } else {
+        domainGuardC = `\n【终审善意推定准则】：
+高中物理阅卷以考查学科实质为准，只要考生的笔迹动态能合理解释为参考答案的书写习惯，且不存在实质错误与严重涂改冲突，终审应倾向于认定正确。`;
+      }
+
+      const promptC = `请对该切片手写作答进行拉满思考预算的终审裁决。
 对应小题：${crop.title}
 参考答案（满足任一即为正确）：${formatFinalAnswers(crop.finalAnswers)}
-${crop.criteriaGuidance ? `评分规则与特殊要求：${crop.criteriaGuidance}\n` : ""}
+${crop.criteriaGuidance ? `评分规则与特殊要求：${crop.criteriaGuidance}\n` : ""}${domainGuardC}
 两路初检结论出现分歧或疑点：
 - 盲审转录（不知参考答案）识别为: "${resA.extractedAnswer}" (置信度: ${resA.confidence})
 - 挑刺审查（已知参考答案）识别为: "${resB.extractedAnswer}" (判定: ${resB.status}, 置信度: ${resB.confidence}, 疑点: ${resB.issues.join("; ") || "无"})
 - 拦截原因: ${localComparisonReason}
 
-请展开完整的微观视觉反思链，逐笔分析笔迹闭合、有效数字、涂改或正负号，严格根据参考答案及评分规则做出权威终审判定。`,
+请展开完整的微观视觉反思链，逐笔分析笔迹闭合、有效数字、涂改或正负号，严格根据参考答案及评分规则做出权威终审判定。`;
+
+      const cStart = performance.now();
+      const responseC = await callStructured(reviewRoute.config, {
+        model: reviewRoute.model,
+        routeKey: reviewRoute.routeKey,
+        system: getBuiltInSystemPrompt(reviewRoute.routeKey),
+        prompt: promptC,
         images: imagePayload,
         schemaName: "small_question_escalated_review",
         schema: smallQuestionEscalatedReviewJsonSchema,
