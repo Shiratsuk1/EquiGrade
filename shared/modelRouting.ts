@@ -94,31 +94,67 @@ export const MODEL_ROUTE_DEFINITIONS: readonly ModelRouteDefinition[] = [
     active: true
   },
   {
-    key: "small_question_reconstruction",
-    label: "小题卷面作答还原",
-    description: "依据预处理答卷图和 OCR 还原学生实际写出的内容",
+    key: "small_question_blank_layout",
+    label: "小题各空手写定位",
+    description: "多模态原生视觉分析并定位各空作答边界框（免 OCR）",
     endpoint: "teacher",
     modelField: "visionModel",
     modality: "vision",
     active: true
+  },
+  {
+    key: "small_question_blind_transcription",
+    label: "小题切片盲审转录（请求 A）",
+    description: "不携带参考答案，客观忠实转录高清切片中的手写字符",
+    endpoint: "teacher",
+    modelField: "visionModel",
+    modality: "vision",
+    active: true
+  },
+  {
+    key: "small_question_skeptic_assessment",
+    label: "小题切片挑刺审查（请求 B）",
+    description: "对照参考答案，严加挑刺审查有效数字、符号与涂改",
+    endpoint: "teacher",
+    modelField: "visionModel",
+    modality: "vision",
+    active: true
+  },
+  {
+    key: "small_question_escalated_review",
+    label: "小题切片深度终审（请求 C）",
+    description: "拉满思考预算，终审裁决初检分歧与微观笔迹争议",
+    endpoint: "teacher",
+    modelField: "visionModel",
+    modality: "vision",
+    active: true
+  },
+  {
+    key: "small_question_reconstruction",
+    label: "小题卷面作答还原（旧版）",
+    description: "旧版小题兼容实现，不在新版设置页显示",
+    endpoint: "teacher",
+    modelField: "visionModel",
+    modality: "vision",
+    active: false
   },
   {
     key: "small_question_grading_vision",
-    label: "小题评分（含题图）",
-    description: "题目或参考答案包含图片时使用",
+    label: "小题评分（旧版含图）",
+    description: "旧版小题兼容实现，不在新版设置页显示",
     endpoint: "teacher",
     modelField: "visionModel",
     modality: "vision",
-    active: true
+    active: false
   },
   {
     key: "small_question_grading_text",
-    label: "小题评分（纯文字）",
-    description: "题目和参考答案均为文字时使用",
+    label: "小题评分（旧版纯文字）",
+    description: "旧版小题兼容实现，不在新版设置页显示",
     endpoint: "teacher",
     modelField: "textModel",
     modality: "text",
-    active: true
+    active: false
   },
   {
     key: "legacy_direct_visual_grading",

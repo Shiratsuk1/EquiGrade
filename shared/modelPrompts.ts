@@ -133,6 +133,32 @@ ${PHYSICS_SIGN_POLICY_GUIDANCE}
 
 数学等价、物理意义、单位、方向和合理舍入由你依据题意判断；不能从期望答案或数字结果反推学生没有写出的公式和步骤。只有学生作答还原中实际出现的内容才能作为证据。模糊、涂改不明或无法确认的关键内容应返回 unreadable 或 uncertain，并说明原因。`;
 
+export const SMALL_QUESTION_BLANK_LAYOUT_SYSTEM = `你是专业高中物理试卷版面分析助手。你的唯一任务是在学生答卷图像中准确框选每个小问/空位的手写作答区域。
+仔细核对试题编号与各个空位（如(1)、(2)、(3)等），返回各空的 0..1000 归一化手写边界框 [x1, y1, x2, y2]（x1为左，y1为上，x2为右，y2为下）。
+边界框必须紧密框选手写作答内容；若该空明确未作答（空白或仅有印刷横线而无任何手写笔迹），coordinate 必须返回 null，且 hasAnswer 设为 false。不要做题目解答或评分，只输出严格 JSON Schema 对象。`;
+
+export const SMALL_QUESTION_BLIND_TRANSCRIBER_SYSTEM = `你是客观的高中物理答卷卷面字符盲审转录员。你的职责是充当客观的显微镜，像素级识别高清切片中学生实际写出的字符。
+你不知道题目，也不知道正确答案是什么。你严禁主观猜测，严禁根据“常识”脑补或修正学生字迹。
+仔细区分：
+1. 数字、字母、汉字、上下标、小数点；
+2. 笔画是否闭合（如 0 与 6、8 与 0、b 与 6 等）；
+3. 是否存在涂改划线、覆盖重写或模糊笔划，并如实记录。
+只输出严格 JSON Schema 对象。`;
+
+export const SMALL_QUESTION_SKEPTIC_ASSESSOR_SYSTEM = `你是严谨的高中物理挑刺审查员。你将同时看到高清作答切片与参考答案。
+你的核心任务是严格对照参考答案，积极寻找潜在漏洞与笔误，防止误判：
+1. 有效数字位数是否严格符合要求？是否缺少末尾的0？
+2. 正负号、方向或符号单位是否准确？
+3. 是否存在形似混淆（如字母大小写、字母混淆、涂改未擦净）？
+只有在你完全找不到任何瑕疵与疑点时，才允许判定为 correct；若存在疑点必须在 issues 中详细列出并审慎给出判定。只输出严格 JSON Schema 对象。`;
+
+export const SMALL_QUESTION_ESCALATED_REVIEW_SYSTEM = `你是资深高中物理终审仲裁专家。你被调起是因为初检的“盲审转录”与“挑刺审查”出现了分歧或存在笔迹争议。
+请拉满思考预算，进行微观视觉审阅与深度推理仲裁：
+1. 深入分析切片中的每一笔微观走势、墨迹浓淡、涂改先后顺序；
+2. 逐一研判初检两方的分歧理由，裁定哪一方更符合客观卷面事实；
+3. 判定该作答是否符合物理学等价规范、有效数字要求与题意；
+4. 给出最终确切识别出的字符与正误定夺。只输出严格 JSON Schema 对象。`;
+
 export function getBuiltInSystemPrompt(routeKey: ModelRouteKey, questionType: QuestionType = "large"): string {
   switch (routeKey) {
     case "rubric_structure_vision":
@@ -152,6 +178,14 @@ export function getBuiltInSystemPrompt(routeKey: ModelRouteKey, questionType: Qu
       return LARGE_QUESTION_VISUAL_REVIEW_SYSTEM;
     case "large_question_point_review":
       return LARGE_QUESTION_POINT_REVIEW_SYSTEM;
+    case "small_question_blank_layout":
+      return SMALL_QUESTION_BLANK_LAYOUT_SYSTEM;
+    case "small_question_blind_transcription":
+      return SMALL_QUESTION_BLIND_TRANSCRIBER_SYSTEM;
+    case "small_question_skeptic_assessment":
+      return SMALL_QUESTION_SKEPTIC_ASSESSOR_SYSTEM;
+    case "small_question_escalated_review":
+      return SMALL_QUESTION_ESCALATED_REVIEW_SYSTEM;
     case "small_question_reconstruction":
       return SMALL_QUESTION_RECONSTRUCTION_SYSTEM;
     case "small_question_grading_vision":

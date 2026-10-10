@@ -23,6 +23,10 @@ describe("model prompt catalog", () => {
   it("shows the actual safeguards for the active grading stages", () => {
     expect(getBuiltInSystemPrompt("large_question_answer_triage")).toContain("PaddleOCR");
     expect(getBuiltInSystemPrompt("large_question_point_review")).toContain("awardedScore");
+    expect(getBuiltInSystemPrompt("small_question_blank_layout")).toContain("版面分析助手");
+    expect(getBuiltInSystemPrompt("small_question_blind_transcription")).toContain("盲审");
+    expect(getBuiltInSystemPrompt("small_question_skeptic_assessment")).toContain("挑刺");
+    expect(getBuiltInSystemPrompt("small_question_escalated_review")).toContain("思考预算");
     expect(getBuiltInSystemPrompt("small_question_reconstruction")).toContain("作答还原模型");
     expect(getBuiltInSystemPrompt("small_question_grading_text")).toContain("评分点证据协议");
   });

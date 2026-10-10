@@ -459,27 +459,8 @@ describe("gradeStudentAnswer call sequence", () => {
   });
 });
 
-describe("small-question OCR grading pipeline", () => {
+describe("small-question staged vision grading pipeline", () => {
   const smallRubric: Rubric = { ...structuredClone(rubric), questionType: "small" };
-  const ocrAudit = {
-    provider: "paddleocr" as const,
-    model: "PaddleOCR-VL-1.6",
-    jobId: "ocr-job-1",
-    rawJsonl: '{"result":{"layoutParsingResults":[{"markdown":{"text":"x=2"}}]}}\n',
-    markdownText: "x=2",
-    imageWidth: 80,
-    imageHeight: 60,
-    layoutBlocks: [
-      { blockId: "block-00", pageIndex: 0, label: "text", score: 0.99, coordinate: [0, 0, 40, 24] as [number, number, number, number], polygonPoints: [], order: 0 }
-    ],
-    durationMs: 31
-  };
-  const reconstruction = {
-    lines: [{ id: "L1", text: "x=2", status: "active" as const, confidence: 0.99, region: [1, 2, 30, 12] as [number, number, number, number], alternatives: [] }],
-    ambiguities: [],
-    status: "clear" as const,
-    reviewReasons: []
-  };
 
   beforeEach(() => {
     vi.mocked(callStructured).mockReset();
@@ -488,53 +469,82 @@ describe("small-question OCR grading pipeline", () => {
 
   afterEach(() => vi.unstubAllEnvs());
 
-  function smallGradeResponse(status: "correct" | "incorrect" = "correct", studentAnswer = "x=2") {
+  function mockLayoutResponse(blanks: Array<{
+    subquestionId: string;
+    coordinate: [number, number, number, number] | null;
+    hasAnswer: boolean;
+  }> = [
+    { subquestionId: "Q1", coordinate: [100, 200, 300, 400], hasAnswer: true }
+  ]) {
     return {
-      data: {
-        finalAnswerJudgements: [{ subquestionId: "Q1", status, evidenceLineIds: ["L1"], studentAnswer, referenceAnswer: "x=2", reason: status === "correct" ? "最终答案正确" : "最终答案错误", confidence: 0.98 }],
-        decisions: [
-          { subquestionId: "Q1", pointId: "P1", status: "satisfied" as const, evidenceLineIds: ["L1"], evidenceQuote: "x=1+1", reason: "公式正确", confidence: 0.98, requiresReview: false, reviewReason: "" },
-          { subquestionId: "Q1", pointId: "P2", status: "not_satisfied" as const, evidenceLineIds: ["L1"], evidenceQuote: studentAnswer, reason: status === "correct" ? "过程未明确展示" : "结果错误", confidence: 0.98, requiresReview: false, reviewReason: "" }
-        ],
-        appliedDeductions: [] as Array<{
-          subquestionId: string;
-          ruleId: string;
-          evidenceLineIds: string[];
-          reason: string;
-          confidence: number;
-        }>,
-        teacherCommentary: commentaryResponse.data,
-        totalScore: 999
-      },
+      data: { blanks },
+      durationMs: 15,
+      outputMode: "json_schema" as const
+    };
+  }
+
+  function mockBlindTranscriptionResponse(extractedAnswer = "x=2", confidence = 0.98, visualNotes = "清晰手写") {
+    return {
+      data: { extractedAnswer, confidence, visualNotes },
       durationMs: 12,
       outputMode: "json_schema" as const
     };
   }
 
-  function smallArbitrationResponse(overrides = false, confirmedStatus: "correct" | "incorrect" | "uncertain" = "incorrect", evidence = "x=2") {
+  function mockSkepticAssessmentResponse(
+    extractedAnswer = "x=2",
+    status: "correct" | "incorrect" = "correct",
+    issues: string[] = [],
+    reason = "符合参考答案",
+    confidence = 0.98
+  ) {
     return {
-      data: {
-        arbitrations: [{
-          subquestionId: "Q1",
-          confirmedStatus,
-          studentHandwrittenEvidence: evidence,
-          overridesInitialJudgement: overrides,
-          reason: overrides ? "原图复查证实学生写了正确答案" : "原图复查证实学生写错",
-          confidence: 0.98
-        }]
-      },
-      durationMs: 8,
+      data: { extractedAnswer, status, confidence, issues, reason },
+      durationMs: 12,
       outputMode: "json_schema" as const
     };
   }
 
-  it("always uses OCR, reconstruction, and scoring without the global gradingMode", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(smallGradeResponse());
+  function mockEscalatedReviewResponse(
+    finalExtractedAnswer = "x=2",
+    status: "correct" | "incorrect" | "uncertain" | "missing" = "correct",
+    confidence = 0.97,
+    visualAnalysis = "微观笔画清晰",
+    resolutionReason = "终审确认为x=2"
+  ) {
+    return {
+      data: {
+        finalExtractedAnswer,
+        status,
+        confidence,
+        visualAnalysis,
+        resolutionReason
+      },
+      durationMs: 25,
+      outputMode: "json_schema" as const
+    };
+  }
 
-    const answerBytes = Buffer.from("small-answer-image");
+  async function createTestImageBuffer(): Promise<Buffer> {
+    return sharp({
+      create: {
+        width: 120,
+        height: 80,
+        channels: 3,
+        background: { r: 245, g: 245, b: 245 }
+      }
+    }).composite([{
+      input: Buffer.from('<svg width="120" height="80"><text x="20" y="40" font-size="20">x=2</text></svg>')
+    }]).png().toBuffer();
+  }
+
+  it("always uses staged layout, blind transcription, and skeptic assessment without PaddleOCR", async () => {
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce(mockLayoutResponse())
+      .mockResolvedValueOnce(mockBlindTranscriptionResponse("x=2"))
+      .mockResolvedValueOnce(mockSkepticAssessmentResponse("x=2", "correct"));
+
+    const answerBytes = await createTestImageBuffer();
     const questionImage = { mimeType: "image/png", base64: "question-image", label: "[题目图片]" };
     const referenceImage = { mimeType: "image/png", base64: "reference-image", label: "[参考答案图片]" };
     const { result } = await gradeStudentAnswer({ ...config, gradingMode: "vision_direct" }, {
@@ -544,352 +554,196 @@ describe("small-question OCR grading pipeline", () => {
       questionImages: [questionImage], referenceImages: [referenceImage]
     });
 
-    expect(runPaddleOcr).toHaveBeenCalledTimes(1);
-    expect(callStructured).toHaveBeenCalledTimes(2);
+    expect(runPaddleOcr).not.toHaveBeenCalled();
+    expect(callStructured).toHaveBeenCalledTimes(3);
     expect(vi.mocked(callStructured).mock.calls.map((call) => call[1].schemaName)).toEqual([
-      "student_answer_reconstruction",
-      "small_question_grading"
+      "small_question_blank_layout",
+      "small_question_blind_transcriber",
+      "small_question_skeptic_assessor"
     ]);
-    const reconstructionRequest = vi.mocked(callStructured).mock.calls[0][1];
-    expect(reconstructionRequest.system).not.toContain("CONFIDENTIAL_QUESTION_TEXT");
-    expect(reconstructionRequest.system).not.toContain("CONFIDENTIAL_REFERENCE_TEXT");
-    expect(reconstructionRequest.prompt).not.toContain("CONFIDENTIAL_QUESTION_TEXT");
-    expect(reconstructionRequest.prompt).not.toContain("CONFIDENTIAL_REFERENCE_TEXT");
-    expect(reconstructionRequest.prompt).not.toContain(JSON.stringify(smallRubric));
-    expect(reconstructionRequest.images).toHaveLength(1);
-    expect(reconstructionRequest.images?.[0]?.base64).toBe(answerBytes.toString("base64"));
-    expect(reconstructionRequest.images).not.toEqual(expect.arrayContaining([questionImage, referenceImage]));
-    const scoringRequest = vi.mocked(callStructured).mock.calls[1][1];
-    expect(scoringRequest.model).toBe(config.visionModel);
-    expect(scoringRequest.prompt).toContain("CONFIDENTIAL_QUESTION_TEXT");
-    expect(scoringRequest.prompt).toContain("CONFIDENTIAL_REFERENCE_TEXT");
-    expect(scoringRequest.images).toEqual([questionImage, referenceImage]);
-    expect(scoringRequest.images ?? []).not.toEqual(expect.arrayContaining([expect.objectContaining({ base64: answerBytes.toString("base64") })]));
-    expect(JSON.stringify(scoringRequest)).not.toContain(answerBytes.toString("base64"));
+
+    const blindRequest = vi.mocked(callStructured).mock.calls[1][1];
+    expect(blindRequest.system).not.toContain("CONFIDENTIAL_REFERENCE_TEXT");
+    expect(blindRequest.prompt).not.toContain("CONFIDENTIAL_REFERENCE_TEXT");
+
+    const skepticRequest = vi.mocked(callStructured).mock.calls[2][1];
+    expect(skepticRequest.prompt).toContain("x=2");
+
     expect(result.score).toBe(2);
     expect(result.status).toBe("completed");
-    expect(result.gradingPipeline).toBe("small_question_ocr");
-    expect(result.ocrAudit).toEqual(ocrAudit);
+    expect(result.gradingPipeline).toBe("small_question_staged");
+    expect(result.ocrAudit).toBeUndefined();
+    expect(result.smallQuestionAudit).toBeDefined();
+    expect(result.smallQuestionAudit?.recognitions[0].comparisonStatus).toBe("consensus");
+    expect(result.smallQuestionAudit?.recognitions[0].decisionSource).toBe("consensus_ab");
   });
 
-  it("preprocesses the student image before OCR and sends only the processed result downstream", async () => {
+  it("preprocesses the student image before blank layout detection", async () => {
     vi.stubEnv("HENGZHUN_STUDENT_IMAGE_PREPROCESSING", "dual");
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
     vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(smallGradeResponse());
+      .mockResolvedValueOnce(mockLayoutResponse())
+      .mockResolvedValueOnce(mockBlindTranscriptionResponse("x=2"))
+      .mockResolvedValueOnce(mockSkepticAssessmentResponse("x=2", "correct"));
 
-    const answerBytes = await sharp({
-      create: {
-        width: 120,
-        height: 80,
-        channels: 3,
-        background: { r: 245, g: 245, b: 245 }
-      }
-    }).composite([{
-      input: Buffer.from(`<svg width="120" height="80"><path d="M 12 26 L 108 26 M 12 52 L 86 52" stroke="black" stroke-width="3" fill="none"/></svg>`)
-    }]).png().toBuffer();
+    const answerBytes = await createTestImageBuffer();
 
     const { result } = await gradeStudentAnswer(config, {
       id: "small-preprocessed", studentId: "S-preprocessed", fileName: "answer.png", mimeType: "image/png",
       imageBuffer: answerBytes, rubric: smallRubric
     });
 
-    const paddleInput = vi.mocked(runPaddleOcr).mock.calls[0]?.[0];
-    expect(paddleInput?.mimeType).toBe("image/png");
-    expect(paddleInput?.imageBuffer).toBeInstanceOf(Buffer);
-    expect(Buffer.compare(paddleInput?.imageBuffer ?? Buffer.alloc(0), answerBytes)).not.toBe(0);
-
-    const reconstructionRequest = vi.mocked(callStructured).mock.calls[0]?.[1];
-    expect(reconstructionRequest?.images).toHaveLength(1);
-    expect(reconstructionRequest?.images?.[0]?.label).toContain("本地预处理结果");
-    expect(reconstructionRequest?.images?.[0]?.base64).not.toBe(answerBytes.toString("base64"));
+    expect(runPaddleOcr).not.toHaveBeenCalled();
     expect(result.imagePreprocessAudit).toMatchObject({ mode: "enhanced", applied: true, geometryPreserved: true });
+    const layoutRequest = vi.mocked(callStructured).mock.calls[0]?.[1];
+    expect(layoutRequest?.images).toHaveLength(1);
+    expect(layoutRequest?.images?.[0]?.label).toContain("本地预处理结果");
   });
 
-  it("keeps partial credit for an incorrect final answer and does not trust a model total", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+  it("awards 0 score for incorrect final answer when both recognitions agree and does not trust a model total", async () => {
     vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(smallGradeResponse("incorrect", "x=3"))
-      .mockResolvedValueOnce(smallArbitrationResponse(false, "incorrect", "x=3"));
+      .mockResolvedValueOnce(mockLayoutResponse())
+      .mockResolvedValueOnce(mockBlindTranscriptionResponse("x=3"))
+      .mockResolvedValueOnce(mockSkepticAssessmentResponse("x=3", "incorrect", [], "与参考答案x=2不符"))
+      .mockResolvedValueOnce(mockEscalatedReviewResponse("x=3", "incorrect", 0.99, "计算错误", "确认写的是x=3，与参考答案x=2不符"));
 
+    const answerBytes = await createTestImageBuffer();
     const { result } = await gradeStudentAnswer(config, {
       id: "small-partial", studentId: "S-partial", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
+      imageBuffer: answerBytes, rubric: smallRubric
     });
 
-    expect(result.score).toBe(1);
+    expect(result.score).toBe(0);
     expect(result.maxScore).toBe(2);
     expect(result.subquestions[0].finalAnswerStatus).toBe("incorrect");
+    expect(result.status).toBe("completed");
   });
 
   it("upgrades an incorrect final answer to correct when deterministic physics equivalence succeeds", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
     vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(smallGradeResponse("incorrect", "x=2.0"));
+      .mockResolvedValueOnce(mockLayoutResponse())
+      .mockResolvedValueOnce(mockBlindTranscriptionResponse("x=2.0"))
+      .mockResolvedValueOnce(mockSkepticAssessmentResponse("x=2.0", "incorrect", [], "与字符串x=2不符"));
 
+    const answerBytes = await createTestImageBuffer();
     const { result } = await gradeStudentAnswer(config, {
       id: "small-equiv", studentId: "S-equiv", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
+      imageBuffer: answerBytes, rubric: smallRubric
     });
 
     expect(result.score).toBe(2);
     expect(result.subquestions[0].finalAnswerStatus).toBe("correct");
     expect(result.subquestions[0].finalAnswerDecisionSource).toBe("local_numeric_review");
-    expect(callStructured).toHaveBeenCalledTimes(2);
+    expect(callStructured).toHaveBeenCalledTimes(3);
   });
 
-  it("overrides incorrect to correct and grants full credit when visual dispute arbitration finds valid handwriting", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+  it("escalates to Request C when Blind A and Skeptic B diverge", async () => {
     vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(smallGradeResponse("incorrect", "x=3"))
-      .mockResolvedValueOnce(smallArbitrationResponse(true, "correct", "x=2"));
+      .mockResolvedValueOnce(mockLayoutResponse())
+      .mockResolvedValueOnce(mockBlindTranscriptionResponse("x=3", 0.85, "字迹有轻微涂改"))
+      .mockResolvedValueOnce(mockSkepticAssessmentResponse("x=2", "correct", ["字迹有涂改疑点"], "可能是2", 0.8))
+      .mockResolvedValueOnce(mockEscalatedReviewResponse("x=2", "correct", 0.98, "微观分析确认学生书写为x=2", "终审判定为正确"));
 
+    const answerBytes = await createTestImageBuffer();
     const { result } = await gradeStudentAnswer(config, {
       id: "small-arbitration-override", studentId: "S-arb-override", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
+      imageBuffer: answerBytes, rubric: smallRubric
     });
 
-    expect(callStructured).toHaveBeenCalledTimes(3);
+    expect(callStructured).toHaveBeenCalledTimes(4);
+    expect(vi.mocked(callStructured).mock.calls[3][1].schemaName).toBe("small_question_escalated_review");
     expect(result.score).toBe(2);
     expect(result.subquestions[0].finalAnswerStatus).toBe("correct");
-    expect(result.subquestions[0].finalAnswerDecisionSource).toBe("visual_local_review");
-    expect(result.subquestions[0].finalAnswerReason).toContain("死刑复核反查原图纠正为正确");
+    expect(result.smallQuestionAudit?.recognitions[0].comparisonStatus).toBe("discrepancy");
+    expect(result.smallQuestionAudit?.recognitions[0].decisionSource).toBe("escalated_review_c");
   });
 
-  it("forces review for uncertain reconstruction even when scoring returns correct", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+  it("handles blank without handwritten answer without calling recognitions and scores 0", async () => {
     vi.mocked(callStructured)
-      .mockResolvedValueOnce({
-        data: {
-          ...reconstruction,
-          lines: [{ ...reconstruction.lines[0], text: "x=?", status: "uncertain", confidence: 0.4 }],
-          ambiguities: [{ lineId: "L1", reason: "关键数字被涂改覆盖", scoreImpact: "possible" }],
-          status: "review",
-          reviewReasons: ["关键数字无法确认"]
-        },
-        durationMs: 10,
-        outputMode: "json_schema"
-      })
-      .mockResolvedValueOnce(smallGradeResponse());
+      .mockResolvedValueOnce(mockLayoutResponse([
+        { subquestionId: "Q1", coordinate: null, hasAnswer: false }
+      ]));
 
+    const answerBytes = await createTestImageBuffer();
+    const { result } = await gradeStudentAnswer(config, {
+      id: "small-missing", studentId: "S-missing", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: answerBytes, rubric: smallRubric
+    });
+
+    expect(callStructured).toHaveBeenCalledTimes(1);
+    expect(result.score).toBe(0);
+    expect(result.subquestions[0].finalAnswerStatus).toBe("missing");
+    expect(result.status).toBe("completed");
+  });
+
+  it("marks needs_review when escalated review is uncertain", async () => {
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce(mockLayoutResponse())
+      .mockResolvedValueOnce(mockBlindTranscriptionResponse("x=?", 0.4, "关键数字严重涂改"))
+      .mockResolvedValueOnce(mockSkepticAssessmentResponse("x=2", "correct", ["严重涂改"], "存疑", 0.6))
+      .mockResolvedValueOnce(mockEscalatedReviewResponse("x=?", "uncertain", 0.5, "笔画完全重叠无法辨识", "字迹无法确认"));
+
+    const answerBytes = await createTestImageBuffer();
     const { result } = await gradeStudentAnswer(config, {
       id: "small-review", studentId: "S-review", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
+      imageBuffer: answerBytes, rubric: smallRubric
     });
 
-    expect(callStructured).toHaveBeenCalledTimes(2);
+    expect(callStructured).toHaveBeenCalledTimes(4);
     expect(result.status).toBe("needs_review");
-    expect(result.reviewReasons.join(" ")).toContain("关键数字无法确认");
+    expect(result.reviewReasons.join(" ")).toContain("字迹无法确认");
   });
 
-  it("forces review when the scoring response omits points or cites invalid evidence", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
-    const invalidGrade = smallGradeResponse();
-    invalidGrade.data.finalAnswerJudgements[0].evidenceLineIds = ["L1", "L1", "missing-line"];
-    invalidGrade.data.decisions = [invalidGrade.data.decisions[0]];
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(invalidGrade);
+  it("does not call recognitions when layout detection fails", async () => {
+    vi.mocked(callStructured).mockRejectedValueOnce(new Error("版面检测模型网络失败"));
 
-    const { result } = await gradeStudentAnswer(config, {
-      id: "small-invalid-evidence", studentId: "S-invalid", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(result.reviewReasons.join(" ")).toContain("引用了不存在的作答还原行");
-    expect(result.reviewReasons.join(" ")).toContain("遗漏评分点 Q1:P2");
-  });
-
-  it("forces review when a referenced reconstruction region is outside the OCR image", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
-    const invalidReconstruction = {
-      ...reconstruction,
-      lines: [{ ...reconstruction.lines[0], region: [75, 55, 10, 10] as [number, number, number, number] }]
-    };
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: invalidReconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(smallGradeResponse());
-
-    const { result } = await gradeStudentAnswer(config, {
-      id: "small-region-outside", studentId: "S-region-outside", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(result.reviewReasons.join(" ")).toContain("区域超出PaddleOCR图像范围");
-  });
-
-  it.each([
-    ["missing", undefined, "缺少有限的区域坐标"],
-    ["non-positive", [1, 2, 0, 12] as [number, number, number, number], "区域宽高必须为正数"]
-  ])("forces review when a referenced reconstruction region is %s", async (_label, region, expectedReason) => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
-    const invalidReconstruction = {
-      ...reconstruction,
-      lines: [{ ...reconstruction.lines[0], region }]
-    };
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: invalidReconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(smallGradeResponse());
-
-    const { result } = await gradeStudentAnswer(config, {
-      id: `small-region-${_label}`, studentId: `S-region-${_label}`, fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(result.reviewReasons.join(" ")).toContain(expectedReason);
-  });
-
-  it("forces review when a referenced reconstruction region cannot bind an OCR block", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
-    const unboundReconstruction = {
-      ...reconstruction,
-      lines: [{ ...reconstruction.lines[0], region: [55, 40, 15, 15] as [number, number, number, number] }]
-    };
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: unboundReconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(smallGradeResponse());
-
-    const { result } = await gradeStudentAnswer(config, {
-      id: "small-region-unbound", studentId: "S-region-unbound", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(result.reviewReasons.join(" ")).toContain("区域无法与任何PaddleOCR layout block合理相交");
-  });
-
-  it("forces review for low-confidence evidence even when the reconstruction says clear", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
-    const lowConfidenceReconstruction = {
-      ...reconstruction,
-      lines: [{ ...reconstruction.lines[0], confidence: 0.4 }]
-    };
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: lowConfidenceReconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(smallGradeResponse());
-
-    const { result } = await gradeStudentAnswer(config, {
-      id: "small-low-confidence", studentId: "S-low-confidence", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(result.reviewReasons.join(" ")).toContain("证据行置信度低于复核阈值");
-  });
-
-  it("forces review when score-bearing decisions have no locatable student evidence", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
-    const noEvidenceGrade = smallGradeResponse();
-    noEvidenceGrade.data.finalAnswerJudgements[0].evidenceLineIds = [];
-    noEvidenceGrade.data.decisions = noEvidenceGrade.data.decisions.map((decision) => ({ ...decision, evidenceLineIds: [] }));
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(noEvidenceGrade);
-
-    const { result } = await gradeStudentAnswer(config, {
-      id: "small-score-without-evidence", studentId: "S-score-without-evidence", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(result.reviewReasons.join(" ")).toContain("没有任何可定位学生证据");
-    expect(result.reviewReasons.join(" ")).toContain("Q1:P1评分点已计入1分");
-  });
-
-  it("forces review when a certain deduction has no locatable student evidence", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
-    const deductionRubric: Rubric = {
-      ...structuredClone(smallRubric),
-      subquestions: smallRubric.subquestions.map((subquestion) => ({
-        ...structuredClone(subquestion),
-        deductions: [{ id: "D1", reason: "错误结论", deduct: 1, exclusiveGroup: "answer" }]
-      }))
-    };
-    const noEvidenceDeduction = smallGradeResponse("incorrect", "x=3");
-    noEvidenceDeduction.data.appliedDeductions = [{
-      subquestionId: "Q1",
-      ruleId: "D1",
-      evidenceLineIds: [],
-      reason: "错误结论",
-      confidence: 0.99
-    }];
-    vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(noEvidenceDeduction);
-
-    const { result } = await gradeStudentAnswer(config, {
-      id: "small-deduction-without-evidence", studentId: "S-deduction-without-evidence", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: deductionRubric
-    });
-
-    expect(result.status).toBe("needs_review");
-    expect(result.reviewReasons.join(" ")).toContain("Q1:D1扣分已生效但没有任何可定位学生证据");
-  });
-
-  it("does not call GPT when PaddleOCR fails", async () => {
-    vi.mocked(runPaddleOcr).mockRejectedValueOnce(new Error("PaddleOCR 网络失败"));
-
+    const answerBytes = await createTestImageBuffer();
     await expect(gradeStudentAnswer(config, {
-      id: "small-ocr-failed", studentId: "S-failed", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
-    })).rejects.toThrow("PaddleOCR 网络失败");
-    expect(callStructured).not.toHaveBeenCalled();
-  });
-
-  it("does not call scoring when reconstruction fails", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
-    vi.mocked(callStructured).mockRejectedValueOnce(new Error("还原 JSON 无效"));
-
-    await expect(gradeStudentAnswer(config, {
-      id: "small-reconstruction-failed", studentId: "S-failed", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
-    })).rejects.toThrow("还原 JSON 无效");
+      id: "small-layout-failed", studentId: "S-failed", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: answerBytes, rubric: smallRubric
+    })).rejects.toThrow("版面检测模型网络失败");
     expect(callStructured).toHaveBeenCalledTimes(1);
   });
 
-  it("does not return a grading result when scoring fails", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+  it("fails when escalated review fails during divergence", async () => {
     vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockRejectedValueOnce(new Error("小题评分服务失败"));
+      .mockResolvedValueOnce(mockLayoutResponse())
+      .mockResolvedValueOnce(mockBlindTranscriptionResponse("x=3"))
+      .mockResolvedValueOnce(mockSkepticAssessmentResponse("x=2", "correct"))
+      .mockRejectedValueOnce(new Error("终审模型响应超时"));
 
+    const answerBytes = await createTestImageBuffer();
     await expect(gradeStudentAnswer(config, {
-      id: "small-scoring-failed", studentId: "S-failed", fileName: "answer.png", mimeType: "image/png",
-      imageBuffer: Buffer.from("image"), rubric: smallRubric
-    })).rejects.toThrow("小题评分服务失败");
-    expect(callStructured).toHaveBeenCalledTimes(2);
+      id: "small-escalation-failed", studentId: "S-failed", fileName: "answer.png", mimeType: "image/png",
+      imageBuffer: answerBytes, rubric: smallRubric
+    })).rejects.toThrow("终审模型响应超时");
+    expect(callStructured).toHaveBeenCalledTimes(4);
   });
 
-  it("reruns the fixed small-question chain for a regrade and keeps lineage metadata", async () => {
-    vi.mocked(runPaddleOcr).mockResolvedValueOnce(ocrAudit);
+  it("reruns the small-question staged chain for a regrade and keeps lineage metadata", async () => {
     vi.mocked(callStructured)
-      .mockResolvedValueOnce({ data: reconstruction, durationMs: 10, outputMode: "json_schema" })
-      .mockResolvedValueOnce(smallGradeResponse());
+      .mockResolvedValueOnce(mockLayoutResponse())
+      .mockResolvedValueOnce(mockBlindTranscriptionResponse("x=2"))
+      .mockResolvedValueOnce(mockSkepticAssessmentResponse("x=2", "correct"));
 
+    const answerBytes = await createTestImageBuffer();
     const { result } = await gradeStudentAnswer(config, {
       id: "small-regrade-v2",
       studentId: "S-regrade",
       fileName: "answer.png",
       mimeType: "image/png",
-      imageBuffer: Buffer.from("image"),
+      imageBuffer: answerBytes,
       rubric: smallRubric,
       previousResultId: "small-regrade-v1",
       regradedAt: "2026-08-28T12:00:00.000Z",
       regradeReason: "重新核对小题识别"
     });
 
-    expect(runPaddleOcr).toHaveBeenCalledTimes(1);
+    expect(runPaddleOcr).not.toHaveBeenCalled();
     expect(result.previousResultId).toBe("small-regrade-v1");
     expect(result.regradedAt).toBe("2026-08-28T12:00:00.000Z");
     expect(result.regradeReason).toBe("重新核对小题识别");
-    expect(result.ocrAudit?.jobId).toBe(ocrAudit.jobId);
+    expect(result.gradingPipeline).toBe("small_question_staged");
+    expect(result.smallQuestionAudit).toBeDefined();
   });
 });
 
@@ -1452,14 +1306,25 @@ describe("large-question workflow selector", () => {
     expect(callStructured).not.toHaveBeenCalled();
   });
 
-  it("keeps the small-question workflow on PaddleOCR even when Agent mode is configured", async () => {
-    vi.mocked(runPaddleOcr).mockRejectedValueOnce(new Error("small PaddleOCR sentinel"));
+  it("keeps the small-question workflow OCR-free without contacting PaddleOCR", async () => {
+    vi.mocked(callStructured)
+      .mockResolvedValueOnce({
+        data: { blanks: [{ subquestionId: "Q1", coordinate: [100, 200, 300, 400], hasAnswer: true }] },
+        durationMs: 10
+      } as any)
+      .mockResolvedValueOnce({
+        data: { extractedAnswer: "x=2", confidence: 0.99, visualNotes: "" },
+        durationMs: 10
+      } as any)
+      .mockResolvedValueOnce({
+        data: { extractedAnswer: "x=2", status: "correct", confidence: 0.99, issues: [], reason: "正确" },
+        durationMs: 10
+      } as any);
 
-    await expect(gradeStudentAnswer({ ...config, largeQuestionWorkflow: "responses_agent" }, inputFor("small")))
-      .rejects.toThrow("small PaddleOCR sentinel");
+    const { result } = await gradeStudentAnswer({ ...config, largeQuestionWorkflow: "responses_agent" }, inputFor("small"));
 
-    expect(runPaddleOcr).toHaveBeenCalledTimes(1);
+    expect(runPaddleOcr).not.toHaveBeenCalled();
+    expect(result.gradingPipeline).toBe("small_question_staged");
     expect(gradeLargeQuestionResponsesAgent).not.toHaveBeenCalled();
-    expect(callStructured).not.toHaveBeenCalled();
   });
 });

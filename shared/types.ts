@@ -46,6 +46,10 @@ export const MODEL_ROUTE_KEYS = [
   "large_question_responses_agent",
   "large_question_visual_review",
   "large_question_point_review",
+  "small_question_blank_layout",
+  "small_question_blind_transcription",
+  "small_question_skeptic_assessment",
+  "small_question_escalated_review",
   "small_question_reconstruction",
   "small_question_grading_vision",
   "small_question_grading_text",
@@ -213,6 +217,53 @@ export interface StudentAnswerReconstruction {
   }>;
   status: "clear" | "review";
   reviewReasons: string[];
+}
+
+export interface SmallQuestionBlankCropAudit {
+  subquestionId: string;
+  title: string;
+  coordinate: [number, number, number, number] | null;
+  hasAnswer: boolean;
+  artifactFileName?: string;
+  cropWidth?: number;
+  cropHeight?: number;
+}
+
+export interface SmallQuestionBlankRecognitionAudit {
+  subquestionId: string;
+  blindTranscriber: {
+    extractedAnswer: string;
+    confidence: number;
+    rawText?: string;
+  };
+  skepticAssessor: {
+    extractedAnswer: string;
+    status: FinalAnswerStatus;
+    confidence: number;
+    issues: string[];
+    reason: string;
+  };
+  comparisonStatus: "consensus" | "discrepancy";
+  escalatedReview?: {
+    finalExtractedAnswer: string;
+    status: FinalAnswerStatus;
+    confidence: number;
+    visualAnalysis: string;
+    resolutionReason: string;
+  };
+  finalStatus: FinalAnswerStatus;
+  finalAnswer: string;
+  finalConfidence: number;
+  decisionSource: "consensus_ab" | "escalated_review_c" | "local_rule_override" | "blank_missing";
+}
+
+export interface SmallQuestionAudit {
+  pipeline: "staged_vision_crops";
+  layoutDurationMs: number;
+  dualRecognitionDurationMs: number;
+  escalatedReviewDurationMs: number;
+  crops: SmallQuestionBlankCropAudit[];
+  recognitions: SmallQuestionBlankRecognitionAudit[];
 }
 
 export interface PaddleOcrAudit {
@@ -562,7 +613,7 @@ export interface GradingResult {
   };
   modelName: string;
   gradingMode?: GradingMode;
-  gradingPipeline?: "large_question" | "small_question_ocr" | "large_question_responses_agent";
+  gradingPipeline?: "large_question" | "small_question_ocr" | "large_question_responses_agent" | "small_question_staged";
   ocrAudit?: PaddleOcrAudit;
   /** Full OCR-block transcription after one teacher-model verification pass. */
   ocrTranscription?: OcrTranscription;
@@ -570,6 +621,7 @@ export interface GradingResult {
   imagePreprocessAudit?: StudentAnswerImagePreprocessAudit;
   answerPresenceAudit?: AnswerPresenceAudit;
   responsesAgentAudit?: ResponsesAgentAudit;
+  smallQuestionAudit?: SmallQuestionAudit;
   rubricVersion: number;
   gradingEngineVersion?: string;
   teacherJudgementVersion?: string;
