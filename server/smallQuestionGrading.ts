@@ -158,6 +158,7 @@ interface BlankCropInternal {
   subquestionId: string;
   title: string;
   finalAnswers: readonly FinalAnswerRule[];
+  criteriaGuidance?: string;
   cropBuffer: Buffer;
   cropBase64: string;
   cropWidth: number;
@@ -303,10 +304,15 @@ ${subquestionsList}
     }
 
     const fileName = `small-blank-${sq.id}-crop.webp`;
+    const criteriaGuidance = sq.scorePoints
+      .map((p) => [p.title, p.description, p.expected].filter(Boolean).join("："))
+      .filter(Boolean)
+      .join("；");
     crops.push({
       subquestionId: sq.id,
       title: sq.title,
       finalAnswers,
+      criteriaGuidance,
       cropBuffer,
       cropBase64: cropBuffer.length ? cropBuffer.toString("base64") : "",
       cropWidth: width,
@@ -393,14 +399,14 @@ ${subquestionsList}
 2. 严禁主观猜测，严禁根据外部经验纠正或补写学生笔迹；
 3. 给出识别出的完整手写作答与置信度。`;
 
-    // 挑刺 B：对照参考答案严查
-    const promptSkeptic = `请严加挑刺审查该切片中学生手写作答与参考答案的正误。
+    // 挑刺 B：对照参考答案与评分要求严查
+    const promptSkeptic = `请严加挑刺审查该切片中学生手写作答与参考答案及评分要求。
 对应小题：${crop.title}
 参考答案（满足任一即为正确）：${formatFinalAnswers(crop.finalAnswers)}
-
+${crop.criteriaGuidance ? `评分规则与特殊要求：${crop.criteriaGuidance}\n` : ""}
 要求：
-1. 重点查找潜在错误：有效数字位数是否不足？正负号/上下标是否混淆？是否有涂改未清？
-2. 只有在完全没有任何漏洞且完全符合参考答案要求时，status 才能为 correct；
+1. 重点查找潜在错误：有效数字位数是否不足或多出？正负号/上下标是否混淆？是否有涂改未清？是否违反上述评分规则？
+2. 只有在完全没有任何漏洞且完全符合参考答案与评分要求时，status 才能为 correct；
 3. 发现任何瑕疵在 issues 中明确列出。`;
 
     // 并发发起双路请求 A 和 B
@@ -436,7 +442,7 @@ ${subquestionsList}
     const resB = smallQuestionSkepticAssessorSchema.parse(responseB.data);
 
     // ----------------------------------------------------
-    // 本地比对与硬规则防御（Anti-Common-Mode Guards）
+    // 本地比对与一致性校验（本地不推翻模型打分，仅做比对与验证）
     // ----------------------------------------------------
     let isConsistent = false;
     let localComparisonReason = "";
@@ -449,7 +455,7 @@ ${subquestionsList}
       if (cleanA === cleanB) {
         isConsistent = true;
       } else {
-        // 利用物理等价对比
+        // 利用物理等价对比识别字符是否一致（如分数小数形式）
         const equiv = comparePhysicsAnswer(resA.extractedAnswer, [{ expression: resB.extractedAnswer }]);
         if (equiv.status === "equivalent") {
           isConsistent = true;
@@ -463,29 +469,14 @@ ${subquestionsList}
       localComparisonReason = "至少一路未提取出有效作答字符";
     }
 
-    // 规则 2：本地物理等价硬校验与挑刺实质质疑
-    let isLocalEquivOverride = false;
+    // 规则 2：若挑刺模型认为不正确或存疑，本地不擅自推翻模型打分，进入深度终审 C 裁决
     if (isConsistent) {
-      const localEquiv = crop.finalAnswers.length > 0 ? comparePhysicsAnswer(resB.extractedAnswer, crop.finalAnswers) : null;
-      if (localEquiv && localEquiv.status === "equivalent") {
-        if (resB.status !== "correct") {
-          isLocalEquivOverride = true;
-          logProgress(operationId, "grading", "small_question_deterministic_equivalence_override", `${crop.title}经本地确定性物理等价规则直接判定为正确：${localEquiv.reason}`);
-          resB.status = "correct";
-          resB.reason = `经确定性物理等价规则判定正确：${localEquiv.reason}`;
-        }
-      } else if (resB.status !== "correct") {
-        // 挑刺判定错误或无法辨认，且本地无法证明等价，不能放水，进入深度复检
+      if (resB.status !== "correct") {
         isConsistent = false;
         localComparisonReason = `挑刺审查员判定状态为 ${resB.status}，存在质疑: ${resB.reason}`;
       } else if (resB.issues.length > 0 && resB.confidence < 0.92) {
-        // 虽判 correct 但有 issue 且置信度不高
         isConsistent = false;
         localComparisonReason = `挑刺审查员指出潜在疑点: ${resB.issues.join("; ")}`;
-      } else if (crop.finalAnswers.length > 0 && localEquiv?.status !== "equivalent") {
-        // 本地硬拦截：虽然两路认为对，但本地数学/物理规则未能直接匹配
-        isConsistent = false;
-        localComparisonReason = `本地确定性规则未能完全匹配参考答案: ${localEquiv?.reason || "不匹配"}`;
       }
     }
 
@@ -508,13 +499,13 @@ ${subquestionsList}
         prompt: `请对该切片手写作答进行拉满思考预算的终审裁决。
 对应小题：${crop.title}
 参考答案（满足任一即为正确）：${formatFinalAnswers(crop.finalAnswers)}
-
+${crop.criteriaGuidance ? `评分规则与特殊要求：${crop.criteriaGuidance}\n` : ""}
 两路初检结论出现分歧或疑点：
 - 盲审转录（不知参考答案）识别为: "${resA.extractedAnswer}" (置信度: ${resA.confidence})
 - 挑刺审查（已知参考答案）识别为: "${resB.extractedAnswer}" (判定: ${resB.status}, 置信度: ${resB.confidence}, 疑点: ${resB.issues.join("; ") || "无"})
 - 拦截原因: ${localComparisonReason}
 
-请展开完整的微观视觉反思链，逐笔分析笔迹闭合、有效数字、涂改或正负号，做出权威终审判定。`,
+请展开完整的微观视觉反思链，逐笔分析笔迹闭合、有效数字、涂改或正负号，严格根据参考答案及评分规则做出权威终审判定。`,
         images: imagePayload,
         schemaName: "small_question_escalated_review",
         schema: smallQuestionEscalatedReviewJsonSchema,
@@ -528,14 +519,8 @@ ${subquestionsList}
 
       const resC = smallQuestionEscalatedReviewSchema.parse(responseC.data);
 
-      // 本地再次结合物理等价重算
-      let finalConfirmedStatus: FinalAnswerStatus = resC.status;
-      if (finalConfirmedStatus !== "correct" && crop.finalAnswers.length > 0) {
-        const cEquiv = comparePhysicsAnswer(resC.finalExtractedAnswer, crop.finalAnswers);
-        if (cEquiv.status === "equivalent") {
-          finalConfirmedStatus = "correct";
-        }
-      }
+      // 严格尊重终审模型的判定，本地不做推翻，只做总分累加与安全验证
+      const finalConfirmedStatus: FinalAnswerStatus = resC.status;
 
       recognitionAudits.push({
         subquestionId: crop.subquestionId,
@@ -577,7 +562,7 @@ ${subquestionsList}
         finalStatus: "correct",
         finalAnswer: resB.extractedAnswer,
         finalConfidence: Math.max(resA.confidence, resB.confidence),
-        decisionSource: isLocalEquivOverride ? "local_rule_override" : "consensus_ab"
+        decisionSource: "consensus_ab"
       });
 
       finalJudgements.push({
@@ -587,11 +572,9 @@ ${subquestionsList}
         evidenceLineIds: [],
         studentAnswer: resB.extractedAnswer,
         referenceAnswer: formatFinalAnswers(crop.finalAnswers),
-        reason: isLocalEquivOverride
-          ? `经确定性物理等价规则判定正确(${resB.extractedAnswer})`
-          : `正交双路一致采信: 盲审与挑刺均认定为正确作答(${resB.extractedAnswer})`,
+        reason: `正交双路一致采信: 盲审与挑刺均认定为正确作答(${resB.extractedAnswer})`,
         confidence: Math.max(resA.confidence, resB.confidence),
-        decisionSource: isLocalEquivOverride ? "local_numeric_review" : "teacher_model"
+        decisionSource: "teacher_model"
       });
     }
   }

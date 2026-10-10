@@ -60,26 +60,20 @@ function gradingDocument() {
 }
 
 function answerCard(doc: Document) {
-  const realContainer = doc.querySelector<HTMLElement>("#img_containter");
+  const realContainer = doc.querySelector<HTMLElement>("#img_containter, #img_container");
   if (realContainer && isRendered(realContainer)) return realContainer;
   return doc.querySelector<HTMLElement>("#topicImgContent .score_content")
-    ?? doc.querySelector<HTMLElement>("#topicImgContent");
+    ?? doc.querySelector<HTMLElement>("#topicImgContent")
+    ?? doc.body;
 }
 
-function answerImage(doc: Document) {
-  if (isZhixuePromptOrLoading(doc, isRendered)) return null;
-
-  const realContainer = doc.querySelector<HTMLElement>("#img_containter");
-  const scope: ParentNode = realContainer && isRendered(realContainer)
-    ? realContainer
-    : (doc.querySelector<HTMLElement>("#topicImgContent") ?? doc);
-
+function findValidAnswerImageInScope(scope: ParentNode) {
   const preferred = scope.querySelector<HTMLImageElement>("img.enhance-definition-bright, img[data-grading-answer-image]");
   if (
     preferred
     && isRendered(preferred)
-    && preferred.naturalWidth >= 200
-    && preferred.naturalHeight >= 200
+    && preferred.naturalWidth >= 100
+    && preferred.naturalHeight >= 30
     && !isZhixueStaticUiImageUrl(preferred.currentSrc || preferred.src)
     && !preferred.closest?.("#img_Tip, #imgBoxTip, .img-tip-div, #img_loading, .img_loading")
   ) {
@@ -88,8 +82,8 @@ function answerImage(doc: Document) {
 
   return Array.from(scope.querySelectorAll<HTMLImageElement>("img"))
     .filter((image) => (
-      image.naturalWidth >= 200
-      && image.naturalHeight >= 200
+      image.naturalWidth >= 100
+      && image.naturalHeight >= 30
       && isRendered(image)
       && !isZhixueStaticUiImageUrl(image.currentSrc || image.src)
       && !image.closest?.("#img_Tip, #imgBoxTip, .img-tip-div, #img_loading, .img_loading")
@@ -99,6 +93,24 @@ function answerImage(doc: Document) {
       if (visibleDelta) return visibleDelta;
       return right.naturalWidth * right.naturalHeight - left.naturalWidth * left.naturalHeight;
     })[0] ?? null;
+}
+
+function answerImage(doc: Document) {
+  if (isZhixuePromptOrLoading(doc, isRendered)) return null;
+
+  const realContainer = doc.querySelector<HTMLElement>("#img_containter, #img_container");
+  if (realContainer && isRendered(realContainer)) {
+    const candidate = findValidAnswerImageInScope(realContainer);
+    if (candidate) return candidate;
+  }
+
+  const topicContent = doc.querySelector<HTMLElement>("#topicImgContent");
+  if (topicContent) {
+    const candidate = findValidAnswerImageInScope(topicContent);
+    if (candidate) return candidate;
+  }
+
+  return findValidAnswerImageInScope(doc);
 }
 
 function scoreArea(doc: Document) {

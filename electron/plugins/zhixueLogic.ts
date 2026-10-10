@@ -96,7 +96,7 @@ export function isZhixuePromptOrLoading(
     return "智学网答卷图片显示失败，请在网页中刷新重试";
   }
 
-  const realContainer = doc.querySelector("#img_containter");
+  const realContainer = doc.querySelector("#img_containter, #img_container");
   if (realContainer && !isElementRendered(realContainer)) {
     return "智学网学生作答区域当前处于隐藏状态，尚未就绪";
   }

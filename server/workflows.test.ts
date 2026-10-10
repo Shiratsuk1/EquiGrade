@@ -618,11 +618,12 @@ describe("small-question staged vision grading pipeline", () => {
     expect(result.status).toBe("completed");
   });
 
-  it("upgrades an incorrect final answer to correct when deterministic physics equivalence succeeds", async () => {
+  it("escalates to Request C when skeptic assessor marks incorrect and respects escalated review decision", async () => {
     vi.mocked(callStructured)
       .mockResolvedValueOnce(mockLayoutResponse())
       .mockResolvedValueOnce(mockBlindTranscriptionResponse("x=2.0"))
-      .mockResolvedValueOnce(mockSkepticAssessmentResponse("x=2.0", "incorrect", [], "与字符串x=2不符"));
+      .mockResolvedValueOnce(mockSkepticAssessmentResponse("x=2.0", "incorrect", [], "与字符串x=2不符"))
+      .mockResolvedValueOnce(mockEscalatedReviewResponse("x=2.0", "correct", 0.98, "微观审阅与物理规则确认x=2.0与x=2等价", "终审判定为正确"));
 
     const answerBytes = await createTestImageBuffer();
     const { result } = await gradeStudentAnswer(config, {
@@ -632,8 +633,8 @@ describe("small-question staged vision grading pipeline", () => {
 
     expect(result.score).toBe(2);
     expect(result.subquestions[0].finalAnswerStatus).toBe("correct");
-    expect(result.subquestions[0].finalAnswerDecisionSource).toBe("local_numeric_review");
-    expect(callStructured).toHaveBeenCalledTimes(3);
+    expect(result.subquestions[0].finalAnswerDecisionSource).toBe("visual_local_review");
+    expect(callStructured).toHaveBeenCalledTimes(4);
   });
 
   it("escalates to Request C when Blind A and Skeptic B diverge", async () => {

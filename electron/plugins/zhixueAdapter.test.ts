@@ -443,4 +443,19 @@ describe("智学网页面适配器", () => {
 
     await expect(adapter.getCurrentAnswer()).rejects.toThrow("未找到智学网学生作答原图");
   });
+
+  it("successfully recognizes small-question narrow strip answer images with height < 200px", async () => {
+    const page = installZhixuePage();
+    // Experimental/fill-in-the-blank question narrow banner image (e.g. 800x80)
+    page.image.naturalWidth = 800;
+    page.image.naturalHeight = 80;
+    page.image.getBoundingClientRect = () => ({ width: 800, height: 80 } as any);
+
+    const adapter = createZhixueAdapter();
+    const result = await adapter.preflight();
+
+    expect(result.ok).toBe(true);
+    expect(result.capabilities.answerImage).toBe(true);
+    expect(result.pageKey).toBeDefined();
+  });
 });
