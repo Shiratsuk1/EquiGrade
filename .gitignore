@@ -1,23 +1,78 @@
+# 依赖与包管理器
 node_modules/
+package-lock.json.bak
+yarn.lock
+pnpm-lock.yaml
+
+# 构建产物与打包包
 dist/
 dist-electron/
 dist-server/
 release/
-release2/
-release-v*/win-unpacked/
+release*/
+*.tsbuildinfo
+coverage/
+.rollup.cache/
+
+# 运行时数据与本地存储（绝对禁止提交）
 .data/
+grading-artifacts/
+deepseek-harness-app/
+
+# 敏感凭据与密钥（防泄露守门）
+*.key
+*.token
+*.pem
+*.cert
+*.crt
+*.pfx
+*.p12
+*.keystore
+*.enc.json
 .env
 .env.*
 !.env.example
-coverage/
+
+# 临时与日志文件
 *.log
-*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
 tmp/
-grading-artifacts/
+temp/
+*.tmp
+*.bak
+*.dmp
+*.dump
 
-deepseek-harness-app/
+# 内部项目开发规划、AI 辅助规范与个人备忘
+AGENTS.md
+CLAUDE.md
+CURSOR.md
+COPILOT.md
+.agents/
+*_PLAN.md
+*PLAN*.md
+TODO.md
+NOTES.md
+SCRATCH.md
 
+# 本地测试临时试卷与私有文稿（如 hi.docx 等）
+*.docx
+*.doc
+*.pdf
+!public/**/*
+!test-fixtures/*.json
+
+# IDE 与编辑器配置
+.vscode/
+.idea/
+.cursor/
+.windsurf/
 .zcode/
+*.code-workspace
 
+# 操作系统系统文件
 .DS_Store
 Thumbs.db
+desktop.ini
