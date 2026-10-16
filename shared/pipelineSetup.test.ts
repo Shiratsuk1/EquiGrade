@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { pipelineFixtureRubric } from "../server/pipelineFixtureData.js";
-import { buildPipelineScoreAlignment } from "./pipelineSetup.js";
+import { buildPipelineScoreAlignment, parseQuestionNumber, verifyQuestionAlignment } from "./pipelineSetup.js";
 
 describe("buildPipelineScoreAlignment", () => {
   it("matches a single total field", () => {
@@ -66,3 +66,86 @@ describe("buildPipelineScoreAlignment", () => {
     })))).toMatchObject({ ok: false });
   });
 });
+
+describe("parseQuestionNumber and verifyQuestionAlignment", () => {
+  it("parses Arabic and Chinese question numerals correctly", () => {
+    expect(parseQuestionNumber("第12题")).toBe(12);
+    expect(parseQuestionNumber("第 12 题")).toBe(12);
+    expect(parseQuestionNumber("第12题 实验题")).toBe(12);
+    expect(parseQuestionNumber("共3题 第12题")).toBe(12);
+    expect(parseQuestionNumber("第12题 (共3题)")).toBe(12);
+    expect(parseQuestionNumber("第 16 题 · 竖直圆轨道综合题")).toBe(16);
+    expect(parseQuestionNumber("12. (1) 3.80")).toBe(12);
+    expect(parseQuestionNumber("12. 实验题")).toBe(12);
+    expect(parseQuestionNumber("12、动力学")).toBe(12);
+    expect(parseQuestionNumber("题号: 12")).toBe(12);
+    expect(parseQuestionNumber("题号：12")).toBe(12);
+    expect(parseQuestionNumber("T12")).toBe(12);
+    expect(parseQuestionNumber("Q12")).toBe(12);
+
+    expect(parseQuestionNumber("第一题")).toBe(1);
+    expect(parseQuestionNumber("第十题")).toBe(10);
+    expect(parseQuestionNumber("第十一题")).toBe(11);
+    expect(parseQuestionNumber("第十二题")).toBe(12);
+    expect(parseQuestionNumber("第十三题")).toBe(13);
+    expect(parseQuestionNumber("第十六题")).toBe(16);
+    expect(parseQuestionNumber("第二十题")).toBe(20);
+    expect(parseQuestionNumber("第二十三题")).toBe(23);
+
+    // Non-question numbers should not be falsely extracted
+    expect(parseQuestionNumber("共3题")).toBeUndefined();
+    expect(parseQuestionNumber("满分6分")).toBeUndefined();
+    expect(parseQuestionNumber("（20分）")).toBeUndefined();
+    expect(parseQuestionNumber("高一物理电线杆运输减速与加速相对滑动问题")).toBeUndefined();
+    expect(parseQuestionNumber("")).toBeUndefined();
+    expect(parseQuestionNumber(undefined)).toBeUndefined();
+  });
+
+  it("blocks fatal cross-question mismatch when question numbers differ", () => {
+    // 真实复盘场景：网页为第12题，工作台选了第13题
+    const result = verifyQuestionAlignment({
+      pageQuestionLabel: "第12题",
+      rubricTitle: "第13题 实验题"
+    });
+    expect(result.ok).toBe(false);
+    expect(result.extractedPageNumber).toBe(12);
+    expect(result.extractedRubricNumber).toBe(13);
+    expect(result.issues[0]).toContain("第 12 题");
+    expect(result.issues[0]).toContain("第 13 题");
+    expect(result.issues[0]).toContain("题号不一致！为杜绝串题误判，已阻止批改");
+  });
+
+  it("passes when question numbers match", () => {
+    const result = verifyQuestionAlignment({
+      pageQuestionLabel: "第12题",
+      rubricTitle: "第12题 实验题"
+    });
+    expect(result.ok).toBe(true);
+    expect(result.extractedPageNumber).toBe(12);
+    expect(result.extractedRubricNumber).toBe(12);
+    expect(result.issues).toHaveLength(0);
+  });
+
+  it("passes when rubric has no explicit question number", () => {
+    const result = verifyQuestionAlignment({
+      pageQuestionLabel: "第 16 题 · 竖直圆轨道综合题",
+      rubricTitle: "竖直圆轨道综合题"
+    });
+    expect(result.ok).toBe(true);
+    expect(result.extractedPageNumber).toBe(16);
+    expect(result.extractedRubricNumber).toBeUndefined();
+    expect(result.issues).toHaveLength(0);
+  });
+
+  it("passes when page label is undefined or missing", () => {
+    const result = verifyQuestionAlignment({
+      pageQuestionLabel: undefined,
+      rubricTitle: "第13题 实验题"
+    });
+    expect(result.ok).toBe(true);
+    expect(result.extractedPageNumber).toBeUndefined();
+    expect(result.extractedRubricNumber).toBe(13);
+    expect(result.issues).toHaveLength(0);
+  });
+});
+

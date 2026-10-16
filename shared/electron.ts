@@ -26,6 +26,8 @@ export interface PluginCapabilities {
   next: boolean;
   /** 当前答卷未批完时能否翻页跳过（如目标网站"批完才能下一份"则不支持）。 */
   skip: boolean;
+  /** 是否支持/存在卷面“优”标记控件（用于存疑卷快速人工回评标记）。 */
+  markExcellent?: boolean;
 }
 
 export interface PluginStatus {
@@ -36,6 +38,7 @@ export interface PluginStatus {
   phase: PluginPhase;
   message: string;
   pageKey?: string;
+  questionLabel?: string;
   consecutiveFailures: number;
   lastScore?: number;
   maxScore?: number;
@@ -180,6 +183,15 @@ export interface PipelineScoreAlignment {
   issues: string[];
 }
 
+export interface PipelineQuestionAlignment {
+  ok: boolean;
+  pageQuestion?: string;
+  rubricTitle?: string;
+  extractedPageNumber?: number;
+  extractedRubricNumber?: number;
+  issues: string[];
+}
+
 export interface PipelineWriteTestResult {
   supported: boolean;
   rolledBack: boolean;
@@ -226,7 +238,8 @@ export type PluginDiagnosticAction =
   | "previous-page"
   | "next-page"
   | "write-score"
-  | "clear-score";
+  | "clear-score"
+  | "mark-excellent";
 
 export interface PluginDiagnosticRequest {
   action: PluginDiagnosticAction;

@@ -103,3 +103,96 @@ export function isZhixuePromptOrLoading(
 
   return undefined;
 }
+
+const ZHIXUE_EXCELLENT_SELECTORS = [
+  "[data-tool='you']",
+  "[data-tool='excellent']",
+  "[data-tool='star']",
+  "[data-type='you']",
+  "[data-type='excellent']",
+  "[data-type='good']",
+  "[data-name='优']",
+  "[data-name='优秀']",
+  "[title='优']",
+  "[title='优秀']",
+  "[title='优秀试卷']",
+  "[title='优秀卷']",
+  "[title='标记优秀']",
+  "[title='典型试卷']",
+  "[title='典型卷']",
+  "[title*='优']",
+  "[aria-label='优']",
+  "[aria-label*='优']",
+  ".tool-you",
+  ".tool_you",
+  ".mark-you",
+  ".marking-you",
+  ".btn-you",
+  ".btn-star",
+  ".btn-excellent",
+  ".icon-you",
+  ".icon-star"
+];
+
+export function findZhixueExcellentControl(
+  doc: {
+    querySelector: (selector: string) => Element | null;
+    querySelectorAll?: (selector: string) => NodeListOf<Element> | Element[];
+  },
+  isElementRendered?: (el: Element) => boolean
+): HTMLElement | null {
+  const rendered = (el: Element) => (isElementRendered ? isElementRendered(el) : true);
+
+  // 1. 优先使用已知的属性与类名选择器
+  for (const selector of ZHIXUE_EXCELLENT_SELECTORS) {
+    const el = doc.querySelector(selector);
+    if (el && rendered(el)) return el as HTMLElement;
+  }
+
+  if (typeof doc.querySelectorAll !== "function") return null;
+
+  // 2. 文本内容精确匹配（“优”或“优秀”）
+  const candidates = Array.from(doc.querySelectorAll("button, a, [role='button'], li, .tool, .tool-item, [class*='tool'], span, div, i"));
+  for (const el of candidates) {
+    if (!rendered(el)) continue;
+    const text = el.textContent?.trim();
+    const title = el.getAttribute("title")?.trim();
+    if (text === "优" || text === "优秀" || title === "优" || title === "优秀") {
+      const clickable = (el as HTMLElement).closest?.("button, a, li, [role='button'], [class*='tool'], .tool-item") ?? el;
+      return clickable as HTMLElement;
+    }
+  }
+
+  // 3. 结构上下文推断：在包含“清空”或“错”的工具栏中定位“优”（智学网截图上 [错] [★优] [✓] [✗] [○] [TA] [清空]）
+  const clearEl = candidates.find((el) => el.textContent?.trim() === "清空" && rendered(el));
+  if (clearEl) {
+    const toolbar = (clearEl as HTMLElement).closest?.(".marking_tools, .tool_content, .tools, .toolbar, [class*='tool'], ul, div");
+    if (toolbar) {
+      const star = toolbar.querySelector("[class*='star'], [class*='xing'], svg, .icon-star");
+      if (star && rendered(star)) {
+        return ((star as HTMLElement).closest?.("button, a, li, [role='button']") ?? star) as HTMLElement;
+      }
+      const children = Array.from(toolbar.children).filter((c) => rendered(c));
+      if (children.length >= 3) {
+        const firstText = children[0].textContent?.trim() || children[0].getAttribute("title")?.trim();
+        if (firstText === "错") {
+          return children[1] as HTMLElement;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+export function isZhixueExcellentControlActive(control: Element): boolean {
+  const activeClassPattern = /\b(active|selected|checked|is-active|is-checked|on)\b/i;
+  if (activeClassPattern.test(control.className || "")) return true;
+  if (control.getAttribute("aria-pressed") === "true" || control.getAttribute("aria-checked") === "true") return true;
+
+  const parent = control.parentElement;
+  if (parent && activeClassPattern.test(parent.className || "")) return true;
+
+  return false;
+}
+

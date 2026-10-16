@@ -419,4 +419,16 @@ describe("aggregated history record queries", () => {
       expect(rows[1].record.result.id).toBe("result-b");
     });
   });
+
+  it("returns all records when limit is 0 or unassigned", async () => {
+    await withTempStore(async (store) => {
+      await saveSampleRecord(store, { resultId: "result-1" });
+      await saveSampleRecord(store, { resultId: "result-2" });
+      await saveSampleRecord(store, { resultId: "result-3" });
+      const allRows = await store.listGradingRecords(0);
+      expect(allRows).toHaveLength(3);
+      const defaultRows = await store.listGradingRecords();
+      expect(defaultRows).toHaveLength(3);
+    });
+  });
 });

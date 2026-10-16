@@ -157,6 +157,7 @@ export default function ZhixueMockPage() {
   const [submitted, setSubmitted] = useState<Set<string>>(new Set());
   const [events, setEvents] = useState<string[]>([]);
   const [autoSubmit, setAutoSubmit] = useState(false);
+  const [excellentMarked, setExcellentMarked] = useState(false);
   const [importMessage, setImportMessage] = useState("内置 4 份测试答卷");
   const [batchComplete, setBatchComplete] = useState(false);
   const [toast, setToast] = useState<{ key: number; text: string } | null>(null);
@@ -181,6 +182,7 @@ export default function ZhixueMockPage() {
     const safeIndex = Math.max(0, Math.min(cases.length - 1, nextIndex));
     setIndex(safeIndex);
     setBatchComplete(false);
+    setExcellentMarked(false);
     addEvent(`已切换到 ${cases[safeIndex].label}`);
   };
   const saveScore = () => {
@@ -191,7 +193,7 @@ export default function ZhixueMockPage() {
     }
     setSubmitted((previous) => new Set(previous).add(current.id));
     showToast("保存成功");
-    addEvent(`${current.label} 保存成功 · ${currentScore} 分`);
+    addEvent(`${current.label} 保存成功${excellentMarked ? "（已标记“优”供快速回评）" : ""} · ${currentScore} 分`);
   };
   const onImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -241,7 +243,17 @@ export default function ZhixueMockPage() {
         <div className="zx-mock-workspace">
           <section id="topicImgContent" className="zx-mock-answer" data-page-key={current.id} data-grading-answer-card data-question-title={current.questionLabel}>
             <div className="zx-mock-answer-heading"><div><span>学生答卷原图</span><strong>{current.label}</strong></div><i>原图</i></div>
-            <div className="zx-mock-answer-canvas"><div className="score_content"><img className="enhance-definition-bright" data-grading-answer-image src={imageUrl} alt={`${current.label} 作答图片`} /></div></div>
+            <div className="zx-mock-answer-canvas">
+              <div className="score_content"><img className="enhance-definition-bright" data-grading-answer-image src={imageUrl} alt={`${current.label} 作答图片`} /></div>
+              <div className="marking_tools" style={{ display: "flex", gap: "6px", alignItems: "center", marginTop: "12px", padding: "6px 10px", background: "#f3f7f6", borderRadius: "5px", width: "fit-content" }}>
+                <button type="button" className="tool_item" title="错" style={{ padding: "2px 8px", borderRadius: "3px", border: "1px solid #d4deda", background: "#fff", color: "#e24e3f", fontWeight: "bold" }}>错</button>
+                <button type="button" className={`tool_item ${excellentMarked ? "active is-checked" : ""}`} title="优" data-tool="you" onClick={() => setExcellentMarked((v) => !v)} style={{ padding: "2px 8px", borderRadius: "3px", border: excellentMarked ? "2px solid #e24e3f" : "1px solid #d4deda", background: excellentMarked ? "#fff5f4" : "#fff", color: "#e24e3f", fontWeight: "bold", boxShadow: excellentMarked ? "0 0 0 2px rgba(226,78,63,0.2)" : "none" }}>★ 优</button>
+                <button type="button" className="tool_item" title="对" style={{ padding: "2px 8px", borderRadius: "3px", border: "1px solid #d4deda", background: "#fff", color: "#278b7c" }}>✓</button>
+                <button type="button" className="tool_item" title="叉" style={{ padding: "2px 8px", borderRadius: "3px", border: "1px solid #d4deda", background: "#fff", color: "#e24e3f" }}>✗</button>
+                <button type="button" className="tool_item" title="圈" style={{ padding: "2px 8px", borderRadius: "3px", border: "1px solid #d4deda", background: "#fff", color: "#e24e3f" }}>○</button>
+                <button type="button" className="tool_item" title="清空" onClick={() => setExcellentMarked(false)} style={{ padding: "2px 8px", borderRadius: "3px", border: "1px solid #d4deda", background: "#fff", color: "#546e67" }}>清空</button>
+              </div>
+            </div>
           </section>
           <aside className="zx-mock-score-panel">
             <div className="zx-mock-score-heading"><span>评分操作</span><strong>{currentSubmitted ? "已保存" : "待批改"}</strong></div>

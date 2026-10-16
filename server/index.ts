@@ -198,6 +198,7 @@ app.put("/api/model-config", asyncRoute(async (req, res) => {
     }).optional(),
     // Kept in the request for compatibility with older clients. The server
     // always persists strict JSON Schema and ignores both capability flags.
+    smallQuestionBlindReviewEnabled: z.boolean().optional().default(true),
     supportsJsonSchema: z.boolean().optional().default(true),
     supportsJsonObject: z.boolean().optional().default(false),
     supportsBase64Images: z.boolean(), enabled: z.boolean()
@@ -298,8 +299,17 @@ app.get("/api/history-records", asyncRoute(async (req, res) => {
     res.json({ records: [found] });
     return;
   }
-  const limit = Math.max(1, Math.min(200, Number(req.query.limit ?? 100) || 100));
-  res.json({ records: await listGradingRecords(limit) });
+  const rawLimit = req.query.limit;
+  let limit = 0;
+  if (typeof rawLimit === "string" && rawLimit.trim() && rawLimit !== "0" && rawLimit !== "all") {
+    const parsed = Number(rawLimit);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      limit = Math.min(10000, parsed);
+    }
+  }
+  const summaryOnly = req.query.summary !== "0" && req.query.summary !== "false";
+  const records = await listGradingRecords(limit, summaryOnly);
+  res.json({ records, total: records.length });
 }));
 
 app.get("/api/history-records/:id/model-calls", asyncRoute(async (req, res) => {

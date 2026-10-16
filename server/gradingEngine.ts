@@ -185,8 +185,9 @@ export function calculateGrade(input: {
   evidenceValidationMode?: "extracted_text" | "direct_visual";
   gradingMode?: GradingMode;
   pointScoreOverrides?: ReadonlyMap<string, number> | Readonly<Record<string, number>>;
+  initialReviewReasons?: string[];
 }): GradingResult {
-  const reviewReasons = new Set<string>();
+  const reviewReasons = new Set<string>(input.initialReviewReasons ?? []);
   const deductions = input.appliedDeductions ?? [];
   const configuredThreshold = Number(input.unreadableReviewThreshold);
   const unreadableScoreThreshold = Number.isFinite(configuredThreshold) && configuredThreshold >= 0.5
@@ -293,12 +294,14 @@ export function calculateGrade(input: {
           reviewReason: decision.reviewReason || "未提供可定位的缺失审验证据，无法确认该评分点确实未作答"
         };
       }
+      const isGuardedRiskDecision = (decision.decisionSource === "small_question_risk_guard" || decision.decisionSource === "visual_local_review") && decision.requiresReview;
       // Unreadable points are candidates until the whole-paper affected score is
       // known. A clear model status cannot independently force human review.
       const requiresReview = isMissingModelDecision
         || (!isUnreadable && isPendingVisualReview)
-        || (isUnauditedNotPresent && !grantsFullCredit);
-      if (!isUnreadable && !isMissingModelDecision && !isPendingVisualReview && !isUnauditedNotPresent && (decision.requiresReview || decision.reviewReason)) {
+        || (isUnauditedNotPresent && !grantsFullCredit)
+        || isGuardedRiskDecision;
+      if (!isUnreadable && !isMissingModelDecision && !isPendingVisualReview && !isUnauditedNotPresent && !isGuardedRiskDecision && (decision.requiresReview || decision.reviewReason)) {
         decision = { ...decision, requiresReview: false, reviewReason: undefined };
       }
       const pointKey = `${subquestion.id}:${point.id}`;

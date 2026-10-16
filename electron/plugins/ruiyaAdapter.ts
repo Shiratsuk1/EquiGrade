@@ -640,7 +640,13 @@ export function createRuiyaAdapter(): SiteAdapter {
         if (mappingIssue) issues.push(mappingIssue);
         if (!capabilities.submit) issues.push("未找到可用的睿芽云提交按钮");
       }
-      return { ok: issues.length === 0, issues, capabilities, pageKey };
+      return {
+        ok: issues.length === 0,
+        issues,
+        capabilities,
+        pageKey,
+        questionLabel: doc ? currentQuestionLabel(doc) : undefined
+      };
     },
     async inspectSetup() {
       const preflight = await this.preflight();
@@ -779,6 +785,10 @@ export function createRuiyaAdapter(): SiteAdapter {
     currentPageKey() {
       const doc = gradingDocument();
       return doc ? pageFingerprint(doc) : undefined;
+    },
+    currentQuestionLabel() {
+      const doc = gradingDocument();
+      return doc ? currentQuestionLabel(doc) : undefined;
     }
   };
 }

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { ScoreWritePayload } from "./types.js";
 import {
   buildZhixueScorePlan,
+  findZhixueExcellentControl,
+  isZhixueExcellentControlActive,
   isZhixuePromptOrLoading,
   isZhixueStaticUiImageUrl,
   matchesZhixueUrl,
@@ -153,5 +155,42 @@ describe("isZhixuePromptOrLoading", () => {
       querySelector: (sel: string) => sel.includes("img_containter") ? container : null
     };
     expect(isZhixuePromptOrLoading(doc, () => true)).toBeUndefined();
+  });
+});
+
+describe("findZhixueExcellentControl and isZhixueExcellentControlActive", () => {
+  it("finds excellent control via explicit data-tool or title attribute", () => {
+    const button = { getAttribute: (attr: string) => (attr === "title" ? "优秀试卷" : null), className: "tool_item" } as unknown as Element;
+    const doc = {
+      querySelector: (sel: string) => (sel.includes("[title='优秀试卷']") ? button : null)
+    };
+    expect(findZhixueExcellentControl(doc, () => true)).toBe(button);
+  });
+
+  it("finds excellent control by text content '优'", () => {
+    const span = {
+      textContent: "优",
+      getAttribute: () => null,
+      children: [],
+      closest: () => button
+    } as unknown as Element;
+    const button = {
+      className: "tool_btn",
+      textContent: "优",
+      getAttribute: () => null
+    } as unknown as Element;
+
+    const doc = {
+      querySelector: () => null,
+      querySelectorAll: (sel: string) => (sel.includes("button") ? [span] : [])
+    };
+    expect(findZhixueExcellentControl(doc, () => true)).toBe(button);
+  });
+
+  it("correctly determines whether excellent control is active/checked", () => {
+    expect(isZhixueExcellentControlActive({ className: "tool_item is-checked" } as unknown as Element)).toBe(true);
+    expect(isZhixueExcellentControlActive({ className: "tool_item active" } as unknown as Element)).toBe(true);
+    expect(isZhixueExcellentControlActive({ className: "tool_item", getAttribute: (a: string) => (a === "aria-checked" ? "true" : null) } as unknown as Element)).toBe(true);
+    expect(isZhixueExcellentControlActive({ className: "tool_item", getAttribute: () => null } as unknown as Element)).toBe(false);
   });
 });

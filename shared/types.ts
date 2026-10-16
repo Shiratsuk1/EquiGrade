@@ -3,7 +3,7 @@ export type FinalAnswerStatus = "correct" | "incorrect" | "missing" | "uncertain
 /** Whether the image contains a meaningful student-written answer. */
 export type AnswerPresence = "no_effective_answer" | "probable_answer" | "confirmed_answer" | "unreadable_answer" | "image_unreliable";
 export type ScoringDisposition = "awarded" | "partially_awarded" | "not_awarded" | "awarded_by_visual_review" | "not_awarded_by_visual_review" | "not_deducted_by_final_answer" | "not_deducted_by_score_floor" | "uncertain_no_deduction";
-export type DecisionSource = "model" | "normalized_uncertain" | "synthetic_missing" | "final_answer_authority" | "large_question_point_review" | "unreadable_local_review" | "local_numeric_review" | "visual_local_review";
+export type DecisionSource = "model" | "normalized_uncertain" | "synthetic_missing" | "final_answer_authority" | "large_question_point_review" | "unreadable_local_review" | "local_numeric_review" | "visual_local_review" | "small_question_risk_guard";
 
 export const DEFAULT_UNREADABLE_REVIEW_THRESHOLD = 2;
 export const DEFAULT_MODEL_TIMEOUT_MS = 300_000;
@@ -242,6 +242,7 @@ export interface SmallQuestionBlankRecognitionAudit {
     confidence: number;
     issues: string[];
     reason: string;
+    riskPoints?: string[];
   };
   comparisonStatus: "consensus" | "discrepancy";
   escalatedReview?: {
@@ -250,11 +251,13 @@ export interface SmallQuestionBlankRecognitionAudit {
     confidence: number;
     visualAnalysis: string;
     resolutionReason: string;
+    riskPoints?: string[];
   };
   finalStatus: FinalAnswerStatus;
   finalAnswer: string;
   finalConfidence: number;
-  decisionSource: "consensus_ab" | "escalated_review_c" | "local_rule_override" | "blank_missing";
+  finalRiskPoints?: string[];
+  decisionSource: "consensus_ab" | "escalated_review_c" | "local_rule_override" | "blank_missing" | "skeptic_direct";
 }
 
 export interface SmallQuestionAudit {
@@ -663,6 +666,8 @@ export interface ModelConfigInput {
   /** PaddleOCR transport settings; the access token remains server-side. */
   paddleOcr?: PaddleOcrConfigInput;
   responsesAgent?: ResponsesAgentConfigInput;
+  /** 小题复核是否启用盲审 A 与终审 C（默认 true；若关闭则直接采信挑刺 B 结论，绕过 A 与 C） */
+  smallQuestionBlindReviewEnabled?: boolean;
   supportsJsonSchema: boolean;
   supportsJsonObject: boolean;
   supportsBase64Images: boolean;

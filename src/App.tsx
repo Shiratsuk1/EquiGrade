@@ -12,7 +12,7 @@ import type {
   ModelConfigInput, ModelCallLogDetails, PublicModelConfig, Rubric, SystemLogEntry, SystemLogSnapshot
 } from "../shared/types";
 import { api, uploadDocument } from "./api";
-import { LOW_CONFIDENCE_THRESHOLD, summarizeGradingReliability } from "../shared/reviewSignals";
+import { LOW_CONFIDENCE_THRESHOLD, detectHighRiskDeductions, summarizeGradingReliability } from "../shared/reviewSignals";
 import { systemLogScopeLabels } from "../shared/uiConstants";
 import {
   IMAGE_VIEWER_MAX_SCALE, calculateImageFitScale, clampImageOffset, clampImageScale,
@@ -1084,6 +1084,7 @@ export function ResultDetail({ result, rubric, answerImageUrl, artifacts, canReg
   useEffect(() => {
     setActiveLineId(null);
   }, [result.id]);
+  const highRisk = detectHighRiskDeductions(result, rubric);
   const transcriptLines = result.ocrTranscription?.lines.length ? result.ocrTranscription.lines : result.evidence.lines;
   const activeRegion = transcriptLines.find((line) => line.id === activeLineId)?.region;
   return <div className="result-detail">
@@ -1112,6 +1113,34 @@ export function ResultDetail({ result, rubric, answerImageUrl, artifacts, canReg
         <div className="score-block prism-score-emphasis" key={result.id}><strong style={scoreViewTransitionName ? { viewTransitionName: scoreViewTransitionName } as CSSProperties : undefined}>{scoreLabel(result.score, result.maximumPossibleScore)}</strong><span>/ {result.maxScore} 分{result.maximumPossibleScore !== undefined && result.maximumPossibleScore > result.score ? "（含待复核分值）" : ""}</span></div>
       </div>
     </div>
+    {highRisk.isHighRisk && (
+      <section className={`high-risk-alert-panel ${highRisk.hasExtractedMatchRisk ? "critical" : ""}`}>
+        <div className="high-risk-alert-header">
+          <span className="high-risk-alert-icon">
+            <AlertTriangle size={18} />
+          </span>
+          <div>
+            <strong>
+              {highRisk.hasExtractedMatchRisk
+                ? "【高风险复核预警】本卷已自动提交，但存在【提取答案命中参考答案、因存疑判 0 分】的小问！"
+                : "【存疑扣分预警】本卷已自动提交，但存在因机器无法确认作答而扣除分数的小问！"}
+            </strong>
+            <div className="high-risk-alert-body">
+              {highRisk.items.map((item) => (
+                <p key={item.subquestionId}>
+                  • 第 {item.subquestionTitle} 问：学生提取为“{item.studentAnswer || "未写出"}”，参考答案为“{item.referenceAnswer || "未配置"}”，因卷面存疑被判 0/{item.lostScore} 分（原因：{item.reason}）。
+                </p>
+              ))}
+              <p className="high-risk-alert-action">
+                {highRisk.hasExtractedMatchRisk
+                  ? "若卷面实际有效书写符合参考答案（如涂黑前面重写 A），请及时在阅卷平台手动补回相应得分！"
+                  : "请仔细核对学生原始答卷，确认是否属于机器识别过于苛刻导致的误扣。"}
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+    )}
     {result.responsesAgentAudit && <ResponsesAgentAuditPanel audit={result.responsesAgentAudit} artifacts={artifacts} onPreview={onPreviewArtifact ?? (() => undefined)} />}
     <GradingReliabilityPanel result={result} rubric={rubric} artifacts={artifacts} onPreviewArtifact={onPreviewArtifact} />
     <div className="detail-columns">
@@ -1119,6 +1148,7 @@ export function ResultDetail({ result, rubric, answerImageUrl, artifacts, canReg
         const teacherDecision = Boolean(subquestion.finalAnswerDecisionSource);
         const grantsFullCredit = subquestion.decisions.length > 0 && subquestion.decisions.every((decision) => decision.scoringDisposition === "not_deducted_by_final_answer");
         const rubricSubquestion = rubric?.subquestions.find((candidate) => candidate.id === subquestion.id);
+        const highRiskItem = highRisk.items.find((item) => item.subquestionId === subquestion.id);
         return <div className="report-question" key={subquestion.id}>
           <div className="report-question-title"><strong>{subquestion.title}</strong><span>{scoreLabel(subquestion.score, subquestion.maximumPossibleScore)}/{subquestion.maxScore} 分</span></div>
           <div className={`final-verdict ${subquestion.finalAnswerStatus}`}>
@@ -1132,6 +1162,16 @@ export function ResultDetail({ result, rubric, answerImageUrl, artifacts, canReg
               <div><span className="answer-label">学生答案</span><MathText value={subquestion.studentFinalAnswer || "未写出"} formulaByDefault /></div>
               <div><span className="answer-label">参考答案</span><MathText value={rubricReferenceAnswer(subquestion, rubric) || "未配置"} formulaByDefault /></div>
             </div>}
+            {highRiskItem && (
+              <div className={`subquestion-high-risk-callout ${highRiskItem.isExtractedMatch ? "critical" : ""}`}>
+                <AlertTriangle size={14} />
+                <span>
+                  {highRiskItem.isExtractedMatch
+                    ? `⚠️ 高风险提示：提取答案与参考答案一致（${highRiskItem.studentAnswer}），但因卷面涂改或字迹存疑被判 0 分已提交！`
+                    : `⚠️ 存疑扣分提示：该小问因机器存疑被扣除 ${highRiskItem.lostScore} 分已提交！`}
+                </span>
+              </div>
+            )}
             {grantsFullCredit && teacherDecision && <p className="full-credit-note">最终答案正确且评分标准允许省略过程，该小问保持满分；过程审验问题仅供查看。</p>}
           </div>
           {subquestion.processAuditSummary && <div className="process-audit-summary"><span>过程审验 {subquestion.processAuditSummary.totalPoints} 项</span><b className="audit-passed">{subquestion.processAuditSummary.satisfied} 项通过</b><b className="audit-failed">{subquestion.processAuditSummary.notSatisfied} 项错误</b>{(subquestion.processAuditSummary.notPresent ?? 0) > 0 && <b className="audit-missing">{subquestion.processAuditSummary.notPresent} 项未作答</b>}{(subquestion.processAuditSummary.unreadable ?? subquestion.processAuditSummary.uncertain) > 0 && <b className="audit-unreadable">{subquestion.processAuditSummary.unreadable ?? subquestion.processAuditSummary.uncertain} 项无法辨认</b>}{subquestion.processAuditSummary.reviewRequired > 0 && <strong>{subquestion.processAuditSummary.reviewRequired} 项待复核</strong>}</div>}

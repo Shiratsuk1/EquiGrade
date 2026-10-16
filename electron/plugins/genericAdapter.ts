@@ -166,7 +166,8 @@ export function createGenericAdapter(manifest: AdapterManifest, selectors: Adapt
         ok: issues.length === 0,
         issues,
         capabilities,
-        pageKey
+        pageKey,
+        questionLabel: elements.card?.dataset.questionTitle
       };
     },
     async inspectSetup() {
@@ -306,6 +307,9 @@ export function createGenericAdapter(manifest: AdapterManifest, selectors: Adapt
     },
     currentPageKey() {
       return currentPageKey();
+    },
+    currentQuestionLabel() {
+      return query<HTMLElement>(selectors.answerCard)?.dataset.questionTitle;
     }
   };
 }

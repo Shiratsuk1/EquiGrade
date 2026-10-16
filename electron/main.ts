@@ -562,6 +562,7 @@ ipcMain.handle("pipeline:assert-task", (event) => {
     return {
       templateId: activePipelineTask.context.templateId,
       templateTitle: activePipelineTask.context.title,
+      rubricTitle: activePipelineTask.context.rubric?.title,
       mode: activePipelineTask.mode
     };
   })();

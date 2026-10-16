@@ -4,6 +4,8 @@ import { StaleAnswerError } from "./pipelineSafety.js";
 import type { ScoreWritePayload, SiteAdapter } from "./types.js";
 import {
   buildZhixueScorePlan,
+  findZhixueExcellentControl,
+  isZhixueExcellentControlActive,
   isZhixuePromptOrLoading,
   isZhixueStaticUiImageUrl,
   matchesZhixueUrl,
@@ -216,6 +218,30 @@ function enabledPageControl(doc: Document, title: "上一份" | "下一份") {
 
 function enabledNext(doc: Document) {
   return enabledPageControl(doc, "下一份");
+}
+
+async function setZhixueExcellentMark(doc: Document, checked: boolean = true): Promise<boolean> {
+  const documents = collectDocuments(doc);
+  let control: HTMLElement | null = null;
+  for (const candidateDoc of documents) {
+    control = findZhixueExcellentControl(candidateDoc, isRendered);
+    if (control) break;
+  }
+  if (!control) return false;
+  const currentlyActive = isZhixueExcellentControlActive(control);
+  if (currentlyActive === checked) return true;
+
+  if (typeof MouseEvent !== "undefined") {
+    try {
+      control.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      control.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    } catch {
+      // 容错处理
+    }
+  }
+  control.click();
+  await wait(120);
+  return true;
 }
 
 function pageFingerprint(doc: Document) {
@@ -462,13 +488,15 @@ export function createZhixueAdapter(): SiteAdapter {
       const next = doc ? findPageControl(doc, "next") : null;
       const pageKey = doc ? pageFingerprint(doc) : undefined;
       const completed = Boolean(doc && batchComplete(doc));
+      const excellent = doc ? findZhixueExcellentControl(doc, isRendered) : null;
       const capabilities = {
         answerImage: Boolean(image) && !promptIssue,
         scoreInput: Boolean(total),
         submit: Boolean(submit),
         next: Boolean(next),
         // 智学网批完当前份之前下一份按钮禁用，无法跳过未批完的答卷。
-        skip: false
+        skip: false,
+        markExcellent: Boolean(excellent)
       };
       const issues: string[] = [];
       if (!doc) issues.push("未找到智学网阅卷子页面");
@@ -483,7 +511,8 @@ export function createZhixueAdapter(): SiteAdapter {
         ok: issues.length === 0,
         issues,
         capabilities,
-        pageKey
+        pageKey,
+        questionLabel: doc ? currentQuestionLabel(doc) : undefined
       };
     },
     async inspectSetup() {
@@ -563,12 +592,25 @@ export function createZhixueAdapter(): SiteAdapter {
     async testScoreWrite(payload) {
       return applyScorePayload(payload, true);
     },
+    async setExcellentMark(checked = true) {
+      const doc = gradingDocument();
+      if (!doc) throw new Error("智学网阅卷子页面已离线");
+      const ok = await setZhixueExcellentMark(doc, checked);
+      if (!ok) throw new Error("未在智学网页面找到可用的“优”控件");
+      return true;
+    },
     async submitScore(payload) {
       const doc = await assertCurrentTarget(payload);
       const submit = doc?.querySelector<HTMLElement>("#bnt_save, [data-grading-submit]");
       if (!doc || !submit) throw new Error("未找到智学网提交分数按钮");
       if (!writtenPayload) throw new Error("提交前尚未完成智学网分数写入校验");
       if (isDisabled(submit)) throw new Error("智学网提交分数按钮当前不可用");
+
+      // 存疑卷回评标记：按业务使用步骤，在提交分数前先勾选页面“优”控件
+      if (payload.requiresReview) {
+        await setZhixueExcellentMark(doc, true).catch(() => false);
+      }
+
       submittedPageKey = pageFingerprint(doc);
       pendingSubmission = {
         previousPageKey: submittedPageKey,
@@ -615,6 +657,10 @@ export function createZhixueAdapter(): SiteAdapter {
     currentPageKey() {
       const doc = gradingDocument();
       return doc ? pageFingerprint(doc) : undefined;
+    },
+    currentQuestionLabel() {
+      const doc = gradingDocument();
+      return doc ? currentQuestionLabel(doc) : undefined;
     }
   };
 }

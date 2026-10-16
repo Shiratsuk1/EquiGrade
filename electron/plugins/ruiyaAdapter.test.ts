@@ -145,8 +145,10 @@ describe("睿芽云页面适配器", () => {
       ok: true,
       issues: [],
       capabilities: { answerImage: true, scoreInput: true, submit: true, next: true, skip: false },
-      pageKey: expect.stringMatching(/^ruiya:/)
+      pageKey: expect.stringMatching(/^ruiya:/),
+      questionLabel: "学科：物理"
     });
+    expect(target.currentQuestionLabel?.()).toBe("学科：物理");
     expect(target.manifest).toBe(RUIYA_ADAPTER_MANIFEST);
 
     vi.mocked(extractAnswerImage).mockResolvedValue({

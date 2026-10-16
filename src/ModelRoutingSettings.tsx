@@ -88,9 +88,9 @@ const routeTriggerLabels: Partial<Record<ModelRouteKey, string>> = {
   large_question_answer_triage: "稳定大题批改首轮，必经",
   large_question_visual_review: "稳定链路首轮判错、判空或不确定时，按需",
   large_question_point_review: "稳定链路首轮判错、判空或不确定的小问，按需",
-  small_question_blank_layout: "小题各空手写定位，第一阶段必经",
-  small_question_blind_transcription: "切片盲审转录，不知参考答案，必经",
-  small_question_skeptic_assessment: "切片挑刺审查，对照参考答案，必经",
+  small_question_blank_layout: "小题整卷初检与定位，第一阶段必经",
+  small_question_blind_transcription: "存疑小空切片盲审转录，不知参考答案，按需",
+  small_question_skeptic_assessment: "存疑小空切片挑刺审查，对照参考答案，按需",
   small_question_escalated_review: "初检分歧或疑点时，拉满思考预算终审，按需"
 };
 
@@ -313,6 +313,7 @@ function StableRouteGroups({ form, update, includeLargeQuestion }: { form: Model
   const updateRoute = (key: ModelRouteKey, patch: Partial<ModelRouteConfig>) => update("modelRoutes", { ...(form.modelRoutes ?? {}), [key]: { ...routeValue(form, key), ...patch } });
   const setNumber = (key: ModelRouteKey, field: "timeoutMs" | "maxRetries" | "maxOutputTokens", value: string) => updateRoute(key, { [field]: value.trim() === "" ? undefined : Number(value) });
   const isModelNative = form.stagedLayoutEngine === "model_native";
+  const blindReviewEnabled = form.smallQuestionBlindReviewEnabled !== false;
   const groups = MODEL_ROUTE_GROUPS.filter((group) => includeLargeQuestion || group.key !== "large-question").map((group) => {
     if (group.key !== "large-question") return group;
     const routeKeys: readonly ModelRouteKey[] = isModelNative
@@ -356,8 +357,35 @@ function StableRouteGroups({ form, update, includeLargeQuestion }: { form: Model
             )}
           </div>
         </div>
+        {group.key === "small-question" && (
+          <div className={`small-question-blind-switch ${blindReviewEnabled ? "enabled" : "disabled"}`}>
+            <div className="small-question-blind-switch-info">
+              <strong>盲审与深度终审机制</strong>
+              <small>
+                {blindReviewEnabled
+                  ? "已启用：存疑小空切片同时发起盲审 A（不知参考答案）与挑刺 B（对照参考答案）双路核验；产生分歧或疑点时调起深度终审 C（标准高可靠方案）。"
+                  : "已关闭：存疑小空切片仅调用挑刺审查 B，并直接采信 B 的判定结论，彻底绕过盲审 A 与深度终审 C（极速放行方案）。"}
+              </small>
+            </div>
+            <label className="responses-agent-guardrails-toggle" title="切换是否使用盲审双路与深度终审">
+              <input
+                type="checkbox"
+                checked={blindReviewEnabled}
+                onChange={(event) => update("smallQuestionBlindReviewEnabled", event.target.checked)}
+              />
+              <span>{blindReviewEnabled ? "盲审已启用" : "已绕过 A/C"}</span>
+            </label>
+          </div>
+        )}
         <div className="model-route-list">
           {definitions.map((definition) => {
+            const isBypassed = group.key === "small-question" && !blindReviewEnabled && (definition.key === "small_question_blind_transcription" || definition.key === "small_question_escalated_review");
+            const isDirectSingle = group.key === "small-question" && !blindReviewEnabled && definition.key === "small_question_skeptic_assessment";
+            const triggerLabel = isBypassed
+              ? "盲审已关闭，直接绕过不调用"
+              : isDirectSingle
+              ? "存疑切片挑刺审查，直接采信结案"
+              : (routeTriggerLabels[definition.key] ?? "按当前流程调用");
             const route = routeValue(form, definition.key);
             const inheritedReasoning = defaultReasoning(form, route.endpoint);
             const effectiveReasoning = route.reasoningEffort ?? inheritedReasoning;
@@ -365,8 +393,23 @@ function StableRouteGroups({ form, update, includeLargeQuestion }: { form: Model
             const selectedPromptVariant = promptVariants.find((item) => item.key === promptPreviewKeys[definition.key]) ?? promptVariants[0]!;
             const isReplacingPrompt = route.systemPromptMode === "replace";
             const promptEditorValue = isReplacingPrompt ? route.systemPrompt ?? selectedPromptVariant.prompt : route.systemPrompt ?? "";
-            return <article className="model-route-card" key={definition.key}>
-              <div className="model-route-card-heading"><div><span className="model-route-step-label">实际步骤</span><strong>{definition.label}</strong><small>{definition.description}</small></div><div className="model-route-card-meta"><span>{routeTriggerLabels[definition.key] ?? "按当前流程调用"}</span><code>{definition.key}</code></div></div>
+            return <article className={`model-route-card ${isBypassed ? "model-route-card-bypassed" : ""}`} key={definition.key}>
+              <div className="model-route-card-heading">
+                <div>
+                  <span className="model-route-step-label">实际步骤</span>
+                  <strong>{definition.label}</strong>
+                  <small>{definition.description}</small>
+                </div>
+                <div className="model-route-card-meta">
+                  <span>{triggerLabel}</span>
+                  <code>{definition.key}</code>
+                </div>
+              </div>
+              {isBypassed && (
+                <div className="model-route-bypassed-banner">
+                  <span>此步骤已在上方小题盲审设置中关闭，流水线运行时不会调用此模型。</span>
+                </div>
+              )}
               <div className="model-route-fields model-route-basic-fields">
                 <label className="model-route-model-field">
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>

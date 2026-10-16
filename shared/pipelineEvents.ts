@@ -19,6 +19,7 @@ export function cleanPipelineError(value: unknown): string {
 
 const errorEvents = new Set([
   "pipeline_start_rejected",
+  "pipeline_question_mismatch_rejected",
   "page_failed",
   "plugin_preflight_failed",
   "browser_load_failed"
@@ -27,8 +28,10 @@ const errorEvents = new Set([
 const warningEvents = new Set([
   "page_skipped",
   "page_review_flagged",
+  "page_marked_excellent",
   "pipeline_paused",
   "pipeline_paused_stale_answer",
+  "pipeline_question_mismatch_stopped",
   "pipeline_force_stopped",
   "pipeline_skip_rejected"
 ]);
@@ -59,8 +62,11 @@ export function pipelineEventLabel(event: PipelineEvent): string {
     case "plugin_preflight_failed": return "站点控件检查失败";
     case "image_extracted": return `已提取答卷 ${event.sourcePageKey || event.pageKey || "当前页"}`;
     case "page_review_flagged": return `已标记复核，继续写分 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分（${event.reviewCount ?? "?"} 项）`;
+    case "page_marked_excellent": return "已在卷面勾选“优”控件作为存疑标记，方便人工回评";
     case "page_completed": return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分${event.requiresReview ? "（已标记复核）" : ""}`;
     case "pipeline_start_rejected": return `启动失败：${reason || "尚未选择批改任务"}`;
+    case "pipeline_question_mismatch_rejected": return `启动被阻断：${reason || "网页题目与评分标准不一致"}`;
+    case "pipeline_question_mismatch_stopped": return `已安全暂停：${reason || "检测到网页题目切换，与当前评分标准不一致"}`;
     case "page_failed": return `处理失败：${reason || "未知异常"}`;
     case "page_retry": return `自动重试 ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}：${reason || "正在重试当前答卷"}`;
     case "page_skipped": return `已跳过：${reason || "当前答卷"}`;

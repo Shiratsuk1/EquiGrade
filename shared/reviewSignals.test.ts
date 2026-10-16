@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { summarizeGradingReliability, summarizeReviewSignals } from "./reviewSignals.js";
+import { detectHighRiskDeductions, summarizeGradingReliability, summarizeReviewSignals } from "./reviewSignals.js";
 import type { GradingResult } from "./types.js";
 
 describe("review signal summary", () => {
@@ -268,5 +268,103 @@ describe("review signal summary", () => {
     expect(summary.attentionItems).toContainEqual(expect.objectContaining({
       text: "有 1 个评分点由系统补齐缺失判断，未计入过程追溯率。"
     }));
+  });
+});
+
+describe("detectHighRiskDeductions", () => {
+  it("detects high-risk deduction when extracted answer matches reference answer but given 0 due to uncertain", () => {
+    const result = {
+      score: 4,
+      maxScore: 6,
+      status: "needs_review",
+      subquestions: [
+        {
+          id: "1",
+          title: "(1)",
+          score: 2,
+          maxScore: 2,
+          finalAnswerStatus: "correct",
+          studentFinalAnswer: "3.80",
+          referenceFinalAnswer: "3.80"
+        },
+        {
+          id: "2",
+          title: "(2)",
+          score: 0,
+          maxScore: 2,
+          finalAnswerStatus: "uncertain",
+          studentFinalAnswer: "A",
+          referenceFinalAnswer: "A",
+          finalAnswerReason: "作答区域有涂改痕迹，最终书写字符形似草写A或D，辨识度存疑"
+        },
+        {
+          id: "3",
+          title: "(3)",
+          score: 2,
+          maxScore: 2,
+          finalAnswerStatus: "correct",
+          studentFinalAnswer: "甲",
+          referenceFinalAnswer: "甲"
+        }
+      ]
+    } as unknown as GradingResult;
+
+    const audit = detectHighRiskDeductions(result);
+    expect(audit.isHighRisk).toBe(true);
+    expect(audit.hasExtractedMatchRisk).toBe(true);
+    expect(audit.totalLostScore).toBe(2);
+    expect(audit.badgeLabel).toBe("🚨 提取命中但存疑 0分");
+    expect(audit.shortSummary).toContain("第(2)问认出 A 但因存疑判 0 分已提交 · 待核实 2 分");
+    expect(audit.items).toHaveLength(1);
+    expect(audit.items[0]).toMatchObject({
+      subquestionId: "2",
+      studentAnswer: "A",
+      referenceAnswer: "A",
+      isExtractedMatch: true,
+      lostScore: 2
+    });
+  });
+
+  it("returns not high risk for normal completed answer sheets", () => {
+    const result = {
+      score: 6,
+      maxScore: 6,
+      status: "completed",
+      subquestions: [
+        { id: "1", title: "(1)", score: 2, maxScore: 2, finalAnswerStatus: "correct", studentFinalAnswer: "A", referenceFinalAnswer: "A" }
+      ]
+    } as unknown as GradingResult;
+
+    const audit = detectHighRiskDeductions(result);
+    expect(audit.isHighRisk).toBe(false);
+    expect(audit.hasExtractedMatchRisk).toBe(false);
+    expect(audit.totalLostScore).toBe(0);
+    expect(audit.items).toHaveLength(0);
+  });
+
+  it("handles general uncertain deduction where student answer does not match reference", () => {
+    const result = {
+      score: 0,
+      maxScore: 2,
+      status: "needs_review",
+      subquestions: [
+        {
+          id: "1",
+          title: "(1)",
+          score: 0,
+          maxScore: 2,
+          finalAnswerStatus: "uncertain",
+          studentFinalAnswer: "18",
+          referenceFinalAnswer: "A",
+          finalAnswerReason: "模糊无法辨认"
+        }
+      ]
+    } as unknown as GradingResult;
+
+    const audit = detectHighRiskDeductions(result);
+    expect(audit.isHighRisk).toBe(true);
+    expect(audit.hasExtractedMatchRisk).toBe(false);
+    expect(audit.totalLostScore).toBe(2);
+    expect(audit.badgeLabel).toBe("⚠️ 存疑已扣分 -2分");
   });
 });

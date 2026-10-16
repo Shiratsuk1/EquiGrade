@@ -22,6 +22,7 @@ import {
   pluginPhaseLabels,
   pluginThemes
 } from "../../shared/uiConstants.js";
+import { verifyQuestionAlignment } from "../../shared/pipelineSetup.js";
 import { createGenericDataAdapter } from "./genericDataAdapter.js";
 import { createMockAdapter } from "./mockAdapter.js";
 import { createRuiyaAdapter } from "./ruiyaAdapter.js";
@@ -248,7 +249,8 @@ async function runPreflight() {
       adapterName: candidateAdapter.manifest.name,
       adapterVersion: candidateAdapter.manifest.version,
       capabilities: result.capabilities,
-      pageKey: result.pageKey
+      pageKey: result.pageKey,
+      questionLabel: result.questionLabel
     });
     if (!result.ok) {
       phase("failed", result.issues.join("；"));
@@ -322,13 +324,14 @@ async function gradeCurrent(answer: ExtractedAnswer) {
   }) as GradingResponse;
 }
 
-function scorePayload(grading: GradingResponse, answer: ExtractedAnswer): ScoreWritePayload {
+function scorePayload(grading: GradingResponse, answer: ExtractedAnswer, requiresReview?: boolean): ScoreWritePayload {
   return {
     score: grading.score,
     maxScore: grading.maxScore,
     expectedPageKey: answer.sourcePageKey ?? answer.pageKey,
     expectedPageToken: answer.pageToken,
     expectedImageHash: answer.imageHash,
+    requiresReview: Boolean(requiresReview),
     segments: (grading.result?.subquestions ?? []).map((subquestion) => ({
       id: subquestion.id,
       title: subquestion.title,
@@ -359,7 +362,7 @@ async function skipAnswer(previousPageKey: string) {
   return await adapter.detectPageChange(previousPageKey);
 }
 
-async function runPipeline() {
+async function runPipeline(explicitRubricTitle?: string) {
   if (running) return;
   running = true;
   pauseRequested = false;
@@ -367,6 +370,16 @@ async function runPipeline() {
   skipRequested = false;
   publish({ consecutiveFailures: 0 });
   record({ type: "pipeline_started", mode: "teacher_model_direct_vision", adapterId: adapter.manifest.id });
+
+  let activeRubricTitle = explicitRubricTitle;
+  if (!activeRubricTitle) {
+    const taskInfo = await ipcRenderer.invoke("pipeline:assert-task").catch(() => null) as {
+      templateId?: string;
+      templateTitle?: string;
+      rubricTitle?: string;
+    } | null;
+    activeRubricTitle = taskInfo?.rubricTitle || taskInfo?.templateTitle;
+  }
 
   try {
     if (!(await runPreflight())) return;
@@ -377,6 +390,26 @@ async function runPipeline() {
         phase("completed", "本批次答卷已全部提交");
         record({ type: "pipeline_completed" });
         return;
+      }
+
+      // 防串题实时检查：在读取每份答卷前，核验网页题目是否发生切换
+      const currentQuestionLabel = adapter.currentQuestionLabel?.();
+      if (activeRubricTitle && currentQuestionLabel) {
+        const alignment = verifyQuestionAlignment({
+          pageQuestionLabel: currentQuestionLabel,
+          rubricTitle: activeRubricTitle
+        });
+        if (!alignment.ok) {
+          const reason = alignment.issues[0] || "检测到网页题目切换，与当前评分标准不一致";
+          phase("paused", reason, { pageKey: adapter.currentPageKey() });
+          record({
+            type: "pipeline_question_mismatch_stopped",
+            reason,
+            pageQuestion: currentQuestionLabel,
+            rubricTitle: activeRubricTitle
+          });
+          return;
+        }
       }
 
       let answer: ExtractedAnswer | null = null;
@@ -422,7 +455,7 @@ async function runPipeline() {
           });
         }
         await confirmCurrentAnswer(answer);
-        const score = scorePayload(grading, answer);
+        const score = scorePayload(grading, answer, reviewRequired);
 
         phase("writing_score", `正在写入 ${grading.score} 分`, { pageKey: transitionKey });
         commitStage = "write_started";
@@ -706,6 +739,15 @@ async function runPluginDiagnostic(request: PluginDiagnosticRequest): Promise<Pl
       record({ type: "plugin_diagnostic_page_changed", direction, previousPageKey: result.previousPageKey, pageKey: result.pageKey });
       return { action: request.action, message, previousPageKey: result.previousPageKey, pageKey: result.pageKey };
     }
+    case "mark-excellent": {
+      phase("writing_score", "诊断：正在测试调用页面“优”控件");
+      if (!adapter.setExcellentMark) throw new Error(`${adapter.manifest.name} 尚未支持“优”控件操作`);
+      await adapter.setExcellentMark(true);
+      const message = "已成功触发“优”控件勾选，页面处于存疑标记激活状态";
+      phase("ready", message, { pageKey: adapter.currentPageKey() });
+      record({ type: "page_marked_excellent", pageKey: adapter.currentPageKey() });
+      return { action: request.action, message, pageKey: adapter.currentPageKey() };
+    }
   }
 }
 
@@ -753,8 +795,29 @@ async function control(command: PipelineControl) {
       break;
     case "start":
       try {
-        await ipcRenderer.invoke("pipeline:assert-task");
-        await runPipeline();
+        const taskInfo = await ipcRenderer.invoke("pipeline:assert-task") as {
+          templateId: string;
+          templateTitle: string;
+          rubricTitle?: string;
+        };
+        const activeRubricTitle = taskInfo.rubricTitle || taskInfo.templateTitle;
+        const pageLabel = adapter.currentQuestionLabel?.();
+        const alignment = verifyQuestionAlignment({
+          pageQuestionLabel: pageLabel,
+          rubricTitle: activeRubricTitle
+        });
+        if (!alignment.ok) {
+          const reason = alignment.issues[0];
+          phase("failed", reason);
+          record({
+            type: "pipeline_question_mismatch_rejected",
+            reason,
+            pageQuestion: pageLabel,
+            rubricTitle: activeRubricTitle
+          });
+          return;
+        }
+        await runPipeline(activeRubricTitle);
       } catch (error) {
         const reason = readableRemoteError(error, "批改任务启动失败");
         phase("failed", reason);

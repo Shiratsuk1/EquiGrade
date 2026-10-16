@@ -11,6 +11,7 @@ export type PreflightResult = {
   issues: string[];
   capabilities: PluginCapabilities;
   pageKey?: string;
+  questionLabel?: string;
 };
 
 export type ExtractedAnswer = {
@@ -45,6 +46,8 @@ export type ScoreWritePayload = {
   expectedPageKey?: string;
   expectedPageToken?: string;
   expectedImageHash?: string;
+  /** 是否属于存疑卷（若为 true 且站点支持，可在提交前勾选“优”等控件以便回评）。 */
+  requiresReview?: boolean;
 };
 
 export type PageTransition = "changed" | "completed";
@@ -86,6 +89,8 @@ export interface SiteAdapter {
   getCurrentAnswer(): Promise<ExtractedAnswer>;
   setDiagnosticScore(score: number | undefined): Promise<DiagnosticScoreResult>;
   navigateForDiagnostic(direction: DiagnosticPageDirection): Promise<DiagnosticNavigationResult>;
+  /** 尝试勾选/切换卷面“优”控件（若适配器支持）。 */
+  setExcellentMark?(checked?: boolean): Promise<boolean>;
   writeScore(payload: ScoreWritePayload): Promise<void>;
   testScoreWrite(payload: ScoreWritePayload): Promise<PipelineWriteTestResult>;
   submitScore(payload: ScoreWritePayload): Promise<void>;
@@ -94,6 +99,7 @@ export interface SiteAdapter {
   detectPageChange(previousPageKey: string): Promise<PageTransition>;
   isBatchComplete(): boolean;
   currentPageKey(): string | undefined;
+  currentQuestionLabel?(): string | undefined;
 }
 
 export type RuntimeUpdate = Partial<Omit<PluginStatus, "updatedAt">> & {

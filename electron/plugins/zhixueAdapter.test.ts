@@ -170,8 +170,18 @@ function installZhixuePage() {
     "a[title='上一份']": prev,
     "[data-grading-prev]": prev,
     ".auto_choose .el-switch": null,
-    "[data-auto-submit][role='switch']": null
+    "[data-auto-submit][role='switch']": null,
+    "[data-tool='you']": null
   };
+
+  const excellentButton = element({
+    className: "tool-you",
+    textContent: "优",
+    title: "优秀试卷"
+  });
+  selectorMap["[data-tool='you']"] = excellentButton;
+  selectorMap[".tool-you"] = excellentButton;
+  selectorMap["[title='优秀试卷']"] = excellentButton;
 
   documentQuerySelector.mockImplementation((selector: string) => {
     for (const part of selector.split(",").map((s) => s.trim())) {
@@ -219,6 +229,7 @@ function installZhixuePage() {
     next,
     prev,
     progressSpan,
+    excellentButton,
     selectorMap,
     setToast(t: FakeElement | null) {
       activeToast = t;
@@ -255,9 +266,12 @@ describe("智学网页面适配器", () => {
       scoreInput: true,
       submit: true,
       next: true,
-      skip: false
+      skip: false,
+      markExcellent: true
     });
     expect(result.pageKey).toMatch(/^zhixue:/);
+    expect(result.questionLabel).toBe("第 16 题 · 竖直圆轨道综合题");
+    expect(adapter.currentQuestionLabel?.()).toBe("第 16 题 · 竖直圆轨道综合题");
     expect(adapter.manifest).toBe(ZHIXUE_ADAPTER_MANIFEST);
   });
 
@@ -337,6 +351,49 @@ describe("智学网页面适配器", () => {
     expect(page.submit.click).toHaveBeenCalled();
 
     await expect(adapter.verifySubmission(payload)).resolves.toBeUndefined();
+  });
+
+  it("submits review-flagged score by first marking excellent control", async () => {
+    const page = installZhixuePage();
+    const adapter = createZhixueAdapter();
+    const payload: ScoreWritePayload = {
+      score: 18,
+      maxScore: 18,
+      segments: [],
+      requiresReview: true
+    };
+
+    await adapter.writeScore(payload);
+    page.setToast(page.element({ className: "el-message el-message--success", textContent: "保存成功" }));
+
+    await adapter.submitScore(payload);
+    expect(page.excellentButton.click).toHaveBeenCalled();
+    expect(page.submit.click).toHaveBeenCalled();
+  });
+
+  it("submits normal score without unnecessary excellent mark", async () => {
+    const page = installZhixuePage();
+    const adapter = createZhixueAdapter();
+    const payload: ScoreWritePayload = {
+      score: 18,
+      maxScore: 18,
+      segments: [],
+      requiresReview: false
+    };
+
+    await adapter.writeScore(payload);
+    page.setToast(page.element({ className: "el-message el-message--success", textContent: "保存成功" }));
+
+    await adapter.submitScore(payload);
+    expect(page.excellentButton.click).not.toHaveBeenCalled();
+    expect(page.submit.click).toHaveBeenCalled();
+  });
+
+  it("setExcellentMark method can be called directly to toggle control", async () => {
+    const page = installZhixuePage();
+    const adapter = createZhixueAdapter();
+    await adapter.setExcellentMark!(true);
+    expect(page.excellentButton.click).toHaveBeenCalled();
   });
 
   it("goToNext waits for next button to be enabled and clicks it", async () => {

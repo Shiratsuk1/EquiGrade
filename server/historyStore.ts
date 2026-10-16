@@ -595,6 +595,59 @@ function toPublicHistoryRecord(record: StoredHistoryRecord): GradingHistoryRecor
   };
 }
 
+/** 为列表页提供轻量级投影，剥离巨型 OCR 原文/Markdown/思考日志与完整标准快照，提升列表拉取与解析性能 */
+function toSummaryHistoryRecord(record: StoredHistoryRecord): GradingHistoryRecord {
+  const { modelCalls, artifacts, result, ...publicRecord } = record;
+  const minimalSubquestions = (result.subquestions || []).map((sq) => ({
+    id: sq.id,
+    title: sq.title,
+    score: sq.score,
+    maxScore: sq.maxScore,
+    finalAnswerStatus: sq.finalAnswerStatus,
+    finalAnswerConfidence: sq.finalAnswerConfidence,
+    decisions: (sq.decisions || []).map((d) => ({
+      subquestionId: d.subquestionId,
+      pointId: d.pointId,
+      status: d.status,
+      decisionSource: d.decisionSource,
+      confidence: d.confidence,
+      awardedScore: d.awardedScore,
+      maxScore: d.maxScore
+    })),
+    deductions: []
+  }));
+  const minimalEvidenceLines = (result.evidence?.lines || [])
+    .filter((l) => typeof l.confidence === "number" && l.confidence < 0.6)
+    .map((l) => ({ id: l.id, text: "", confidence: l.confidence, status: l.status }));
+
+  return {
+    ...publicRecord,
+    answerImage: publicAsset(record.answerImage),
+    artifacts: artifacts ? artifacts.map((a) => ({ id: a.id, fileName: a.fileName, mimeType: a.mimeType, bytes: a.bytes, category: a.category, url: "" })) : undefined,
+    modelCallCount: modelCalls?.length ?? 0,
+    result: {
+      id: result.id,
+      fileName: normalizeUploadedFileName(result.fileName),
+      studentId: result.studentId,
+      score: result.score,
+      maxScore: result.maxScore,
+      status: result.status,
+      modelName: result.modelName,
+      reviewReasons: result.reviewReasons || [],
+      rubricVersion: result.rubricVersion,
+      metrics: {
+        ruleCoverage: result.metrics?.ruleCoverage ?? 0,
+        evidenceTraceability: result.metrics?.evidenceTraceability ?? 0,
+        autoDecisionRate: result.metrics?.autoDecisionRate ?? 0,
+        ambiguityRate: result.metrics?.ambiguityRate ?? 0,
+        durationMs: result.metrics?.durationMs ?? 0
+      },
+      subquestions: minimalSubquestions as any,
+      evidence: { lines: minimalEvidenceLines as any, finalAnswers: [], ambiguities: [] }
+    }
+  };
+}
+
 export interface HistoryRecordRow {
   record: GradingHistoryRecord;
   templateId: string;
@@ -603,16 +656,16 @@ export interface HistoryRecordRow {
   rubric: Rubric;
 }
 
-function historyRecordRows(database: HistoryDatabase, match?: (record: StoredHistoryRecord) => boolean): HistoryRecordRow[] {
+function historyRecordRows(database: HistoryDatabase, match?: (record: StoredHistoryRecord) => boolean, summaryOnly = false): HistoryRecordRow[] {
   const rows: HistoryRecordRow[] = [];
   for (const template of database.templates) {
     for (const record of template.records) {
       if (match && !match(record)) continue;
       rows.push({
-        record: toPublicHistoryRecord(record),
+        record: summaryOnly ? toSummaryHistoryRecord(record) : toPublicHistoryRecord(record),
         templateId: template.id,
         templateTitle: template.title,
-        rubric: record.rubricSnapshot ?? template.rubric
+        rubric: summaryOnly ? template.rubric : (record.rubricSnapshot ?? template.rubric)
       });
     }
   }
@@ -620,10 +673,14 @@ function historyRecordRows(database: HistoryDatabase, match?: (record: StoredHis
   return rows;
 }
 
-/** 聚合历史记录列表（按批改时间倒序），避免前端逐个模板拉取详情的 N+1 请求。 */
-export async function listGradingRecords(limit = 100): Promise<HistoryRecordRow[]> {
+/** 聚合历史记录列表（按批改时间倒序），避免前端逐个模板拉取详情的 N+1 请求。
+ * 当 limit <= 0 时返回全量记录；指定正数时按该上限截取（最大 10,000）。
+ */
+export async function listGradingRecords(limit = 0, summaryOnly = false): Promise<HistoryRecordRow[]> {
   const database = await readDatabase();
-  return historyRecordRows(database).slice(0, Math.max(1, Math.min(limit, 500)));
+  const rows = historyRecordRows(database, undefined, summaryOnly);
+  if (limit <= 0) return rows;
+  return rows.slice(0, Math.min(limit, 10000));
 }
 
 /** 按记录 id 或结果 id 精确查找一条历史记录。 */

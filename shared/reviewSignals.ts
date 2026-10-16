@@ -1,4 +1,4 @@
-import type { GradingResult } from "./types.js";
+import type { GradingResult, Rubric } from "./types.js";
 
 /** 与前端置信度颜色约定一致：低于此值的证据需要优先查看。 */
 export const LOW_CONFIDENCE_THRESHOLD = 0.6;
@@ -300,5 +300,103 @@ export function summarizeReviewSignals(result: GradingResult): ReviewSignalSumma
     lowConfidenceDecisions,
     totalLowConfidence: lowConfidenceLines + lowConfidenceFinalAnswers + lowConfidenceDecisions,
     reviewReasons: result.reviewReasons.length
+  };
+}
+
+export interface HighRiskDeductionItem {
+  subquestionId: string;
+  subquestionTitle: string;
+  studentAnswer: string;
+  referenceAnswer: string;
+  reason: string;
+  isExtractedMatch: boolean;
+  lostScore: number;
+}
+
+export interface HighRiskAuditSummary {
+  isHighRisk: boolean;
+  hasExtractedMatchRisk: boolean;
+  totalLostScore: number;
+  items: HighRiskDeductionItem[];
+  badgeLabel: string;
+  shortSummary: string;
+}
+
+function normalizeAnswerForMatch(ans: string | undefined): string {
+  if (!ans) return "";
+  return ans
+    .trim()
+    .toUpperCase()
+    .replace(/[\s\$\{\}\\\(\)\[\]（）]/g, "")
+    .replace(/[，,;；、]/g, "");
+}
+
+/**
+ * 重点检测“机器在存疑/未确证学生写错的前提下扣分并已自动提交”的高风险答卷。
+ * 尤其是：学生提取作答与参考答案一致（如都为 A），但因涂改或字迹存疑被判 0 分的小问。
+ */
+export function detectHighRiskDeductions(result: GradingResult, rubric?: Rubric): HighRiskAuditSummary {
+  const items: HighRiskDeductionItem[] = [];
+  let totalLostScore = 0;
+  let hasExtractedMatchRisk = false;
+
+  for (const sq of result.subquestions ?? []) {
+    const lost = Math.max(0, sq.maxScore - sq.score);
+    const isUncertain = sq.finalAnswerStatus === "uncertain"
+      || sq.decisions?.some((d) => d.status === "insufficient_evidence" || d.status === "unreadable");
+
+    if (lost > 0 && isUncertain) {
+      totalLostScore += lost;
+      const studentNorm = normalizeAnswerForMatch(sq.studentFinalAnswer);
+      const refNorm = normalizeAnswerForMatch(sq.referenceFinalAnswer);
+
+      const rubricSq = rubric?.subquestions?.find((rsq) => rsq.id === sq.id);
+      const rubricRefNorms = (rubricSq?.finalAnswers ?? []).map((fa) => normalizeAnswerForMatch(fa.expression));
+
+      const isMatch = Boolean(
+        studentNorm && (
+          (refNorm && studentNorm === refNorm) ||
+          rubricRefNorms.some((rn) => rn && studentNorm === rn)
+        )
+      );
+
+      if (isMatch) {
+        hasExtractedMatchRisk = true;
+      }
+
+      items.push({
+        subquestionId: sq.id,
+        subquestionTitle: sq.title || sq.id,
+        studentAnswer: sq.studentFinalAnswer || "",
+        referenceAnswer: sq.referenceFinalAnswer || rubricSq?.finalAnswers?.map((a) => a.expression).join("/") || "",
+        reason: sq.finalAnswerReason || sq.decisions?.find((d) => d.requiresReview)?.reason || "存疑待核",
+        isExtractedMatch: isMatch,
+        lostScore: lost
+      });
+    }
+  }
+
+  const isHighRisk = items.length > 0;
+  let badgeLabel = "";
+  let shortSummary = "";
+
+  if (hasExtractedMatchRisk) {
+    const matchItems = items.filter((i) => i.isExtractedMatch);
+    const titles = matchItems.map((i) => i.subquestionTitle).join("、");
+    badgeLabel = "🚨 提取命中但存疑 0分";
+    shortSummary = `第${titles}问认出 ${matchItems[0]?.studentAnswer || "正确答案"} 但因存疑判 0 分已提交 · 待核实 ${matchItems.reduce((s, i) => s + i.lostScore, 0)} 分`;
+  } else if (isHighRisk) {
+    const titles = items.map((i) => i.subquestionTitle).join("、");
+    badgeLabel = `⚠️ 存疑已扣分 -${totalLostScore}分`;
+    shortSummary = `第${titles}问因机器存疑扣除 ${totalLostScore} 分已提交 · 待人工核实`;
+  }
+
+  return {
+    isHighRisk,
+    hasExtractedMatchRisk,
+    totalLostScore,
+    items,
+    badgeLabel,
+    shortSummary
   };
 }

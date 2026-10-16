@@ -1,22 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
-  Activity, AlertTriangle, ArrowLeft, ArrowRight, BookOpenCheck, Bot,
-  Camera, Check, ChevronDown, ChevronRight, CirclePause, CirclePlay, ClipboardCheck,
+  Activity, AlertOctagon, AlertTriangle, ArrowLeft, ArrowRight, BookOpenCheck, Bot,
+  Camera, Check, ChevronDown, ChevronLeft, ChevronRight, CirclePause, CirclePlay, ClipboardCheck,
   Code2, FileCheck2, FileClock, FileText, Globe2, History, Home, ImageDown, ImagePlus, KeyRound,
   LayoutDashboard, Link2, ListChecks, LoaderCircle, Lock, Plug, Plus, RefreshCw,
-  RotateCcw, Save, Search, Settings, ShieldCheck, SkipForward,
-  Sparkles, Square, TerminalSquare, Trash2, Unplug, Upload, Wifi, WifiOff, X, XCircle
+  RotateCcw, Save, Search, Settings, ShieldCheck, SkipForward, SlidersHorizontal,
+  Sparkles, Square, Star, TerminalSquare, Trash2, Unplug, Upload, Wifi, WifiOff, X, XCircle
 } from "lucide-react";
 import type {
   BrowserAction, EmbeddedBrowserState, ElectronHostBridge, PipelineControl,
   ModelConnectionTestResult, ModelSetupStatus, PipelineDryRunResult,
-  PipelineEvent, PipelineScoreAlignment, PluginDiagnosticAction, PluginDiagnosticResult,
+  PipelineEvent, PipelineQuestionAlignment, PipelineScoreAlignment, PluginDiagnosticAction, PluginDiagnosticResult,
   PluginAccent, PluginPhase, PluginPosition, PluginUiPreferences, TargetPageInspection,
   UiFontFamily, UiMonoFontFamily
 } from "../shared/electron";
 import type { MotionIntensity, WindowMaterial } from "../shared/electron";
 import { EMPTY_PLUGIN_STATUS } from "../shared/electron";
-import { buildPipelineScoreAlignment } from "../shared/pipelineSetup";
+import { buildPipelineScoreAlignment, verifyQuestionAlignment } from "../shared/pipelineSetup";
 import { pluginFontStacks, pluginMonoFontStacks } from "../shared/uiConstants";
 import {
   DEFAULT_MODEL_TIMEOUT_MS, DEFAULT_QUESTION_TYPE, DEFAULT_RESPONSES_AGENT_MAX_OUTPUT_TOKENS,
@@ -29,7 +29,7 @@ import type {
 } from "../shared/types";
 import { api, uploadDocument } from "./api";
 import { cleanPipelineError, pipelineEventLabel, pipelineEventTone } from "../shared/pipelineEvents";
-import { summarizeReviewSignals } from "../shared/reviewSignals";
+import { detectHighRiskDeductions, summarizeReviewSignals } from "../shared/reviewSignals";
 import { GradingArtifactList, GradingArtifactPreview, ResultDetail } from "./App";
 import { LogDetailsSummary, ModelCallDetails, ModelCallHistory, logScopeLabel, logStatusLabel } from "./logPresentation";
 import { MathText } from "./Formula";
@@ -270,6 +270,7 @@ const defaultModelConfig: ModelConfigInput = {
   largeQuestionWorkflow: "staged",
   stagedLayoutEngine: "paddleocr",
   responsesAgent: defaultResponsesAgentConfig,
+  smallQuestionBlindReviewEnabled: true,
   teacherReasoningEffort: DEFAULT_TEACHER_REASONING_EFFORT,
   reviewReasoningEffort: DEFAULT_REVIEW_REASONING_EFFORT,
   supportsJsonSchema: true,
@@ -415,15 +416,16 @@ function useElectronState() {
   return { browser, summary };
 }
 
-function NavLink({ route, current, icon, label }: { route: DesktopRoute; current: DesktopRoute; icon: React.ReactNode; label: string }) {
+function NavLink({ route, current, icon, label, badge }: { route: DesktopRoute; current: DesktopRoute; icon: React.ReactNode; label: string; badge?: React.ReactNode }) {
   const sectionActive = (route.id === "templates" && current.id === "template") || (route.id === "history" && current.id === "record");
   const active = sectionActive || (route.id === current.id && (!route.parameter || route.parameter === current.parameter));
   return <a className={active ? "desktop-nav-link active" : "desktop-nav-link"} href={navigatePath(route)} aria-current={active ? "page" : undefined}>
-    {icon}<span>{label}</span>{active && <i />}
+    {icon}<span>{label}</span>{badge}{active && <i />}
   </a>;
 }
 
 function DesktopSidebar({ route, browser }: { route: DesktopRoute; browser: EmbeddedBrowserState }) {
+  const isPipelineActive = Boolean(browser.plugin.connected && ["extracting", "grading", "writing_score", "submitting", "verifying", "navigating_next", "preflight"].includes(browser.plugin.phase));
   return <aside className="desktop-sidebar">
     <a className="desktop-brand" href="/?electron=1">
       <span className="desktop-brand-icon"><ShieldCheck size={19} /></span>
@@ -436,7 +438,17 @@ function DesktopSidebar({ route, browser }: { route: DesktopRoute; browser: Embe
       <NavLink route={{ id: "job", parameter: "current" }} current={route} icon={<CirclePlay size={17} />} label="当前批改" />
       <span className="desktop-nav-group">资料与记录</span>
       <NavLink route={{ id: "templates" }} current={route} icon={<BookOpenCheck size={17} />} label="评分标准" />
-      <NavLink route={{ id: "history" }} current={route} icon={<History size={17} />} label="批改记录" />
+      <NavLink
+        route={{ id: "history" }}
+        current={route}
+        icon={<History size={17} />}
+        label="批改记录"
+        badge={isPipelineActive ? (
+          <span className="desktop-nav-badge-live" title="流水线批改中 · 记录实时同步">
+            <span className="desktop-live-dot online pulse" />
+          </span>
+        ) : undefined}
+      />
       <span className="desktop-nav-group">开发工具</span>
       <NavLink route={{ id: "logs" }} current={route} icon={<FileClock size={17} />} label="运行日志" />
       <NavLink route={{ id: "models" }} current={route} icon={<Bot size={17} />} label="教师模型" />
@@ -507,6 +519,14 @@ function useTemplateContext() {
     if (!inspection.scoreFields.length) throw new Error("当前阅卷页面没有可用于匹配的最终总分框");
     const alignment = buildPipelineScoreAlignment(detail.rubric, inspection.scoreFields);
     if (!alignment.ok) throw new Error(alignment.issues.join("；") || "网页总分与评分标准不匹配");
+    const questionAlignment = verifyQuestionAlignment({
+      pageQuestionLabel: inspection.questionLabel,
+      pageTitle: inspection.pageTitle,
+      rubricTitle: detail.rubric.title || detail.title
+    });
+    if (!questionAlignment.ok) {
+      throw new Error(questionAlignment.issues.join("；"));
+    }
     const context = await host.selectPipelineTask({
       mode: "production",
       templateId: detail.id,
@@ -681,10 +701,31 @@ function BrowserToolbar({ browser, compact = false }: { browser: EmbeddedBrowser
   </div>;
 }
 
-function PipelineControls({ browser, confirmBeforeStart }: { browser: EmbeddedBrowserState; confirmBeforeStart: boolean }) {
+function PipelineControls({
+  browser,
+  confirmBeforeStart,
+  template
+}: {
+  browser: EmbeddedBrowserState;
+  confirmBeforeStart: boolean;
+  template?: TemplateContext | null;
+}) {
   const [pending, setPending] = useState<PipelineControl | null>(null);
   const [error, setError] = useState("");
+  const questionAlignment = useMemo(() => {
+    if (!template) return null;
+    return verifyQuestionAlignment({
+      pageQuestionLabel: browser.plugin.questionLabel,
+      pageTitle: browser.title,
+      rubricTitle: template.rubric?.title || template.title
+    });
+  }, [template, browser.plugin.questionLabel, browser.title]);
+
   const send = async (control: PipelineControl) => {
+    if (control === "start" && questionAlignment && !questionAlignment.ok) {
+      setError(questionAlignment.issues[0] || "题目不一致");
+      return;
+    }
     if (control === "start" && confirmBeforeStart && !window.confirm("开始批改会向当前阅卷网站写入并提交真实分数，确定继续吗？")) return;
     setPending(control); setError("");
     try {
@@ -697,10 +738,12 @@ function PipelineControls({ browser, confirmBeforeStart }: { browser: EmbeddedBr
     finally { window.setTimeout(() => setPending(null), 280); }
   };
   const active = ["extracting", "grading", "writing_score", "submitting", "verifying", "navigating_next", "preflight"].includes(browser.plugin.phase);
-  const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities) && browser.plugin.phase === "ready";
+  const questionMismatch = Boolean(questionAlignment && !questionAlignment.ok);
+  const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities) && browser.plugin.phase === "ready" && !questionMismatch;
+  const statusMessage = error || (questionMismatch ? questionAlignment!.issues[0] : browser.plugin.message);
   return <div className="desktop-pipeline-controls">
-    <div><span className={active ? "desktop-live-dot online pulse" : "desktop-live-dot"} /><div><strong>{error ? "启动失败" : phaseLabel(browser.plugin.phase)}</strong><small>{error || browser.plugin.message}</small></div></div>
-    <button className="primary" disabled={active || pending !== null || !pageReady} onClick={() => void send("start")}>{pending === "start" ? <LoaderCircle className="spin" size={15} /> : <CirclePlay size={15} />}开始批改</button>
+    <div><span className={active ? "desktop-live-dot online pulse" : questionMismatch ? "desktop-live-dot offline" : "desktop-live-dot"} /><div><strong>{error ? "启动失败" : questionMismatch ? "题目不匹配" : phaseLabel(browser.plugin.phase)}</strong><small title={statusMessage}>{statusMessage}</small></div></div>
+    <button className="primary" disabled={active || pending !== null || !pageReady} title={questionMismatch ? questionAlignment!.issues[0] : undefined} onClick={() => void send("start")}>{pending === "start" ? <LoaderCircle className="spin" size={15} /> : <CirclePlay size={15} />}开始批改</button>
     <button title="暂停流水线" disabled={!active || pending !== null} onClick={() => void send("pause")}><CirclePause size={16} /></button>
     <button title="停止流水线" disabled={!active || pending !== null} onClick={() => void send("stop")}><Square size={15} /></button>
     <button title={browser.plugin.capabilities.skip ? "记录异常并跳过当前答卷" : "当前页面不支持跳过（批完当前份前无法进入下一份）"} disabled={pending !== null || !browser.plugin.capabilities.skip} onClick={() => void send("skip")}><SkipForward size={16} /></button>
@@ -773,8 +816,26 @@ function TemplateInspector({ template }: { template: TemplateContext | null }) {
 }
 
 function ActiveJobPage({ browser, summary, template, preferences }: { browser: EmbeddedBrowserState; summary: PipelineSummary; template: TemplateContext | null; preferences: DesktopPreferences }) {
+  const questionAlignment = useMemo(() => {
+    if (!template) return null;
+    return verifyQuestionAlignment({
+      pageQuestionLabel: browser.plugin.questionLabel,
+      pageTitle: browser.title,
+      rubricTitle: template.rubric?.title || template.title
+    });
+  }, [template, browser.plugin.questionLabel, browser.title]);
+
   return <div className="desktop-job-page">
-    <PipelineControls browser={browser} confirmBeforeStart={preferences.confirmBeforeStart} />
+    <PipelineControls browser={browser} confirmBeforeStart={preferences.confirmBeforeStart} template={template} />
+    {questionAlignment && !questionAlignment.ok && (
+      <div className="desktop-callout desktop-question-mismatch-callout" role="alert">
+        <AlertTriangle size={18} />
+        <div>
+          <strong>防串题保护拦截：网页题目与当前评分标准不一致</strong>
+          <p>{questionAlignment.issues[0]}</p>
+        </div>
+      </div>
+    )}
     <PipelineStageRail phase={browser.plugin.phase} />
     {preferences.showLiveMessages && <PipelineMessageFeed browser={browser} events={summary.events} />}
     <div className="desktop-workbench">
@@ -898,7 +959,14 @@ function GuidedSetupPage({ browser }: { browser: EmbeddedBrowserState }) {
   const alignment = useMemo<PipelineScoreAlignment | null>(() => (
     template && inspection ? buildPipelineScoreAlignment(template.rubric, inspection.scoreFields) : null
   ), [inspection, template]);
-  const alignmentReady = Boolean(targetReady && alignment?.ok);
+  const questionAlignment = useMemo<PipelineQuestionAlignment | null>(() => (
+    template && inspection ? verifyQuestionAlignment({
+      pageQuestionLabel: inspection.questionLabel,
+      pageTitle: inspection.pageTitle,
+      rubricTitle: template.rubric.title || template.title
+    }) : null
+  ), [inspection, template]);
+  const alignmentReady = Boolean(targetReady && alignment?.ok && (!questionAlignment || questionAlignment.ok));
   const dryRunReady = Boolean(dryRun
     && dryRun.maxScore === template?.rubric.totalScore
     && (!verifyWrite || dryRun.writeTest?.rolledBack));
@@ -984,7 +1052,8 @@ function GuidedSetupPage({ browser }: { browser: EmbeddedBrowserState }) {
       <div className="desktop-guide-heading"><span>步骤 4</span><h2>核对网页总分与模板</h2><p>网页接收总分框中的最终分数；睿芽云多评页面会按小问顺序写入，小问逐点评审保留在批改历史与运行日志中。</p></div>
       {alignment && <div className="desktop-table-wrap"><table className="desktop-table desktop-guide-alignment"><thead><tr><th>网页输入</th><th>网页满分</th><th>本地匹配项</th><th>模板满分</th><th>状态</th></tr></thead><tbody>{alignment.rows.map((row) => <tr key={row.targetId}><td>{row.targetLabel}<small>{row.targetId}</small></td><td>{row.targetMaxScore ?? "--"}</td><td>{row.sourceLabel || "未匹配"}<small>{row.sourceId || "--"}</small></td><td>{row.sourceMaxScore ?? "--"}</td><td><GuideCheck ok={row.matched}>{row.matched ? "匹配" : "不一致"}</GuideCheck></td></tr>)}</tbody></table></div>}
       {alignment?.issues.map((issue) => <p className="desktop-guide-warning" key={issue}><AlertTriangle size={14} />{issue}</p>)}
-      {alignment?.ok && <div className="desktop-guide-success"><ShieldCheck size={17} /><div><strong>总分栏匹配</strong><span>网页只写入各小问最终总分；不会填写过程评分框。</span></div></div>}
+      {questionAlignment?.issues.map((issue) => <p className="desktop-guide-warning" key={issue}><AlertTriangle size={14} />{issue}</p>)}
+      {alignment?.ok && (!questionAlignment || questionAlignment.ok) && <div className="desktop-guide-success"><ShieldCheck size={17} /><div><strong>分值与题目匹配通过</strong><span>网页只写入各小问最终总分；题目与评分标准一致。</span></div></div>}
     </>;
   } else if (step === 4) {
     content = <>
@@ -1288,6 +1357,7 @@ function ManualTemplateGrade({ templateId }: { templateId: string }) {
       form.append("image", file, file.name);
       if (studentId.trim()) form.append("studentId", studentId.trim());
       const result = await api<GradingResult>(`/api/templates/${encodeURIComponent(templateId)}/grade`, { method: "POST", body: form });
+      window.dispatchEvent(new CustomEvent("hengzhun:history-updated", { detail: { recordId: result.id } }));
       pushRoute(`/history/${encodeURIComponent(result.id)}?electron=1`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "试卷评分失败");
@@ -1380,35 +1450,241 @@ function TemplateDetailPage({ templateId }: { templateId?: string }) {
   </div>;
 }
 
-function HistoryPage() {
+type HistorySortOption = "time_desc" | "time_asc" | "score_desc" | "score_asc";
+type HistoryStatusOption = "all" | "high_risk" | "needs_review" | "completed" | "failed";
+type HistoryScorePreset = "all" | "full" | "zero" | "partial" | "custom";
+type HistoryTimeOption = "all" | "today" | "24h" | "3d" | "7d";
+
+function HistoryPage({ browser }: { browser?: EmbeddedBrowserState }) {
   const [rows, setRows] = useState<Array<{ record: GradingHistoryRecord; templateId: string; templateTitle: string }>>([]);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
+  const [newlyAddedIds, setNewlyAddedIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
-  const reload = useCallback(async () => {
-    setLoading(true);
+
+  // 高级定向筛选与排序状态
+  const [showFilters, setShowFilters] = useState(false);
+  const [templateFilter, setTemplateFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState<HistoryStatusOption>("all");
+  const [scorePreset, setScorePreset] = useState<HistoryScorePreset>("all");
+  const [customMinScore, setCustomMinScore] = useState("");
+  const [customMaxScore, setCustomMaxScore] = useState("");
+  const [timeFilter, setTimeFilter] = useState<HistoryTimeOption>("all");
+  const [sortOption, setSortOption] = useState<HistorySortOption>("time_desc");
+
+  // 分页状态与防抖节流
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const lastFocusReloadRef = useRef(0);
+
+  const isMountedRef = useRef(true);
+  const clearingTimersRef = useRef<number[]>([]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      clearingTimersRef.current.forEach((t) => window.clearTimeout(t));
+    };
+  }, []);
+
+  const reload = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
     try {
-      const { records } = await api<{ records: Array<{ record: GradingHistoryRecord; templateId: string; templateTitle: string }> }>("/api/history-records?limit=200");
+      // 传入 limit=0 解除后端默认截断，拉取全量批改记录
+      const { records } = await api<{ records: Array<{ record: GradingHistoryRecord; templateId: string; templateTitle: string }> }>("/api/history-records?limit=0");
+      if (!isMountedRef.current) return;
       const nextRows = records.map((row) => ({ record: row.record, templateId: row.templateId, templateTitle: row.templateTitle }));
-      setRows(nextRows);
+      setRows((currentRows) => {
+        if (quiet && currentRows.length > 0) {
+          const currentIdSet = new Set(currentRows.map((r) => r.record.id));
+          const freshIds = nextRows.map((r) => r.record.id).filter((id) => !currentIdSet.has(id));
+          if (freshIds.length > 0) {
+            setNewlyAddedIds((prev) => new Set([...prev, ...freshIds]));
+            const timer = window.setTimeout(() => {
+              if (isMountedRef.current) {
+                setNewlyAddedIds((prev) => {
+                  const next = new Set(prev);
+                  freshIds.forEach((id) => next.delete(id));
+                  return next;
+                });
+              }
+            }, 3500);
+            clearingTimersRef.current.push(timer);
+          }
+        }
+        return nextRows;
+      });
       setSelectedIds((current) => new Set([...current].filter((id) => nextRows.some((row) => row.record.id === id))));
       setError("");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "批改记录读取失败"); }
-    finally { setLoading(false); }
+    } catch (reason) {
+      if (!isMountedRef.current) return;
+      if (!quiet) {
+        setError(reason instanceof Error ? reason.message : "批改记录读取失败");
+      }
+    } finally {
+      if (isMountedRef.current && !quiet) {
+        setLoading(false);
+      }
+    }
   }, []);
-  useEffect(() => { void reload(); }, [reload]);
-  const filtered = useMemo(() => rows.filter((row) => `${row.record.result.fileName} ${row.record.result.studentId} ${row.templateTitle}`.toLowerCase().includes(query.trim().toLowerCase())), [query, rows]);
+
+  useEffect(() => { void reload(false); }, [reload]);
+
+  useEffect(() => {
+    const host = getHost();
+    const removePipeline = host?.onPipelineEvent ? host.onPipelineEvent((event) => {
+      if (event.type === "page_completed" || event.type === "page_review_flagged") {
+        void reload(true);
+      }
+    }) : undefined;
+    const handleHistoryUpdated = () => { void reload(true); };
+    const handleWindowFocus = () => {
+      const now = Date.now();
+      if (now - lastFocusReloadRef.current >= 15000) {
+        lastFocusReloadRef.current = now;
+        void reload(true);
+      }
+    };
+    window.addEventListener("hengzhun:history-updated", handleHistoryUpdated);
+    window.addEventListener("focus", handleWindowFocus);
+    return () => {
+      removePipeline?.();
+      window.removeEventListener("hengzhun:history-updated", handleHistoryUpdated);
+      window.removeEventListener("focus", handleWindowFocus);
+    };
+  }, [reload]);
+
+  const isPipelineActive = Boolean(browser?.plugin?.connected && ["extracting", "grading", "writing_score", "submitting", "verifying", "navigating_next", "preflight"].includes(browser.plugin.phase));
+  useEffect(() => {
+    if (!isPipelineActive) return;
+    const interval = window.setInterval(() => { void reload(true); }, 3000);
+    return () => window.clearInterval(interval);
+  }, [isPipelineActive, reload]);
+
+  // 动态收集历史数据中出现过的所有评分标准
+  const templateOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const row of rows) {
+      if (row.templateId && !map.has(row.templateId)) {
+        map.set(row.templateId, row.templateTitle || row.templateId);
+      }
+    }
+    return Array.from(map.entries());
+  }, [rows]);
+
+  const hasActiveFilters = useMemo(() => {
+    return templateFilter !== "all"
+      || statusFilter !== "all"
+      || scorePreset !== "all"
+      || customMinScore.trim() !== ""
+      || customMaxScore.trim() !== ""
+      || timeFilter !== "all"
+      || sortOption !== "time_desc";
+  }, [templateFilter, statusFilter, scorePreset, customMinScore, customMaxScore, timeFilter, sortOption]);
+
+  const resetFilters = useCallback(() => {
+    setTemplateFilter("all");
+    setStatusFilter("all");
+    setScorePreset("all");
+    setCustomMinScore("");
+    setCustomMaxScore("");
+    setTimeFilter("all");
+    setSortOption("time_desc");
+  }, []);
+
+  // 复合定向筛选与排序
+  const filtered = useMemo(() => {
+    const now = Date.now();
+    const q = query.trim().toLowerCase();
+    const minS = customMinScore.trim() !== "" ? Number(customMinScore) : null;
+    const maxS = customMaxScore.trim() !== "" ? Number(customMaxScore) : null;
+
+    let result = rows.filter((row) => {
+      // 1. 关键字搜索
+      if (q) {
+        const text = `${row.record.result.fileName} ${row.record.result.studentId} ${row.templateTitle}`.toLowerCase();
+        if (!text.includes(q)) return false;
+      }
+      // 2. 评分标准
+      if (templateFilter !== "all" && row.templateId !== templateFilter) {
+        return false;
+      }
+      // 3. 状态
+      if (statusFilter !== "all") {
+        if (statusFilter === "high_risk" && !detectHighRiskDeductions(row.record.result, row.record.rubricSnapshot).isHighRisk) return false;
+        if (statusFilter === "needs_review" && row.record.result.status !== "needs_review") return false;
+        if (statusFilter === "completed" && row.record.result.status !== "completed") return false;
+        if (statusFilter === "failed" && row.record.result.status !== "failed") return false;
+      }
+      // 4. 得分区间
+      const score = row.record.result.score;
+      const maxScore = row.record.result.maxScore;
+      if (scorePreset === "full" && score !== maxScore) return false;
+      if (scorePreset === "zero" && score !== 0) return false;
+      if (scorePreset === "partial" && (score <= 0 || score >= maxScore)) return false;
+      if (minS !== null && !Number.isNaN(minS) && score < minS) return false;
+      if (maxS !== null && !Number.isNaN(maxS) && score > maxS) return false;
+      // 5. 时间范围
+      if (timeFilter !== "all") {
+        const itemTime = new Date(row.record.createdAt).getTime();
+        const diffMs = now - itemTime;
+        if (timeFilter === "today") {
+          const itemDay = new Date(row.record.createdAt).setHours(0, 0, 0, 0);
+          const today = new Date().setHours(0, 0, 0, 0);
+          if (itemDay !== today) return false;
+        } else if (timeFilter === "24h" && diffMs > 24 * 3600 * 1000) {
+          return false;
+        } else if (timeFilter === "3d" && diffMs > 3 * 24 * 3600 * 1000) {
+          return false;
+        } else if (timeFilter === "7d" && diffMs > 7 * 24 * 3600 * 1000) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    // 6. 排序
+    return [...result].sort((a, b) => {
+      if (sortOption === "time_asc") return a.record.createdAt.localeCompare(b.record.createdAt);
+      if (sortOption === "score_desc") return b.record.result.score - a.record.result.score;
+      if (sortOption === "score_asc") return a.record.result.score - b.record.result.score;
+      return b.record.createdAt.localeCompare(a.record.createdAt);
+    });
+  }, [rows, query, templateFilter, statusFilter, scorePreset, customMinScore, customMaxScore, timeFilter, sortOption]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [query, templateFilter, statusFilter, scorePreset, customMinScore, customMaxScore, timeFilter, sortOption]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const startIndex = (currentPage - 1) * pageSize;
+  const paginatedRows = filtered.slice(startIndex, startIndex + pageSize);
+
   const reviewCount = rows.filter((row) => row.record.result.status !== "completed").length;
+  const highRiskRows = useMemo(() => rows.filter((row) => detectHighRiskDeductions(row.record.result, row.record.rubricSnapshot).isHighRisk), [rows]);
+  const highRiskCount = highRiskRows.length;
+  const criticalMatchCount = useMemo(() => highRiskRows.filter((row) => detectHighRiskDeductions(row.record.result, row.record.rubricSnapshot).hasExtractedMatchRisk).length, [highRiskRows]);
   const filteredIds = filtered.map((row) => row.record.id);
+  const pageIds = paginatedRows.map((row) => row.record.id);
   const allFilteredSelected = filteredIds.length > 0 && filteredIds.every((id) => selectedIds.has(id));
+  const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
+
   const toggleRecord = (id: string) => setSelectedIds((current) => {
     const next = new Set(current);
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
-  const toggleFiltered = () => setSelectedIds((current) => {
+  const togglePageSelection = () => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (allPageSelected) pageIds.forEach((id) => next.delete(id));
+    else pageIds.forEach((id) => next.add(id));
+    return next;
+  });
+  const toggleAllFiltered = () => setSelectedIds((current) => {
     const next = new Set(current);
     if (allFilteredSelected) filteredIds.forEach((id) => next.delete(id));
     else filteredIds.forEach((id) => next.add(id));
@@ -1426,26 +1702,507 @@ function HistoryPage() {
         body: JSON.stringify({ ids: [...selectedIds] })
       });
       setSelectedIds(new Set());
-      await reload();
+      window.dispatchEvent(new CustomEvent("hengzhun:history-updated"));
+      await reload(false);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "批改记录删除失败");
     } finally {
       setDeleting(false);
     }
   };
+
   if (error) return <div className="desktop-page-body"><div className="desktop-error-state"><AlertTriangle size={18} />{error}</div></div>;
+
   return <div className="desktop-page-body desktop-history-page">
-    <section className="desktop-history-overview"><div><span>全部答卷</span><strong>{rows.length}</strong></div><div><span>已完成</span><strong>{rows.length - reviewCount}</strong></div><div className={reviewCount ? "warning" : ""}><span>待复核</span><strong>{reviewCount}</strong></div><div><span>评分标准</span><strong>{new Set(rows.map((row) => row.templateId)).size}</strong></div></section>
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>学生答卷</span><h2>逐份批改记录</h2></div><span className="desktop-status-label"><FileClock size={13} />自动保存</span></div>
-      <div className="desktop-history-toolbar"><label><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索答卷、学生编号或评分标准" /></label><span>{filtered.length} 条记录</span></div>
-      <div className="desktop-bulk-toolbar"><label><input type="checkbox" checked={allFilteredSelected} disabled={!filtered.length || deleting} onChange={toggleFiltered} /><span>全选当前结果</span></label><span>已选择 {selectedIds.size} 条</span><button className="desktop-danger-action" disabled={!selectedIds.size || deleting} onClick={() => void removeSelected()}>{deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deleting ? "正在删除" : "删除所选"}</button></div>
-      <div className="desktop-table-wrap"><table className="desktop-table desktop-history-table"><thead><tr><th className="desktop-selection-cell"><span className="desktop-visually-hidden">选择</span></th><th>答卷</th><th>评分标准</th><th>得分</th><th>状态</th><th>模型</th><th>批改时间</th><th /></tr></thead><tbody>
-        {filtered.map(({ record, templateTitle }) => {
-          const reviewSignals = summarizeReviewSignals(record.result);
-          return <tr className={selectedIds.has(record.id) ? "selected" : ""} key={record.id}><td className="desktop-selection-cell"><input type="checkbox" aria-label={`选择批改记录 ${record.result.fileName}`} checked={selectedIds.has(record.id)} disabled={deleting} onChange={() => toggleRecord(record.id)} /></td><td><strong>{record.result.fileName}</strong><small>{record.result.studentId || record.id}</small>{record.artifacts && <small>{record.artifacts.length} 个批改产物</small>}</td><td><span style={sharedElementStyle(sharedElementName("prism-record-template", record.id))}>{templateTitle}</span></td><td><b className="desktop-history-score" style={sharedElementStyle(sharedElementName("prism-record-score", record.id))}>{record.result.score} / {record.result.maxScore}</b></td><td><div className="desktop-history-status"><span className={`desktop-status-label ${record.result.status === "completed" ? "locked" : "warning"}`}>{record.result.status === "completed" ? <Check size={12} /> : <AlertTriangle size={12} />}{record.result.status === "completed" ? "已完成" : record.result.status === "needs_review" ? "待复核" : "失败"}</span>{record.result.status === "needs_review" && <small>低置信 {reviewSignals.totalLowConfidence} 项 · {reviewSignals.reviewReasons} 个原因</small>}</div></td><td>{record.result.modelName}<small>{record.modelCallCount} 次调用</small></td><td>{new Date(record.createdAt).toLocaleString("zh-CN", { hour12: false })}</td><td><div className="desktop-history-actions"><a className="desktop-history-open" title="打开批改记录，在详情中进行重新批改或 OCR 回放" aria-label={`打开批改记录 ${record.result.fileName}`} href={`/history/${encodeURIComponent(record.id)}?electron=1`}><ChevronRight size={16} /></a></div></td></tr>;
-        })}
-        {!filtered.length && <tr><td colSpan={8} className="desktop-empty-cell">{loading ? "正在读取批改记录" : query ? "没有符合条件的批改记录" : "暂无批改记录"}</td></tr>}
-      </tbody></table></div>
+    {/* 概览卡片：支持点击快捷筛选联动 */}
+    <section className={`desktop-history-overview ${highRiskCount > 0 ? "has-high-risk" : ""}`}>
+      <div
+        className={`interactive ${!hasActiveFilters && !query ? "active" : ""}`}
+        title="点击查看全部答卷"
+        onClick={() => { resetFilters(); setQuery(""); }}
+      >
+        <span>全部答卷</span>
+        <strong>{rows.length}</strong>
+      </div>
+      <div
+        className={`interactive ${statusFilter === "completed" ? "active" : ""}`}
+        title="点击筛选已完成答卷"
+        onClick={() => setStatusFilter((current) => current === "completed" ? "all" : "completed")}
+      >
+        <span>已完成</span>
+        <strong>{rows.length - reviewCount}</strong>
+      </div>
+      <div
+        className={`interactive ${reviewCount ? "warning" : ""} ${statusFilter === "needs_review" ? "active" : ""}`}
+        title="点击筛选待复核答卷"
+        onClick={() => setStatusFilter((current) => current === "needs_review" ? "all" : "needs_review")}
+      >
+        <span>待复核</span>
+        <strong>{reviewCount}</strong>
+      </div>
+      {highRiskCount > 0 && (
+        <div
+          className={`interactive danger ${statusFilter === "high_risk" ? "active" : ""}`}
+          title="点击筛选因机器存疑已扣分的高风险已提交答卷（需优先核对是否误扣）"
+          onClick={() => setStatusFilter((current) => current === "high_risk" ? "all" : "high_risk")}
+        >
+          <span>⚠️ 存疑已扣分</span>
+          <strong>{highRiskCount}{criticalMatchCount > 0 ? <small style={{ fontSize: 11, marginLeft: 4, color: "#dc2626" }}>({criticalMatchCount}疑似误扣)</small> : ""}</strong>
+        </div>
+      )}
+      <div>
+        <span>评分标准</span>
+        <strong>{templateOptions.length}</strong>
+      </div>
+    </section>
+
+    <section className="desktop-section">
+      <div className="desktop-section-heading">
+        <div><span>学生答卷</span><h2>逐份批改记录</h2></div>
+        <div className="desktop-history-heading-status">
+          {isPipelineActive && (
+            <span className="desktop-status-label active" title="全自动流水线正在执行，答卷提交后将立即自动更新此列表">
+              <span className="desktop-live-dot online pulse" />
+              流水线批改中 · 实时监听
+            </span>
+          )}
+          <span className="desktop-status-label"><FileClock size={13} />自动保存</span>
+        </div>
+      </div>
+
+      {/* 工具栏 */}
+      <div className="desktop-history-toolbar">
+        <label className="desktop-history-search-input">
+          <Search size={15} />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索答卷、学生编号或评分标准"
+          />
+          {query && (
+            <button
+              type="button"
+              className="desktop-input-clear"
+              title="清空搜索词"
+              onClick={() => setQuery("")}
+            >
+              <X size={12} />
+            </button>
+          )}
+        </label>
+
+        {/* 存疑已扣分高风险胶囊 */}
+        {highRiskCount > 0 && (
+          <button
+            type="button"
+            className={`desktop-filter-quick-pill high-risk ${statusFilter === "high_risk" ? "active" : ""}`}
+            onClick={() => setStatusFilter((current) => current === "high_risk" ? "all" : "high_risk")}
+            title="一键筛选因机器存疑已扣分的高风险答卷（包含提取命中但判0分）"
+          >
+            <AlertOctagon size={13} />
+            <span>存疑已扣分</span>
+            <span className="desktop-filter-pill-count danger">{highRiskCount}</span>
+          </button>
+        )}
+
+        {/* 仅看待复核快捷胶囊 */}
+        <button
+          type="button"
+          className={`desktop-filter-quick-pill ${statusFilter === "needs_review" ? "active" : ""}`}
+          onClick={() => setStatusFilter((current) => current === "needs_review" ? "all" : "needs_review")}
+          title="一键筛选待复核答卷"
+        >
+          <AlertTriangle size={13} />
+          <span>仅看待复核</span>
+          {reviewCount > 0 && <span className="desktop-filter-pill-count">{reviewCount}</span>}
+        </button>
+
+        {/* 高级筛选展开按钮 */}
+        <button
+          type="button"
+          className={`desktop-filter-toggle-btn ${showFilters || hasActiveFilters ? "active" : ""}`}
+          onClick={() => setShowFilters((value) => !value)}
+          title="展开或折叠高级筛选面板"
+        >
+          <SlidersHorizontal size={14} />
+          <span>高级筛选</span>
+          {hasActiveFilters && <span className="desktop-filter-active-dot" />}
+          <ChevronDown size={13} className={showFilters ? "rotate-180" : ""} />
+        </button>
+
+        <span className="desktop-history-count-meta">
+          {filtered.length === rows.length ? `共 ${rows.length} 条记录` : `已筛选 ${filtered.length} / ${rows.length} 条`}
+        </span>
+      </div>
+
+      {/* 高级筛选展开面板 */}
+      {showFilters && (
+        <div className="desktop-filter-panel">
+          <div className="desktop-filter-grid">
+            <div className="desktop-filter-item">
+              <label>评分标准</label>
+              <select value={templateFilter} onChange={(e) => setTemplateFilter(e.target.value)}>
+                <option value="all">全部评分标准 ({templateOptions.length})</option>
+                {templateOptions.map(([id, title]) => (
+                  <option key={id} value={id}>{title}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="desktop-filter-item">
+              <label>批改状态</label>
+              <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as HistoryStatusOption)}>
+                <option value="all">全部状态</option>
+                <option value="high_risk">⚠️ 存疑已扣分 (高风险)</option>
+                <option value="needs_review">待复核 (needs_review)</option>
+                <option value="completed">已完成 (completed)</option>
+                <option value="failed">批改失败 (failed)</option>
+              </select>
+            </div>
+
+            <div className="desktop-filter-item">
+              <label>得分筛选</label>
+              <div className="desktop-filter-score-inputs">
+                <select
+                  value={scorePreset}
+                  onChange={(e) => {
+                    const next = e.target.value as HistoryScorePreset;
+                    setScorePreset(next);
+                    if (next !== "custom") {
+                      setCustomMinScore("");
+                      setCustomMaxScore("");
+                    }
+                  }}
+                >
+                  <option value="all">全部得分</option>
+                  <option value="full">满分答卷</option>
+                  <option value="zero">零分答卷</option>
+                  <option value="partial">扣分答卷</option>
+                  <option value="custom">自定义区间</option>
+                </select>
+                {(scorePreset === "custom" || customMinScore || customMaxScore) && (
+                  <div className="desktop-filter-range-fields">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      placeholder="最低"
+                      value={customMinScore}
+                      onChange={(e) => { setCustomMinScore(e.target.value); setScorePreset("custom"); }}
+                    />
+                    <span>~</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      placeholder="最高"
+                      value={customMaxScore}
+                      onChange={(e) => { setCustomMaxScore(e.target.value); setScorePreset("custom"); }}
+                    />
+                    <span>分</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="desktop-filter-item">
+              <label>批改时间</label>
+              <select value={timeFilter} onChange={(e) => setTimeFilter(e.target.value as HistoryTimeOption)}>
+                <option value="all">全部时间</option>
+                <option value="today">今天</option>
+                <option value="24h">过去 24 小时</option>
+                <option value="3d">过去 3 天</option>
+                <option value="7d">过去 7 天</option>
+              </select>
+            </div>
+
+            <div className="desktop-filter-item">
+              <label>排序方式</label>
+              <select value={sortOption} onChange={(e) => setSortOption(e.target.value as HistorySortOption)}>
+                <option value="time_desc">批改时间（最新优先）</option>
+                <option value="time_asc">批改时间（最早优先）</option>
+                <option value="score_desc">得分（从高到低）</option>
+                <option value="score_asc">得分（从低到高）</option>
+              </select>
+            </div>
+          </div>
+
+          {hasActiveFilters && (
+            <div className="desktop-filter-panel-footer">
+              <span className="desktop-filter-summary">
+                已匹配 {filtered.length} 条记录（总共 {rows.length} 条）
+              </span>
+              <button type="button" className="desktop-filter-reset-btn" onClick={resetFilters}>
+                <RotateCcw size={13} />
+                重置全部筛选
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 已生效筛选标签栏 */}
+      {hasActiveFilters && (
+        <div className="desktop-active-filter-tags">
+          <span className="desktop-tags-title">生效筛选：</span>
+          {templateFilter !== "all" && (
+            <span className="desktop-filter-tag">
+              评分标准: {templateOptions.find(([id]) => id === templateFilter)?.[1] || templateFilter}
+              <button type="button" title="移除该筛选" onClick={() => setTemplateFilter("all")}><X size={12} /></button>
+            </span>
+          )}
+          {statusFilter !== "all" && (
+            <span className="desktop-filter-tag">
+              状态: {statusFilter === "high_risk" ? "存疑已扣分(高风险)" : statusFilter === "needs_review" ? "待复核" : statusFilter === "completed" ? "已完成" : "失败"}
+              <button type="button" title="移除该筛选" onClick={() => setStatusFilter("all")}><X size={12} /></button>
+            </span>
+          )}
+          {scorePreset !== "all" && (
+            <span className="desktop-filter-tag">
+              得分: {scorePreset === "full" ? "满分" : scorePreset === "zero" ? "零分" : scorePreset === "partial" ? "有扣分" : `${customMinScore || 0}~${customMaxScore || "不限"}分`}
+              <button type="button" title="移除该筛选" onClick={() => { setScorePreset("all"); setCustomMinScore(""); setCustomMaxScore(""); }}><X size={12} /></button>
+            </span>
+          )}
+          {timeFilter !== "all" && (
+            <span className="desktop-filter-tag">
+              时间: {timeFilter === "today" ? "今天" : timeFilter === "24h" ? "24小时内" : timeFilter === "3d" ? "3天内" : "7天内"}
+              <button type="button" title="移除该筛选" onClick={() => setTimeFilter("all")}><X size={12} /></button>
+            </span>
+          )}
+          {sortOption !== "time_desc" && (
+            <span className="desktop-filter-tag">
+              排序: {sortOption === "time_asc" ? "最早优先" : sortOption === "score_desc" ? "分高优先" : "分低优先"}
+              <button type="button" title="恢复默认排序" onClick={() => setSortOption("time_desc")}><X size={12} /></button>
+            </span>
+          )}
+          <button type="button" className="desktop-filter-clear-all" onClick={resetFilters}>清空全部条件</button>
+        </div>
+      )}
+
+      {/* 批量操作工具栏 */}
+      <div className="desktop-bulk-toolbar">
+        <label>
+          <input
+            type="checkbox"
+            checked={allPageSelected}
+            disabled={!paginatedRows.length || deleting}
+            onChange={togglePageSelection}
+          />
+          <span>本页全选 ({paginatedRows.length})</span>
+        </label>
+        {filtered.length > paginatedRows.length && (
+          <button
+            type="button"
+            className="desktop-secondary-action"
+            style={{ fontSize: "12px", padding: "4px 8px", height: "auto" }}
+            onClick={toggleAllFiltered}
+          >
+            {allFilteredSelected ? "取消跨页全选" : `全选所有匹配结果 (${filtered.length})`}
+          </button>
+        )}
+        <span>已选择 {selectedIds.size} 条</span>
+        <button
+          className="desktop-danger-action"
+          disabled={!selectedIds.size || deleting}
+          onClick={() => void removeSelected()}
+        >
+          {deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
+          {deleting ? "正在删除" : "删除所选"}
+        </button>
+      </div>
+
+      <div className="desktop-table-wrap">
+        <table className="desktop-table desktop-history-table">
+          <thead>
+            <tr>
+              <th className="desktop-selection-cell"><span className="desktop-visually-hidden">选择</span></th>
+              <th>答卷</th>
+              <th>评分标准</th>
+              <th>得分</th>
+              <th>状态</th>
+              <th>模型</th>
+              <th>批改时间</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {paginatedRows.map(({ record, templateTitle }) => {
+              const reviewSignals = summarizeReviewSignals(record.result);
+              const highRisk = detectHighRiskDeductions(record.result, record.rubricSnapshot);
+              const isNewlyAdded = newlyAddedIds.has(record.id);
+              const rowClasses = [
+                selectedIds.has(record.id) ? "selected" : "",
+                isNewlyAdded ? "desktop-history-row-new" : "",
+                highRisk.isHighRisk ? "desktop-history-row-high-risk" : "",
+                highRisk.hasExtractedMatchRisk ? "critical" : ""
+              ].filter(Boolean).join(" ");
+              return <tr className={rowClasses} key={record.id}>
+                <td className="desktop-selection-cell">
+                  <input
+                    type="checkbox"
+                    aria-label={`选择批改记录 ${record.result.fileName}`}
+                    checked={selectedIds.has(record.id)}
+                    disabled={deleting}
+                    onChange={() => toggleRecord(record.id)}
+                  />
+                </td>
+                <td>
+                  <strong>
+                    {record.result.fileName}
+                    {isNewlyAdded && (
+                      <span className="desktop-history-badge-new" title="刚刚完成批改">
+                        <Sparkles size={11} />NEW
+                      </span>
+                    )}
+                  </strong>
+                  <small>{record.result.studentId || record.id}</small>
+                  {record.artifacts && <small>{record.artifacts.length} 个批改产物</small>}
+                </td>
+                <td>
+                  <span>
+                    {templateTitle}
+                  </span>
+                </td>
+                <td>
+                  <b className="desktop-history-score">
+                    {record.result.score} / {record.result.maxScore}
+                  </b>
+                  {highRisk.totalLostScore > 0 && (
+                    <span className="desktop-score-lost-tag" title="因机器无法确认作答而暂扣、待人工核实的分值">
+                      待核 -{highRisk.totalLostScore}分
+                    </span>
+                  )}
+                </td>
+                <td>
+                  <div className="desktop-history-status">
+                    {highRisk.isHighRisk ? (
+                      <span className={`desktop-status-label ${highRisk.hasExtractedMatchRisk ? "critical" : "danger"}`}>
+                        {highRisk.hasExtractedMatchRisk ? <AlertOctagon size={12} /> : <AlertTriangle size={12} />}
+                        {highRisk.hasExtractedMatchRisk ? "🚨 提取命中但存疑 0分" : `⚠️ 存疑已扣分 -${highRisk.totalLostScore}分`}
+                      </span>
+                    ) : (
+                      <span className={`desktop-status-label ${record.result.status === "completed" ? "locked" : "warning"}`}>
+                        {record.result.status === "completed" ? <Check size={12} /> : <AlertTriangle size={12} />}
+                        {record.result.status === "completed" ? "已完成" : record.result.status === "needs_review" ? "待复核" : "失败"}
+                      </span>
+                    )}
+                    {highRisk.isHighRisk ? (
+                      <small className="desktop-history-high-risk-summary" title={highRisk.items.map((i: { reason: string }) => i.reason).join("\n")}>
+                        {highRisk.shortSummary}
+                      </small>
+                    ) : record.result.status === "needs_review" ? (
+                      <small>低置信 {reviewSignals.totalLowConfidence} 项 · {reviewSignals.reviewReasons} 个原因</small>
+                    ) : null}
+                  </div>
+                </td>
+                <td>
+                  {record.result.modelName}
+                  <small>{record.modelCallCount} 次调用</small>
+                </td>
+                <td>{new Date(record.createdAt).toLocaleString("zh-CN", { hour12: false })}</td>
+                <td>
+                  <div className="desktop-history-actions">
+                    <a
+                      className="desktop-history-open"
+                      title="打开批改记录，在详情中进行重新批改或 OCR 回放"
+                      aria-label={`打开批改记录 ${record.result.fileName}`}
+                      href={`/history/${encodeURIComponent(record.id)}?electron=1`}
+                    >
+                      <ChevronRight size={16} />
+                    </a>
+                  </div>
+                </td>
+              </tr>;
+            })}
+            {!filtered.length && (
+              <tr>
+                <td colSpan={8} className="desktop-empty-cell">
+                  {loading ? "正在读取批改记录" : hasActiveFilters || query ? (
+                    <div>
+                      <span>没有符合筛选条件的批改记录</span>
+                      <button
+                        type="button"
+                        className="desktop-filter-clear-all"
+                        style={{ marginLeft: 8 }}
+                        onClick={() => { resetFilters(); setQuery(""); }}
+                      >
+                        清空筛选条件
+                      </button>
+                    </div>
+                  ) : "暂无批改记录"}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {filtered.length > 0 && (
+        <div className="desktop-pagination-bar">
+          <div className="desktop-pagination-info">
+            <span>
+              显示第 {filtered.length === 0 ? 0 : startIndex + 1} - {Math.min(startIndex + pageSize, filtered.length)} 条，共 {filtered.length} 条
+            </span>
+            <label className="desktop-pagination-size">
+              <span>每页</span>
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setPage(1);
+                }}
+              >
+                <option value={25}>25 条</option>
+                <option value={50}>50 条</option>
+                <option value={100}>100 条</option>
+              </select>
+            </label>
+          </div>
+          <div className="desktop-pagination-actions">
+            <button
+              type="button"
+              className="desktop-pagination-btn"
+              disabled={currentPage <= 1}
+              onClick={() => setPage(1)}
+              title="第一页"
+            >
+              首页
+            </button>
+            <button
+              type="button"
+              className="desktop-pagination-btn"
+              disabled={currentPage <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              title="上一页"
+            >
+              <ChevronLeft size={14} />
+              上一页
+            </button>
+            <span className="desktop-pagination-page-indicator">
+              第 {currentPage} / {totalPages} 页
+            </span>
+            <button
+              type="button"
+              className="desktop-pagination-btn"
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              title="下一页"
+            >
+              下一页
+              <ChevronRight size={14} />
+            </button>
+            <button
+              type="button"
+              className="desktop-pagination-btn"
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage(totalPages)}
+              title="末页"
+            >
+              末页
+            </button>
+          </div>
+        </div>
+      )}
     </section>
   </div>;
 }
@@ -1488,6 +2245,7 @@ function RecordPage({ recordId }: { recordId?: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resultId, reason: "从批改记录发起重新批改" })
       });
+      window.dispatchEvent(new CustomEvent("hengzhun:history-updated", { detail: { recordId: next.id } }));
       pushRoute(`/history/${encodeURIComponent(next.id)}?electron=1`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "历史答卷重新批改失败");
@@ -1505,6 +2263,7 @@ function RecordPage({ recordId }: { recordId?: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resultId, reason: "从批改记录详情发起缓存 OCR 完整链路回放" })
       });
+      window.dispatchEvent(new CustomEvent("hengzhun:history-updated", { detail: { recordId: next.id } }));
       pushRoute(`/history/${encodeURIComponent(next.id)}?electron=1`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "缓存 OCR 回放失败");
@@ -1643,9 +2402,9 @@ function CurrentGradingFlow({ workflow, stagedLayoutEngine }: { workflow?: Model
           <div><b>{isAgent ? "之后" : "按需"}</b><span>{isAgent ? "可选独立审验（全新上下文）" : "仅对真实疑似作答或图像不可用的小问复核；扫描阴影锁定为未作答，评分点只保留审计占位，不产生复核阻断"}</span></div>
         </article>
         <article className="desktop-grading-flow-branch small">
-          <header><span>小题</span><strong>分空切片 · 盲审/挑刺双路核验</strong></header>
-          <p>多模态原生分空并生成高清大图切片；盲审A与挑刺B并发比对，防共模误判</p>
-          <div><b>争议时</b><span>思考预算拉满深度终审（High Reasoning）· 本地权威判分</span></div>
+          <header><span>小题</span><strong>整卷初检定位 · 满分/空卷极速放行</strong></header>
+          <p>全景初检结合本地硬规则防御，全对/空卷秒级直接放行；争议/错误小空靶向高清切片进入盲审/挑刺/终审</p>
+          <div><b>结构化门禁</b><span>结构化风险点（标“无”不复核）· 初审与挑刺冲突时终审仲裁 · 本地权威重算</span></div>
         </article>
       </div>
       <div className="desktop-grading-flow-connector"><ChevronDown size={13} /></div>
@@ -1776,7 +2535,8 @@ function BrowserDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
       "previous-page": "进入上一份",
       "next-page": "进入下一份",
       "write-score": "写入测试分数",
-      "clear-score": "清空总分框"
+      "clear-score": "清空总分框",
+      "mark-excellent": "测试“优”控件"
     };
     try {
       const result: PluginDiagnosticResult = await host.runPluginDiagnostic({ action, score: numericScore });
@@ -1808,6 +2568,7 @@ function BrowserDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
       {!diagnosticsAvailable && <p className="desktop-plugin-test-notice"><AlertTriangle size={14} />主程序组件尚未载入本次更新，重启工作台后可执行下列动作。</p>}
       <div className="desktop-plugin-test-actions">
         <button disabled={busy || !diagnosticsAvailable || !diagnosticsReady} onClick={() => void runDiagnostic("extract-image")}><ImageDown size={15} />提取并保存图像</button>
+        <button title="尝试调用并勾选网页上的“优”控件（存疑卷标记）" disabled={busy || !diagnosticsAvailable || !diagnosticsReady} onClick={() => void runDiagnostic("mark-excellent")}><Star size={15} />测试“优”控件</button>
         <div className="desktop-plugin-page-actions"><button title={independentNavigation ? "测试独立翻页控件" : "睿芽云提交当前分数后自动装载下一份"} disabled={busy || !diagnosticsAvailable || !diagnosticsReady || !independentNavigation} onClick={() => void runDiagnostic("previous-page")}><ArrowLeft size={15} />上一份</button><button title={independentNavigation ? "测试独立翻页控件" : "睿芽云提交当前分数后自动装载下一份"} disabled={busy || !diagnosticsAvailable || !diagnosticsReady || !independentNavigation} onClick={() => void runDiagnostic("next-page")}>下一份<ArrowRight size={15} /></button></div>
       </div>
       <div className="desktop-plugin-score-test"><label><span>测试总分{inspection?.fullScore !== undefined ? `（满分 ${inspection.fullScore}）` : ""}</span><input type="number" min={0} max={inspection?.fullScore} step="0.5" value={score} onChange={(event) => setScore(event.target.value)} placeholder="输入分数" /></label><div><button disabled={busy || !diagnosticsAvailable || !diagnosticsReady || !singleDiagnosticScore || !score.trim()} onClick={() => void runDiagnostic("write-score")}>写入</button><button title="清空网页最终总分框" disabled={busy || !diagnosticsAvailable || !diagnosticsReady || !singleDiagnosticScore} onClick={() => void runDiagnostic("clear-score")}><XCircle size={14} /></button></div><small>{singleDiagnosticScore ? "只修改最终总分框，不点击提交。" : "当前是多评页面，诊断写分需在安全试运行中按小问结果验证，不使用单一总分。"}</small></div>
@@ -1832,7 +2593,7 @@ function PluginsDebugPage({ browser }: { browser: EmbeddedBrowserState }) {
   const preflight = async () => { setPending(true); try { await getHost()?.controlPipeline("preflight"); } finally { window.setTimeout(() => setPending(false), 300); } };
   return <div className="desktop-page-body desktop-plugin-debug">
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>当前适配器</span><h2>{browser.plugin.adapterName}</h2></div><span className={browser.plugin.connected ? "desktop-status-label locked" : "desktop-status-label warning"}>{browser.plugin.connected ? <Plug size={13} /> : <Unplug size={13} />}{phaseLabel(browser.plugin.phase)}</span></div><div className="desktop-plugin-meta"><div><span>ID</span><strong>{browser.plugin.adapterId}</strong></div><div><span>版本</span><strong>{browser.plugin.adapterVersion}</strong></div><div><span>页面线索</span><strong title="非学生 ID，仅用于判断阅卷页面是否切换">{browser.plugin.pageKey || "未识别"}</strong></div><div><span>更新时间</span><strong>{formatTime(browser.plugin.updatedAt)}</strong></div></div><div className="desktop-form-actions"><button className="desktop-save-button" disabled={pending} onClick={() => void preflight()}>{pending ? <LoaderCircle className="spin" size={15} /> : <ListChecks size={15} />}重新执行页面检查</button><button className="desktop-secondary-action" onClick={() => void getHost()?.runBrowserAction("reload_plugin")}><RotateCcw size={14} />重载插件</button></div></section>
-    <section className="desktop-section"><div className="desktop-section-heading"><div><span>DOM 能力</span><h2>自动化控件检查</h2></div></div><div className="desktop-capability-grid"><Capability label="学生答卷图像" value={capabilities.answerImage} selector={imageSelector} /><Capability label="最终总分输入框" value={capabilities.scoreInput} selector={scoreSelector} /><Capability label="提交按钮" value={capabilities.submit} selector={submitSelector} /><Capability label={nextLabel} value={capabilities.next} selector={nextSelector} /><Capability label="跳过当前答卷" value={capabilities.skip} selector={skipSelector} /></div></section>
+    <section className="desktop-section"><div className="desktop-section-heading"><div><span>DOM 能力</span><h2>自动化控件检查</h2></div></div><div className="desktop-capability-grid"><Capability label="学生答卷图像" value={capabilities.answerImage} selector={imageSelector} /><Capability label="最终总分输入框" value={capabilities.scoreInput} selector={scoreSelector} /><Capability label="提交按钮" value={capabilities.submit} selector={submitSelector} /><Capability label={nextLabel} value={capabilities.next} selector={nextSelector} /><Capability label="跳过当前答卷" value={capabilities.skip} selector={skipSelector} />{isZhixue && <Capability label="“优”存疑标记控件" value={Boolean(capabilities.markExcellent)} selector="智学网工具栏 [★ 优] 控件（存疑卷自动勾选）" />}</div></section>
     <section className="desktop-section"><div className="desktop-section-heading"><div><span>适配顺序</span><h2>预置插件</h2></div></div><div className="desktop-adapter-list"><div><span>01</span><div><strong>zhixue-grading</strong><p>智学网专用适配器；按小题分步写分、提交并进入下一份。</p></div><b>默认</b></div><div><span>02</span><div><strong>ruiya-grading</strong><p>睿芽云专用适配器；识别学生原图、按小题顺序写入最终总分框，并等待提交后自动装载下一份。</p></div><b>专用</b></div><div><span>03</span><div><strong>mock-grading</strong><p>通用 `data-grading-*` 控件测试站，保留用于通用适配器回归。</p></div><b>启用</b></div><div><span>04</span><div><strong>generic-data-attributes</strong><p>真实网站通用适配器，使用稳定 data 属性定位答卷、写分与翻页控件。</p></div><b>后备</b></div></div></section>
   </div>;
 }
@@ -2018,7 +2779,7 @@ function DesktopPage({ route, browser, summary, template, preferences, onPrefere
     case "job": return route.parameter === "new" ? <GuidedSetupPage browser={browser} /> : <ActiveJobPage browser={browser} summary={summary} template={template} preferences={preferences} />;
     case "templates": return <TemplatesPage template={template} onBindTemplate={onBindTemplate} />;
     case "template": return route.parameter === "new" ? <TemplateCreatePage /> : <TemplateDetailPage templateId={route.parameter} />;
-    case "history": return <HistoryPage />;
+    case "history": return <HistoryPage browser={browser} />;
     case "record": return <RecordPage recordId={route.parameter} />;
     case "logs": return <LogsPage />;
     case "models": return <ModelsPage />;
@@ -2089,6 +2850,10 @@ export default function DesktopApp() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+  useEffect(() => {
+    const main = document.querySelector(".desktop-main");
+    if (main) main.scrollTop = 0;
+  }, [route.id, route.parameter]);
   useEffect(() => {
     const handler = (event: MouseEvent) => {
       const anchor = (event.target as Element | null)?.closest<HTMLAnchorElement>("a[href]");

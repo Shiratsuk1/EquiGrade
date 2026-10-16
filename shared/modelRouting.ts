@@ -95,8 +95,8 @@ export const MODEL_ROUTE_DEFINITIONS: readonly ModelRouteDefinition[] = [
   },
   {
     key: "small_question_blank_layout",
-    label: "小题各空手写定位",
-    description: "多模态原生视觉分析并定位各空作答边界框（免 OCR）",
+    label: "小题整卷初检与定位",
+    description: "多模态原生视觉分析整卷、初评各空作答并定位边界框（免 OCR）",
     endpoint: "teacher",
     modelField: "visionModel",
     modality: "vision",

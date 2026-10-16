@@ -190,7 +190,8 @@ function withConfigDefaults(config: StoredConfig): StoredConfig {
     stagedLayoutEngine,
     modelRoutes: normalizeStoredModelRoutes(config.modelRoutes),
     paddleOcr,
-    responsesAgent
+    responsesAgent,
+    smallQuestionBlindReviewEnabled: config.smallQuestionBlindReviewEnabled !== false
   };
 }
 
@@ -272,6 +273,7 @@ export function toPublicConfig(config: StoredConfig): PublicModelConfig {
     reviewReasoningEffort: config.reviewReasoningEffort ?? DEFAULT_REVIEW_REASONING_EFFORT,
     modelRoutes: config.modelRoutes,
     paddleOcr: config.paddleOcr,
+    smallQuestionBlindReviewEnabled: config.smallQuestionBlindReviewEnabled !== false,
     ...(agent ? {
       responsesAgent: {
         baseUrl: agent.baseUrl,
