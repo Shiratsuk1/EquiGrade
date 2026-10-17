@@ -1812,7 +1812,11 @@ ${JSON.stringify(evidence)}`,
       lostPoints: result.teacherCommentary.lostPoints.length,
       auditConcerns: result.teacherCommentary.auditConcerns.length
     }, teacherCommentaryDraft ? "success" : "warning");
-    completeOperation(operationId, "grading", "grading_completed", `${input.studentId}批改完成：${result.score}${(result.maximumPossibleScore ?? result.score) > result.score ? `-${result.maximumPossibleScore}` : ""}/${result.maxScore}分`, {
+    const subSummary = result.subquestions.map((sub) => {
+      const raw = sub.studentFinalAnswer ? `:「${sub.studentFinalAnswer}」` : "";
+      return `(${sub.id})${raw} [${sub.score}/${sub.maxScore}分]`;
+    }).join("，");
+    completeOperation(operationId, "grading", "grading_completed", `${input.studentId}批改完成：${result.score}${(result.maximumPossibleScore ?? result.score) > result.score ? `-${result.maximumPossibleScore}` : ""}/${result.maxScore}分 (${subSummary})`, {
       status: result.status,
       reviewReasons: result.reviewReasons.length,
       commentaryStatus: result.teacherCommentary.status

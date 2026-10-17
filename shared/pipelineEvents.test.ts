@@ -46,33 +46,42 @@ describe("pipelineEvents", () => {
   });
 
   describe("pipelineEventLabel", () => {
-    it("formats grading_completed with detailed summary", () => {
+    it("formats grading_completed with detailed summary and subquestion scores", () => {
       const event: PipelineEvent = {
         type: "grading_completed",
         score: 4,
-        maxScore: 4,
-        summary: "(1): C [2/2分]，(2): 2.4 [2/2分] · 合计 4/4分"
+        maxScore: 6,
+        summary: "得分 4/6分 ((1):「C」✓ [2/2分]，(2):「2.4」✓ [2/2分]，(3):「A」✗ [0/2分])"
       };
-      expect(pipelineEventLabel(event)).toBe("智能批改完成：(1): C [2/2分]，(2): 2.4 [2/2分] · 合计 4/4分");
+      expect(pipelineEventLabel(event)).toBe("智能批改结果：得分 4/6分 ((1):「C」✓ [2/2分]，(2):「2.4」✓ [2/2分]，(3):「A」✗ [0/2分])");
     });
 
-    it("formats score_writing with local recomputed score", () => {
+    it("formats score_writing with local recomputed score and segment scores", () => {
       const event: PipelineEvent = {
         type: "score_writing",
-        score: 3,
-        maxScore: 4
+        score: 4,
+        maxScore: 6,
+        segments: [
+          { id: "1", title: "(1)", score: 2, maxScore: 2, points: [] },
+          { id: "2", title: "(2)", score: 2, maxScore: 2, points: [] },
+          { id: "3", title: "(3)", score: 0, maxScore: 2, points: [] }
+        ]
       };
-      expect(pipelineEventLabel(event)).toBe("本地计分确认 3 / 4 分，写入网页评分框");
+      expect(pipelineEventLabel(event)).toBe("本地计分确认 4 / 6 分 ((1) 2/2分，(2) 2/2分，(3) 0/2分)，写入网页评分框");
     });
 
-    it("formats page_completed with review flag note", () => {
+    it("formats page_completed with subquestion breakdown and review flag note", () => {
       const event: PipelineEvent = {
         type: "page_completed",
         score: 3,
         maxScore: 4,
-        requiresReview: true
+        requiresReview: true,
+        segments: [
+          { id: "1", title: "(1)", score: 2, maxScore: 2, points: [] },
+          { id: "2", title: "(2)", score: 1, maxScore: 2, points: [] }
+        ]
       };
-      expect(pipelineEventLabel(event)).toBe("已提交 3 / 4 分（已标记复核）");
+      expect(pipelineEventLabel(event)).toBe("已提交 3 / 4 分 ((1) 2/2分，(2) 1/2分)（已标记复核）");
     });
   });
 
@@ -207,7 +216,7 @@ describe("pipelineEvents", () => {
       expect(isConciseLogEntry(internalScoring)).toBe(false);
     });
 
-    it("retains template save/update entries", () => {
+    it("retains template save/update entries and grading_completed milestones", () => {
       const templateSaved: SystemLogEntry = {
         id: "log-7",
         operationId: "op-1",
@@ -219,6 +228,18 @@ describe("pipelineEvents", () => {
         message: "评分标准已保存"
       };
       expect(isConciseLogEntry(templateSaved)).toBe(true);
+
+      const serverGradingCompleted: SystemLogEntry = {
+        id: "log-8",
+        operationId: "op-1",
+        timestamp: new Date().toISOString(),
+        level: "info",
+        status: "completed",
+        scope: "grading",
+        step: "grading_completed",
+        message: "网页答卷 zhixue:69220964 批改完成：6/6分 ((1)「C」 [2/2分]，(2)「2.4」 [2/2分]，(3)「B」 [2/2分])"
+      };
+      expect(isConciseLogEntry(serverGradingCompleted)).toBe(true);
     });
   });
 });

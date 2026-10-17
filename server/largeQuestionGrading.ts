@@ -1181,7 +1181,8 @@ export async function gradeLargeQuestionStaged(
       subquestions: input.rubric.subquestions.length,
       extractedCrops: crops.length
     }, "success");
-    completeOperation(operationId, "grading", "grading_completed", `${input.studentId}大题首轮全对快速满分完成：${initialResult.score}/${initialResult.maxScore}分`, {
+    const subSummary = initialResult.subquestions.map((sub) => `(${sub.id}) [${sub.score}/${sub.maxScore}分]`).join("，");
+    completeOperation(operationId, "grading", "grading_completed", `${input.studentId}大题首轮全对满分完成：${initialResult.score}/${initialResult.maxScore}分 (${subSummary})`, {
       status: initialResult.status,
       gradingMode: "vision_direct",
       fastPath: true,
@@ -1265,7 +1266,8 @@ export async function gradeLargeQuestionStaged(
     version: result.teacherCommentary.version,
     integratedModelCall: false
   }, "success");
-  completeOperation(operationId, "grading", "grading_completed", `${input.studentId}大题分阶段批改完成：${result.score}/${result.maxScore}分`, {
+  const subSummary = result.subquestions.map((sub) => `(${sub.id}) [${sub.score}/${sub.maxScore}分]`).join("，");
+  completeOperation(operationId, "grading", "grading_completed", `${input.studentId}大题批改完成：${result.score}/${result.maxScore}分 (${subSummary})`, {
     status: result.status,
     gradingMode: "vision_direct",
     reviewReasons: result.reviewReasons.length,

@@ -65,9 +65,19 @@ export function pipelineEventLabel(event: PipelineEvent): string {
     case "image_extracted": return `已提取答卷 ${event.sourcePageKey || event.pageKey || "当前页"}`;
     case "page_review_flagged": return `已标记复核，继续写分 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分（${event.reviewCount ?? "?"} 项）`;
     case "page_marked_excellent": return "已在卷面勾选“优”控件作为存疑标记，方便人工回评";
-    case "page_completed": return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分${event.requiresReview ? "（已标记复核）" : ""}`;
-    case "grading_completed": return event.summary ? `智能批改完成：${event.summary}` : `智能批改完成，初判得分 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分`;
-    case "score_writing": return `本地计分确认 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分，写入网页评分框`;
+    case "page_completed": {
+      const segmentSummary = event.segments?.length
+        ? ` (${event.segments.map((s) => `(${s.id}) ${s.score}/${s.maxScore}分`).join("，")})`
+        : "";
+      return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分${segmentSummary}${event.requiresReview ? "（已标记复核）" : ""}`;
+    }
+    case "grading_completed": return event.summary ? `智能批改结果：${event.summary}` : `智能批改完成，初判得分 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分`;
+    case "score_writing": {
+      const segmentSummary = event.segments?.length
+        ? ` (${event.segments.map((s) => `(${s.id}) ${s.score}/${s.maxScore}分`).join("，")})`
+        : "";
+      return `本地计分确认 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分${segmentSummary}，写入网页评分框`;
+    }
     case "pipeline_start_rejected": return `启动失败：${reason || "尚未选择批改任务"}`;
     case "pipeline_question_mismatch_rejected": return `启动被阻断：${reason || "网页题目与评分标准不一致"}`;
     case "pipeline_question_mismatch_stopped": return `已安全暂停：${reason || "检测到网页题目切换，与当前评分标准不一致"}`;
@@ -132,6 +142,11 @@ export function isConciseLogEntry(entry: SystemLogEntry): boolean {
   if (entry.step.startsWith("pipeline:")) {
     const event = (entry.details || {}) as PipelineEvent;
     return isConcisePipelineEvent(event);
+  }
+
+  // 服务端批改完成里程碑（若非流水线调用，如单次测试批改、回放、历史查看，必须展示最终批改结果与小题得分）
+  if (entry.scope === "grading" && (entry.step === "grading_completed" || entry.step === "grade_completed")) {
+    return true;
   }
 
   // 评分标准关键管理变更保留

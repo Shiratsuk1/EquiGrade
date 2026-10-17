@@ -349,16 +349,27 @@ function scorePayload(grading: GradingResponse, answer: ExtractedAnswer, require
 function formatGradingSummary(grading: GradingResponse): string {
   const subquestions = grading.result?.subquestions ?? [];
   if (!subquestions.length) {
-    return `初评得分 ${grading.score} / ${grading.maxScore} 分`;
+    return `得分 ${grading.score} / ${grading.maxScore} 分`;
   }
   const parts = subquestions.map((sub) => {
-    const rawAnswer = (sub as unknown as { finalAnswer?: string; studentAnswer?: string }).finalAnswer
+    const rawAnswer = sub.studentFinalAnswer
+      || (sub as unknown as { finalAnswer?: string; studentAnswer?: string }).finalAnswer
       || (sub as unknown as { finalAnswer?: string; studentAnswer?: string }).studentAnswer
       || "";
-    const answerDisplay = rawAnswer ? `: ${rawAnswer}` : "";
-    return `(${sub.id})${answerDisplay} [${sub.score}/${sub.maxScore}分]`;
+    const statusMark = sub.finalAnswerStatus === "correct"
+      ? "✓"
+      : sub.finalAnswerStatus === "incorrect"
+        ? "✗"
+        : sub.finalAnswerStatus === "missing"
+          ? "未作答"
+          : "";
+    const answerDisplay = rawAnswer
+      ? `「${rawAnswer}」${statusMark ? ` ${statusMark}` : ""}`
+      : (statusMark || "");
+    const answerPart = answerDisplay ? `: ${answerDisplay}` : "";
+    return `(${sub.id})${answerPart} [${sub.score}/${sub.maxScore}分]`;
   });
-  return `${parts.join("，")} · 合计 ${grading.score}/${grading.maxScore}分`;
+  return `得分 ${grading.score}/${grading.maxScore}分 (${parts.join("，")})`;
 }
 
 async function confirmCurrentAnswer(expected: ExtractedAnswer) {
@@ -486,7 +497,8 @@ async function runPipeline(explicitRubricTitle?: string) {
           pageKey: answer.pageKey,
           sourcePageKey: answer.sourcePageKey,
           score: grading.score,
-          maxScore: grading.maxScore
+          maxScore: grading.maxScore,
+          segments: score.segments
         });
         commitStage = "write_started";
         await adapter.writeScore(score);

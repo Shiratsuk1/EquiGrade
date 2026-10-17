@@ -1159,7 +1159,8 @@ ${subquestionsList}
     };
     result.teacherCommentary = createFallbackTeacherCommentary(result);
 
-    completeOperation(operationId, "grading", "grading_completed", `${input.studentId}小题空卷批改完成：0/${result.maxScore}分`, {
+    const subSummary = result.subquestions.map((sub) => `(${sub.id}) [0/${sub.maxScore}分]`).join("，");
+    completeOperation(operationId, "grading", "grading_completed", `${input.studentId}小题空卷批改完成：0/${result.maxScore}分 (${subSummary})`, {
       status: result.status,
       gradingPipeline: "small_question_staged",
       reviewReasons: result.reviewReasons.length,
@@ -1319,7 +1320,11 @@ ${subquestionsList}
     };
     result.teacherCommentary = createFallbackTeacherCommentary(result);
 
-    completeOperation(operationId, "grading", "grading_completed", `${input.studentId}小题满分快速放行完成：${result.score}/${result.maxScore}分`, {
+    const subSummary = result.subquestions.map((sub) => {
+      const raw = sub.studentFinalAnswer ? `:「${sub.studentFinalAnswer}」` : "";
+      return `(${sub.id})${raw} [${sub.score}/${sub.maxScore}分]`;
+    }).join("，");
+    completeOperation(operationId, "grading", "grading_completed", `${input.studentId}小题满分快速放行完成：${result.score}/${result.maxScore}分 (${subSummary})`, {
       status: result.status,
       gradingPipeline: "small_question_staged",
       reviewReasons: result.reviewReasons.length,
@@ -2045,7 +2050,11 @@ ${crop.criteriaGuidance ? `评分规则与特殊要求：${crop.criteriaGuidance
   // 生成本地结构化教师评语
   result.teacherCommentary = createFallbackTeacherCommentary(result);
 
-  completeOperation(operationId, "grading", "grading_completed", `${input.studentId}小题分阶段批改完成：${result.score}/${result.maxScore}分`, {
+  const subSummary = result.subquestions.map((sub) => {
+    const raw = sub.studentFinalAnswer ? `:「${sub.studentFinalAnswer}」` : "";
+    return `(${sub.id})${raw} [${sub.score}/${sub.maxScore}分]`;
+  }).join("，");
+  completeOperation(operationId, "grading", "grading_completed", `${input.studentId}小题批改完成：${result.score}/${result.maxScore}分 (${subSummary})`, {
     status: result.status,
     gradingPipeline: "small_question_staged",
     reviewReasons: result.reviewReasons.length,
