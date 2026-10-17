@@ -43,6 +43,7 @@ import {
   START_URL_PRESETS,
   type StartUrlPresetId
 } from "../shared/startUrl";
+import { findSubquestionCropArtifact } from "./desktopWorkbench";
 import { ModelRoutingSettings } from "./ModelRoutingSettings";
 
 type DesktopRoute = {
@@ -595,7 +596,14 @@ function DashboardPage({ browser, summary, template, onEnterTest }: { browser: E
       <TestEntryButton onEnterTest={onEnterTest} />
     </section>
     <section className="desktop-section desktop-current-template">
-      <div className="desktop-section-heading"><div><span>当前评分标准</span><h2>{template?.title || "当前任务尚未绑定评分标准"}</h2></div><div className="desktop-heading-actions"><a className="desktop-secondary-action" href="/templates?electron=1"><BookOpenCheck size={14} />{template ? "更换评分标准" : "选择评分标准"}</a><span className={template?.ready ? "desktop-status-label locked" : "desktop-status-label"}><BookOpenCheck size={13} />{template?.ready ? "已绑定" : "未绑定"}</span></div></div>
+      <div className="desktop-section-heading">
+        <div><span>当前评分标准</span><h2>{template?.title || "当前任务尚未绑定评分标准"}</h2></div>
+        <div className="desktop-heading-actions">
+          {!template && <a className="desktop-save-button inline" href="/templates/new?electron=1" title="在评分标准主场新建并自动绑定到当前任务"><Plus size={14} />新建标准</a>}
+          <a className="desktop-secondary-action" href="/templates?electron=1"><BookOpenCheck size={14} />{template ? "更换评分标准" : "从标准库选择"}</a>
+          <span className={template?.ready ? "desktop-status-label locked" : "desktop-status-label"}><BookOpenCheck size={13} />{template?.ready ? "已绑定" : "未绑定"}</span>
+        </div>
+      </div>
       <div className="desktop-template-summary">
         <div><span>模板编号</span><strong>{template?.templateId || "--"}</strong></div><div><span>满分</span><strong>{template?.rubric.totalScore ?? "--"} 分</strong></div><div><span>小问</span><strong>{template?.rubric.subquestions.length ?? "--"}</strong></div><div><span>评分点</span><strong>{template?.rubric.subquestions.reduce((count, item) => count + item.scorePoints.length, 0) ?? "--"}</strong></div>
       </div>
@@ -704,11 +712,17 @@ function BrowserToolbar({ browser, compact = false }: { browser: EmbeddedBrowser
 function PipelineControls({
   browser,
   confirmBeforeStart,
-  template
+  template,
+  onDryRun,
+  dryRunBusy,
+  dryRunMessage
 }: {
   browser: EmbeddedBrowserState;
   confirmBeforeStart: boolean;
   template?: TemplateContext | null;
+  onDryRun?: () => Promise<void>;
+  dryRunBusy?: boolean;
+  dryRunMessage?: string;
 }) {
   const [pending, setPending] = useState<PipelineControl | null>(null);
   const [error, setError] = useState("");
@@ -740,9 +754,21 @@ function PipelineControls({
   const active = ["extracting", "grading", "writing_score", "submitting", "verifying", "navigating_next", "preflight"].includes(browser.plugin.phase);
   const questionMismatch = Boolean(questionAlignment && !questionAlignment.ok);
   const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities) && browser.plugin.phase === "ready" && !questionMismatch;
-  const statusMessage = error || (questionMismatch ? questionAlignment!.issues[0] : browser.plugin.message);
+  const statusMessage = error || (questionMismatch ? questionAlignment!.issues[0] : dryRunMessage || browser.plugin.message);
   return <div className="desktop-pipeline-controls">
     <div><span className={active ? "desktop-live-dot online pulse" : questionMismatch ? "desktop-live-dot offline" : "desktop-live-dot"} /><div><strong>{error ? "启动失败" : questionMismatch ? "题目不匹配" : phaseLabel(browser.plugin.phase)}</strong><small title={statusMessage}>{statusMessage}</small></div></div>
+    {onDryRun && (
+      <button
+        type="button"
+        className="desktop-trial-btn"
+        disabled={active || dryRunBusy || !hasCompletePluginCapabilities(browser.plugin.capabilities)}
+        title="单题试评当前答卷：计算总分并填入网页评分框，但不提交成绩、不翻页"
+        onClick={() => void onDryRun()}
+      >
+        {dryRunBusy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
+        {dryRunBusy ? "正在试评并填分…" : "单题试评 (仅填分·不提交)"}
+      </button>
+    )}
     <button className="primary" disabled={active || pending !== null || !pageReady} title={questionMismatch ? questionAlignment!.issues[0] : undefined} onClick={() => void send("start")}>{pending === "start" ? <LoaderCircle className="spin" size={15} /> : <CirclePlay size={15} />}开始批改</button>
     <button title="暂停流水线" disabled={!active || pending !== null} onClick={() => void send("pause")}><CirclePause size={16} /></button>
     <button title="停止流水线" disabled={!active || pending !== null} onClick={() => void send("stop")}><Square size={15} /></button>
@@ -838,28 +864,207 @@ function PipelineMessageFeed({ browser, events }: { browser: EmbeddedBrowserStat
   </section>;
 }
 
-function TemplateInspector({ template }: { template: TemplateContext | null }) {
-  const [tab, setTab] = useState<"question" | "rubric">("rubric");
+function TemplateInspector({
+  template,
+  latestRecord,
+  activeTab,
+  onTabChange,
+  onNavigateRecord
+}: {
+  template: TemplateContext | null;
+  latestRecord?: GradingHistoryRecord | null;
+  activeTab?: "question" | "rubric" | "result";
+  onTabChange?: (tab: "question" | "rubric" | "result") => void;
+  onNavigateRecord?: (recordId: string) => void;
+}) {
+  const [internalTab, setInternalTab] = useState<"question" | "rubric" | "result">("rubric");
+  const tab = activeTab ?? internalTab;
+  const setTab = onTabChange ?? setInternalTab;
+
   const emptyState = <div className="desktop-inspector-empty" role="status"><BookOpenCheck size={24} /><strong>尚未加载评分标准</strong><span>选择或绑定评分标准后，这里会显示题目原文与逐点判分依据。</span></div>;
+
   return <aside className="desktop-template-inspector">
-    <div className="desktop-inspector-head"><div><span>当前评分标准</span><strong>{template?.title || "正在读取模板"}</strong></div><b>{template?.rubric.totalScore ?? "--"} 分</b></div>
-    <div className="desktop-segmented" role="tablist">
+    <div className="desktop-inspector-head">
+      <div>
+        <span>当前评分标准</span>
+        <strong>{template?.title || "正在读取模板"}</strong>
+      </div>
+      <b>{template?.rubric.totalScore ?? "--"} 分</b>
+    </div>
+    <div className="desktop-segmented three-tabs" role="tablist">
       <button className={tab === "question" ? "active" : ""} onClick={() => setTab("question")}>题目原文</button>
       <button className={tab === "rubric" ? "active" : ""} onClick={() => setTab("rubric")}>评分标准</button>
+      <button className={tab === "result" ? "active" : ""} onClick={() => setTab("result")}>
+        批改结果
+        {latestRecord && <span className="desktop-tab-dot" />}
+      </button>
     </div>
     <div className="desktop-inspector-scroll">
-      {!template ? emptyState : tab === "question" ? <div className="desktop-question-copy"><MathText value={template.questionText || "题目原文尚未加载"} formulaByDefault /></div> : <div className="desktop-rubric-copy">
-        {template.rubric.subquestions.map((question) => <details key={question.id} open>
-          <summary><div><strong>{question.id} · {question.title}</strong><span>{question.scorePoints.length} 个评分点</span></div><b>{question.maxScore} 分</b><ChevronDown size={14} /></summary>
-          <ol>{question.scorePoints.map((point) => <li key={point.id}><div><span>{point.id}</span><b>{point.score} 分</b></div><strong>{point.title}</strong>{point.description && <MathText value={point.description} formulaByDefault />}{point.expected && <div className="desktop-rubric-expected"><span>判分依据</span><MathText value={point.expected} formulaByDefault /></div>}<ScorePointGuidance point={point} /></li>)}</ol>
-        </details>)}
-      </div>}
+      {tab === "result" ? (
+        !latestRecord ? (
+          <div className="desktop-inspector-empty" role="status">
+            <Check size={24} />
+            <strong>暂无最新批改记录</strong>
+            <span>批改完成本题（或点击「单题试评」）后，这里将呈现最新答卷的总分、每小问得分和作答切片证据。</span>
+          </div>
+        ) : (
+          <div className="desktop-result-summary-pane">
+            <div className="desktop-result-summary-header">
+              <div>
+                <span className="desktop-result-student-id">
+                  {latestRecord.result.studentId || latestRecord.result.fileName || "当前答卷"}
+                </span>
+                <span className="desktop-result-meta">
+                  {latestRecord.result.modelName} · {latestRecord.result.metrics?.durationMs ? `${(latestRecord.result.metrics.durationMs / 1000).toFixed(1)}s` : ""}
+                </span>
+              </div>
+              <div className="desktop-result-score-badge">
+                <strong>{latestRecord.result.score}</strong>
+                <span>/ {latestRecord.result.maxScore} 分</span>
+              </div>
+            </div>
+            <div className="desktop-result-subquestion-list">
+              {latestRecord.result.subquestions.map((subq) => {
+                const cropArtifact = findSubquestionCropArtifact(subq, latestRecord);
+                const isFull = subq.score >= subq.maxScore;
+                return (
+                  <article key={subq.id} className="desktop-result-subq-card">
+                    <header>
+                      <strong>{subq.id} · {subq.title}</strong>
+                      <b className={isFull ? "score-full" : "score-deducted"}>{subq.score} / {subq.maxScore} 分</b>
+                    </header>
+                    {cropArtifact ? (
+                      <div className="desktop-result-crop-wrap">
+                        <span className="crop-label">作答切片证据：</span>
+                        <img src={cropArtifact.url} alt={`第${subq.id}问作答切片`} className="desktop-result-crop-img" />
+                      </div>
+                    ) : subq.studentFinalAnswer ? (
+                      <div className="desktop-result-text-wrap">
+                        <span className="crop-label">识别手写作答：</span>
+                        <code className="desktop-result-answer-text">{subq.studentFinalAnswer}</code>
+                      </div>
+                    ) : null}
+                    {subq.finalAnswerReason && (
+                      <p className="desktop-result-reason">{subq.finalAnswerReason}</p>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+            {onNavigateRecord && (
+              <footer className="desktop-result-pane-foot">
+                <button type="button" className="desktop-view-detail-btn" onClick={() => onNavigateRecord(latestRecord.id)}>
+                  查看完整批改记录与审计详情 ›
+                </button>
+              </footer>
+            )}
+          </div>
+        )
+      ) : !template ? emptyState : tab === "question" ? (
+        <div className="desktop-question-copy">
+          <MathText value={template.questionText || "题目原文尚未加载"} formulaByDefault />
+        </div>
+      ) : (
+        <div className="desktop-rubric-copy">
+          {template.rubric.subquestions.map((question) => <details key={question.id} open>
+            <summary>
+              <div>
+                <strong>{question.id} · {question.title}</strong>
+                <span>{question.scorePoints.length} 个评分点</span>
+              </div>
+              <b>{question.maxScore} 分</b>
+              <ChevronDown size={14} />
+            </summary>
+            <ol>
+              {question.scorePoints.map((point) => (
+                <li key={point.id}>
+                  <div><span>{point.id}</span><b>{point.score} 分</b></div>
+                  <strong>{point.title}</strong>
+                  {point.description && <MathText value={point.description} formulaByDefault />}
+                  {point.expected && <div className="desktop-rubric-expected"><span>判分依据</span><MathText value={point.expected} formulaByDefault /></div>}
+                  <ScorePointGuidance point={point} />
+                </li>
+              ))}
+            </ol>
+          </details>)}
+        </div>
+      )}
     </div>
-    <div className="desktop-inspector-foot"><BookOpenCheck size={13} /><span>{template?.ready ? `本次任务使用评分标准 v${template.rubric.version}` : "尚未选择评分标准"}</span></div>
+    <div className="desktop-inspector-foot">
+      <BookOpenCheck size={13} />
+      <span>{template?.ready ? `本次任务使用评分标准 v${template.rubric.version}` : "尚未选择评分标准"}</span>
+    </div>
   </aside>;
 }
 
+function GradingResultToast({
+  record,
+  onClose,
+  onOpenResult
+}: {
+  record: GradingHistoryRecord | null;
+  onClose: () => void;
+  onOpenResult: () => void;
+}) {
+  const [seconds, setSeconds] = useState(10);
+
+  useEffect(() => {
+    if (!record) return;
+    setSeconds(10);
+    const interval = setInterval(() => {
+      setSeconds((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          onClose();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [record, onClose]);
+
+  if (!record) return null;
+
+  return (
+    <div className="desktop-grading-toast" onClick={onOpenResult} role="status" aria-live="polite">
+      <div className="desktop-grading-toast-head">
+        <div className="desktop-grading-toast-title">
+          <span className="desktop-live-dot online pulse" />
+          <strong>最新批改完成</strong>
+          <span className="desktop-toast-score">{record.result.score} / {record.result.maxScore} 分</span>
+        </div>
+        <div className="desktop-grading-toast-actions">
+          <span className="desktop-toast-countdown">{seconds}s</span>
+          <button type="button" onClick={(e) => { e.stopPropagation(); onClose(); }} title="关闭通知">
+            <X size={14} />
+          </button>
+        </div>
+      </div>
+      <div className="desktop-grading-toast-subquestions">
+        {record.result.subquestions.slice(0, 3).map((subq) => (
+          <div key={subq.id} className="desktop-toast-subq-chip">
+            <span>{subq.id}</span>
+            <b className={subq.score >= subq.maxScore ? "score-full" : "score-deducted"}>{subq.score}分</b>
+          </div>
+        ))}
+      </div>
+      <div className="desktop-grading-toast-hint">
+        <span>👉 点击在右侧展开作答切片与明细</span>
+        <ChevronRight size={13} />
+      </div>
+      <div className="desktop-grading-toast-progress" />
+    </div>
+  );
+}
+
 function ActiveJobPage({ browser, summary, template, preferences }: { browser: EmbeddedBrowserState; summary: PipelineSummary; template: TemplateContext | null; preferences: DesktopPreferences }) {
+  const [latestRecord, setLatestRecord] = useState<GradingHistoryRecord | null>(null);
+  const [toastRecord, setToastRecord] = useState<GradingHistoryRecord | null>(null);
+  const [inspectorTab, setInspectorTab] = useState<"question" | "rubric" | "result">("rubric");
+  const [trialGrading, setTrialGrading] = useState(false);
+  const [trialMessage, setTrialMessage] = useState("");
+
   const questionAlignment = useMemo(() => {
     if (!template) return null;
     return verifyQuestionAlignment({
@@ -869,27 +1074,106 @@ function ActiveJobPage({ browser, summary, template, preferences }: { browser: E
     });
   }, [template, browser.plugin.questionLabel, browser.title]);
 
+  // Load latest record on mount
+  useEffect(() => {
+    void api<GradingHistoryRecord[]>("/api/history?limit=1").then(([rec]) => {
+      if (rec) setLatestRecord(rec);
+    }).catch(() => undefined);
+  }, []);
+
+  // Listen to pipeline events for completed page
+  useEffect(() => {
+    const lastEvent = summary.events[summary.events.length - 1];
+    if (lastEvent && lastEvent.type === "page_completed") {
+      void api<GradingHistoryRecord[]>("/api/history?limit=1").then(([rec]) => {
+        if (rec) {
+          setLatestRecord(rec);
+          setToastRecord(rec);
+        }
+      }).catch(() => undefined);
+    }
+  }, [summary.events]);
+
+  const runTrialGrade = async () => {
+    const host = getHost();
+    if (!host) {
+      setTrialMessage("控制桥接未就绪");
+      return;
+    }
+    setTrialGrading(true);
+    setTrialMessage("正在试评当前答卷并校验回填…");
+    try {
+      const result = await host.dryRunCurrentAnswer({ verifyWrite: true });
+      const records = await api<GradingHistoryRecord[]>("/api/history?limit=1");
+      if (records[0]) {
+        setLatestRecord(records[0]);
+        setToastRecord(records[0]);
+      }
+      setInspectorTab("result");
+      setTrialMessage(`试评完成：已在评分栏填入 ${result.score} 分（未提交成绩）`);
+    } catch (err) {
+      setTrialMessage(err instanceof Error ? err.message : "单题试评失败");
+    } finally {
+      setTrialGrading(false);
+    }
+  };
+
+  const handleOpenToastResult = () => {
+    setToastRecord(null);
+    setInspectorTab("result");
+  };
+
   return <div className="desktop-job-page">
-    <PipelineControls browser={browser} confirmBeforeStart={preferences.confirmBeforeStart} template={template} />
+    <PipelineControls
+      browser={browser}
+      confirmBeforeStart={preferences.confirmBeforeStart}
+      template={template}
+      onDryRun={runTrialGrade}
+      dryRunBusy={trialGrading}
+      dryRunMessage={trialMessage}
+    />
     {questionAlignment && !questionAlignment.ok && (
       <div className="desktop-callout desktop-question-mismatch-callout" role="alert">
         <AlertTriangle size={18} />
         <div>
           <strong>防串题保护拦截：网页题目与当前评分标准不一致</strong>
           <p>{questionAlignment.issues[0]}</p>
+          <div className="desktop-mismatch-actions">
+            <a className="desktop-mismatch-btn-apply" href="/templates?electron=1">
+              <BookOpenCheck size={13} />
+              前往评分标准库管理/套用新题
+            </a>
+            <a className="desktop-mismatch-btn-new" href="/templates/new?electron=1">
+              <Plus size={13} />
+              新建新题评分标准
+            </a>
+          </div>
         </div>
       </div>
     )}
     <PipelineStageRail phase={browser.plugin.phase} />
     {preferences.showLiveMessages && <PipelineMessageFeed browser={browser} events={summary.events} />}
     <div className="desktop-workbench">
-      <TemplateInspector template={template} />
+      <TemplateInspector
+        template={template}
+        latestRecord={latestRecord}
+        activeTab={inspectorTab}
+        onTabChange={setInspectorTab}
+        onNavigateRecord={(id) => pushRoute(`/history/${encodeURIComponent(id)}?electron=1`)}
+      />
       <section className="desktop-browser-pane">
         <BrowserToolbar browser={browser} compact />
         <BrowserSurface />
-        <footer className="desktop-workbench-footer"><span>已提交 <b>{summary.processed}</b></span><span>跳过 <b>{summary.skipped}</b></span><span>连续失败 <b>{browser.plugin.consecutiveFailures} / 3</b></span><span className="right">目标页与模型密钥保持进程隔离</span></footer>
+        <footer className="desktop-workbench-footer">
+          <span>已提交 <b>{summary.processed}</b></span>
+          <span>跳过 <b>{summary.skipped}</b></span>
+          <span>连续失败 <b>{browser.plugin.consecutiveFailures} / 3</b></span>
+          {trialMessage && <span className="desktop-trial-feedback" style={{ color: "var(--desktop-green-hover)", fontWeight: 700 }}>{trialMessage}</span>}
+          <span className="right">目标页与模型密钥保持进程隔离</span>
+        </footer>
       </section>
     </div>
+    <GradingResultToast record={toastRecord} onClose={() => setToastRecord(null)} onOpenResult={handleOpenToastResult} />
   </div>;
 }
 
@@ -1258,7 +1542,7 @@ function RubricRefinement({ busy, message, onRefine }: {
   </div>;
 }
 
-function TemplateCreatePage() {
+function TemplateCreatePage({ onBindTemplate }: { onBindTemplate?: (templateId: string) => Promise<unknown> } = {}) {
   const [questionText, setQuestionText] = useState("");
   const [referenceText, setReferenceText] = useState("");
   const [questionType, setQuestionType] = useState<QuestionType>(DEFAULT_QUESTION_TYPE);
@@ -1343,6 +1627,37 @@ function TemplateCreatePage() {
       pushRoute(`/templates/${encodeURIComponent(saved.id)}?electron=1`);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "评分标准保存失败"); setBusy(null); }
   };
+  const saveAndReturnToWorkbench = async () => {
+    if (!rubric) return;
+    setBusy("save"); setError("");
+    try {
+      const savedRubric: Rubric = { ...rubric, questionType, status: "saved" };
+      const form = new FormData();
+      form.append("questionText", questionText);
+      form.append("referenceText", referenceText);
+      form.append("rubric", JSON.stringify(savedRubric));
+      questionImages.forEach((image) => form.append("questionImages", image.file, image.file.name));
+      referenceImages.forEach((image) => form.append("referenceImages", image.file, image.file.name));
+      const saved = await api<GradingTemplateSummary>("/api/templates", { method: "POST", body: form });
+      if (onBindTemplate) {
+        await onBindTemplate(saved.id);
+      }
+      pushRoute("/jobs/current?electron=1");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "评分标准保存失败"); setBusy(null); }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!rubric || editingJson || busy !== null) return;
+      if ((e.key === "Enter" && (e.ctrlKey || e.metaKey)) || (e.key === "Enter" && document.activeElement?.tagName !== "TEXTAREA" && document.activeElement?.tagName !== "INPUT")) {
+        e.preventDefault();
+        void saveAndReturnToWorkbench();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [rubric, editingJson, busy, questionText, referenceText, questionType, questionImages, referenceImages]);
+
   return <div className="desktop-page-body desktop-template-create">
     <nav className="desktop-template-create-progress" aria-label="新建评分标准进度"><span className="complete"><Check size={14} />导入材料</span><i /><span className={rubric ? "complete" : materialReady ? "active" : ""}>{rubric ? <Check size={14} /> : "2"}生成与核对</span><i /><span className={rubric ? "active" : ""}>3 保存</span></nav>
     {error && <div className="desktop-error-state"><AlertTriangle size={17} />{error}{/模型配置|API Key|模型/.test(error) && <a href="/models?electron=1">检查教师模型</a>}</div>}
@@ -1356,7 +1671,7 @@ function TemplateCreatePage() {
       <div className="desktop-template-generate-action"><div><strong>{rubric ? "材料发生修改后需要重新生成" : materialReady ? "材料已准备完成" : "题目和评分依据都需要提供文字或图片"}</strong><span>模型先生成评分标准草稿，保存后仍可继续修改。</span></div><button className="desktop-save-button" disabled={!materialReady || busy !== null} onClick={() => void structure()}>{busy === "structure" ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}{busy === "structure" ? "正在生成评分标准" : rubric ? "重新生成评分标准" : "生成评分标准"}</button></div>
     </section>
     {rubric && <section className="desktop-section desktop-template-review-section">
-      <div className="desktop-section-heading"><div><span>步骤 2</span><h2>核对评分标准草稿</h2></div><div className="desktop-template-review-actions"><button className="desktop-secondary-action" onClick={() => setEditingJson((value) => !value)}><Code2 size={14} />{editingJson ? "返回预览" : "高级编辑"}</button><button className="desktop-save-button" disabled={busy !== null || editingJson} onClick={() => void saveTemplate()}>{busy === "save" ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{busy === "save" ? "正在保存" : "保存评分标准"}</button></div></div>
+      <div className="desktop-section-heading"><div><span>步骤 2</span><h2>核对评分标准草稿</h2></div><div className="desktop-template-review-actions"><button className="desktop-secondary-action" onClick={() => setEditingJson((value) => !value)}><Code2 size={14} />{editingJson ? "返回预览" : "高级编辑"}</button><button type="button" className="desktop-save-and-bind-button" disabled={busy !== null || editingJson} title="保存评分标准、自动绑定到当前任务并返回工作台开始批改 (快捷键 Enter)" onClick={() => void saveAndReturnToWorkbench()}>{busy === "save" ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{busy === "save" ? "正在保存并绑定…" : "保存评分标准并返回工作台 (Enter)"}</button><button className="desktop-save-button" disabled={busy !== null || editingJson} onClick={() => void saveTemplate()}>{busy === "save" ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{busy === "save" ? "正在保存" : "仅保存评分标准"}</button></div></div>
       <div className="desktop-template-name-field"><label><span>评分标准名称</span><input value={rubric.title} onChange={(event) => { const next = { ...rubric, title: event.target.value, status: "draft" as const }; setRubric(next); setRubricJson(JSON.stringify(next, null, 2)); }} /></label><div><span>总分</span><strong>{rubric.totalScore} 分</strong></div><div><span>小问</span><strong>{rubric.subquestions.length}</strong></div><div><span>评分点</span><strong>{rubric.subquestions.reduce((total, item) => total + item.scorePoints.length, 0)}</strong></div></div>
       <RubricRefinement busy={busy === "refine"} message={refinementMessage} onRefine={refine} />
       {rubric.warnings.length > 0 && <div className="desktop-template-warning"><AlertTriangle size={17} /><div><strong>保存前请检查以下提示</strong>{rubric.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div></div>}
@@ -2870,7 +3185,7 @@ function DesktopPage({ route, browser, summary, template, preferences, onPrefere
     case "jobs": return <JobsPage template={template} browser={browser} onEnterTest={onEnterTest} />;
     case "job": return route.parameter === "new" ? <GuidedSetupPage browser={browser} /> : <ActiveJobPage browser={browser} summary={summary} template={template} preferences={preferences} />;
     case "templates": return <TemplatesPage template={template} onBindTemplate={onBindTemplate} />;
-    case "template": return route.parameter === "new" ? <TemplateCreatePage /> : <TemplateDetailPage templateId={route.parameter} />;
+    case "template": return route.parameter === "new" ? <TemplateCreatePage onBindTemplate={onBindTemplate} /> : <TemplateDetailPage templateId={route.parameter} />;
     case "history": return <HistoryPage browser={browser} />;
     case "record": return <RecordPage recordId={route.parameter} />;
     case "logs": return <LogsPage />;
