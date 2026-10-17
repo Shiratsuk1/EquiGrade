@@ -520,7 +520,8 @@ async function runPipeline(explicitRubricTitle?: string) {
           maxScore: grading.maxScore,
           requiresReview: reviewRequired,
           reviewCount: grading.result?.reviewReasons.length ?? (reviewRequired ? 1 : 0),
-          segments: score.segments
+          segments: score.segments,
+          verified: true
         });
         publish({ consecutiveFailures: 0, lastScore: grading.score, maxScore: grading.maxScore });
         checkInterruption();

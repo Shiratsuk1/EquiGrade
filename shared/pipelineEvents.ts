@@ -69,7 +69,8 @@ export function pipelineEventLabel(event: PipelineEvent): string {
       const segmentSummary = event.segments?.length
         ? ` (${event.segments.map((s) => `(${s.id}) ${s.score}/${s.maxScore}分`).join("，")})`
         : "";
-      return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分${segmentSummary}${event.requiresReview ? "（已标记复核）" : ""}`;
+      const verificationText = event.verified === false ? "回读核验未确认" : "回读核验一致";
+      return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分${segmentSummary} · ${verificationText}${event.requiresReview ? "（已标记复核）" : ""}`;
     }
     case "grading_completed": return event.summary ? `智能批改结果：${event.summary}` : `智能批改完成，初判得分 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分`;
     case "score_writing": {
@@ -97,23 +98,22 @@ export function pipelineEventLabel(event: PipelineEvent): string {
 
 /**
  * 简洁版运行日志过滤器：
- * 正常情况下一份小题（或大题）的全生命周期严格控制在 4 条关键消息以内：
+ * 正常情况下一份小题（或大题）的全生命周期严格控制在核心关键消息：
  * 1. image_extracted (提取答卷)
- * 2. grading_completed (作答识别与判定结论)
- * 3. score_writing (本地计分确认与写入)
- * 4. page_completed (提交成功与翻页)
+ * 2. grading_completed (作答识别、各小题得分与判定结论)
+ * 3. page_completed (提交成功、各小题最终得分与回读核验一致)
  * 
  * 异常、报错与存疑事件（无条件透出展示）：
  * - 错误级别：plugin_preflight_failed, page_failed, pipeline_question_mismatch_rejected, browser_load_failed 等
  * - 警告/存疑级别：page_review_flagged, page_marked_excellent, pipeline_paused*, page_skipped 等
  * - 批次生命周期：pipeline_started, pipeline_completed
  * 
- * 过滤掉琐碎的高频微观阶段转换（pipeline_phase）与成功的周期性预检心跳（plugin_preflight_completed）。
+ * 过滤掉琐碎的高频微观阶段转换（pipeline_phase）、中间写入探针（score_writing）与成功的周期性预检心跳。
  */
 export function isConcisePipelineEvent(event: PipelineEvent): boolean {
   const type = event.type ?? "";
   if (errorEvents.has(type) || warningEvents.has(type)) return true;
-  if (type === "image_extracted" || type === "grading_completed" || type === "score_writing" || type === "page_completed") return true;
+  if (type === "image_extracted" || type === "grading_completed" || type === "page_completed") return true;
   if (type === "pipeline_started" || type === "pipeline_completed" || type === "pipeline_completed_after_skip") return true;
   return false;
 }
@@ -122,8 +122,8 @@ export function isConcisePipelineEvent(event: PipelineEvent): boolean {
  * 简洁版系统日志过滤器（用于运行日志全量流筛选）：
  * 1. 严格过滤任何非流水线的中间过程/进行中探针（如内部调起终审、正在评分等，绝不流入简洁版）
  * 2. 真实错误与失败无条件透出
- * 3. 流水线核心事件严格按照 4 消息生命周期（提取答卷 -> 批改结论 -> 本地计分 -> 提交翻页）及异常门禁把控
- * 4. 隐藏内部常规模型调用明细、逐点打分演算与高频探针
+ * 3. 流水线核心事件严格按照简洁生命周期（提取答卷 -> 批改结论与小题得分 -> 提交与回读核验一致）把控
+ * 4. 隐藏内部常规模型调用明细、逐点打分演算、服务端历史回放与独立批改记录
  */
 export function isConciseLogEntry(entry: SystemLogEntry): boolean {
   // 过滤内部进行中探针（中间演算、调起终审模型等一律不流入简洁版）
@@ -142,11 +142,6 @@ export function isConciseLogEntry(entry: SystemLogEntry): boolean {
   if (entry.step.startsWith("pipeline:")) {
     const event = (entry.details || {}) as PipelineEvent;
     return isConcisePipelineEvent(event);
-  }
-
-  // 服务端批改完成里程碑（若非流水线调用，如单次测试批改、回放、历史查看，必须展示最终批改结果与小题得分）
-  if (entry.scope === "grading" && (entry.step === "grading_completed" || entry.step === "grade_completed")) {
-    return true;
   }
 
   // 评分标准关键管理变更保留

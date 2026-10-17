@@ -2411,16 +2411,9 @@ function LogsPage() {
   };
   const entries = useMemo(() => {
     const raw = snapshot?.entries || [];
-    const hasPipelineEvents = raw.some((e) => e.step.startsWith("pipeline:"));
     return raw
       .filter((entry) => {
-        if (mode === "concise") {
-          // 若有活跃流水线事件，优先展示流水线批改结果（带完整各小问识别与判定细目），避免与服务端同名条目重复
-          if (hasPipelineEvents && entry.scope === "grading" && entry.step === "grading_completed") {
-            return false;
-          }
-          if (!isConciseLogEntry(entry)) return false;
-        }
+        if (mode === "concise" && !isConciseLogEntry(entry)) return false;
         if (!query.trim()) return true;
         return `${entry.scope} ${entry.step} ${entry.message}`.toLowerCase().includes(query.toLowerCase());
       })

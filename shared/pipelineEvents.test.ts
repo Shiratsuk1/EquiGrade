@@ -70,36 +70,36 @@ describe("pipelineEvents", () => {
       expect(pipelineEventLabel(event)).toBe("本地计分确认 4 / 6 分 ((1) 2/2分，(2) 2/2分，(3) 0/2分)，写入网页评分框");
     });
 
-    it("formats page_completed with subquestion breakdown and review flag note", () => {
+    it("formats page_completed with subquestion breakdown, verification result and review flag note", () => {
       const event: PipelineEvent = {
         type: "page_completed",
         score: 3,
         maxScore: 4,
         requiresReview: true,
+        verified: true,
         segments: [
           { id: "1", title: "(1)", score: 2, maxScore: 2, points: [] },
           { id: "2", title: "(2)", score: 1, maxScore: 2, points: [] }
         ]
       };
-      expect(pipelineEventLabel(event)).toBe("已提交 3 / 4 分 ((1) 2/2分，(2) 1/2分)（已标记复核）");
+      expect(pipelineEventLabel(event)).toBe("已提交 3 / 4 分 ((1) 2/2分，(2) 1/2分) · 回读核验一致（已标记复核）");
     });
   });
 
-  describe("isConcisePipelineEvent - 4-message lifecycle & noise filtering", () => {
-    it("strictly preserves the 4 key milestones in a normal single-question lifecycle", () => {
+  describe("isConcisePipelineEvent - concise lifecycle & noise filtering", () => {
+    it("preserves key milestones (extract -> grade result -> submit with verification) and excludes redundant score_writing", () => {
       const questionLifecycle: PipelineEvent[] = [
         { type: "image_extracted", pageKey: "page-1" },
-        { type: "grading_completed", score: 4, maxScore: 4, summary: "(1): A [2/2分]" },
+        { type: "grading_completed", score: 4, maxScore: 4, summary: "得分 4/4分" },
         { type: "score_writing", score: 4, maxScore: 4 },
         { type: "page_completed", score: 4, maxScore: 4 }
       ];
 
       const retained = questionLifecycle.filter(isConcisePipelineEvent);
-      expect(retained).toHaveLength(4);
+      expect(retained).toHaveLength(3);
       expect(retained.map((e) => e.type)).toEqual([
         "image_extracted",
         "grading_completed",
-        "score_writing",
         "page_completed"
       ]);
     });
@@ -216,7 +216,7 @@ describe("pipelineEvents", () => {
       expect(isConciseLogEntry(internalScoring)).toBe(false);
     });
 
-    it("retains template save/update entries and grading_completed milestones", () => {
+    it("retains template save/update entries and hides server grading completions/replays from concise mode", () => {
       const templateSaved: SystemLogEntry = {
         id: "log-7",
         operationId: "op-1",
@@ -239,7 +239,7 @@ describe("pipelineEvents", () => {
         step: "grading_completed",
         message: "网页答卷 zhixue:69220964 批改完成：6/6分 ((1)「C」 [2/2分]，(2)「2.4」 [2/2分]，(3)「B」 [2/2分])"
       };
-      expect(isConciseLogEntry(serverGradingCompleted)).toBe(true);
+      expect(isConciseLogEntry(serverGradingCompleted)).toBe(false);
     });
   });
 });

@@ -304,6 +304,7 @@ export interface PipelineEvent extends Record<string, unknown> {
   requiresReview?: boolean;
   reviewCount?: number;
   reviewReasons?: string[];
+  verified?: boolean;
   segments?: Array<{
     id: string;
     title: string;
