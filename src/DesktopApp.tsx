@@ -28,7 +28,7 @@ import type {
   ModelCallHistoryEntry, ModelCallLogDetails, PublicModelConfig, QuestionType, Rubric, SystemLogEntry, SystemLogSnapshot
 } from "../shared/types";
 import { api, uploadDocument } from "./api";
-import { cleanPipelineError, pipelineEventLabel, pipelineEventTone } from "../shared/pipelineEvents";
+import { cleanPipelineError, isConcisePipelineEvent, pipelineEventLabel, pipelineEventTone } from "../shared/pipelineEvents";
 import { detectHighRiskDeductions, summarizeReviewSignals } from "../shared/reviewSignals";
 import { GradingArtifactList, GradingArtifactPreview, ResultDetail } from "./App";
 import { LogDetailsSummary, ModelCallDetails, ModelCallHistory, logScopeLabel, logStatusLabel } from "./logPresentation";
@@ -781,9 +781,53 @@ function PipelineStageRail({ phase }: { phase: PluginPhase }) {
 }
 
 function PipelineMessageFeed({ browser, events }: { browser: EmbeddedBrowserState; events: PipelineEvent[] }) {
-  const visible = events.slice(-4).reverse();
+  const [mode, setMode] = useState<"concise" | "detailed">(() => {
+    try {
+      return (localStorage.getItem("hengzhun.logViewMode") as "concise" | "detailed") || "concise";
+    } catch {
+      return "concise";
+    }
+  });
+
+  const toggleMode = (next: "concise" | "detailed") => {
+    setMode(next);
+    try {
+      localStorage.setItem("hengzhun.logViewMode", next);
+    } catch {
+      // ignore
+    }
+  };
+
+  const displayEvents = useMemo(() => {
+    if (mode === "detailed") return events;
+    return events.filter(isConcisePipelineEvent);
+  }, [events, mode]);
+
+  const visible = displayEvents.slice(-4).reverse();
+
   return <section className="desktop-live-messages" aria-label="实时任务消息">
-    <div className="desktop-live-messages-heading"><span><Activity size={14} />实时任务消息</span><a href="/logs?electron=1">查看完整日志</a></div>
+    <div className="desktop-live-messages-heading">
+      <span><Activity size={14} />实时任务消息</span>
+      <div className="desktop-log-mode-tabs" role="tablist">
+        <button
+          type="button"
+          className={mode === "concise" ? "active" : ""}
+          onClick={() => toggleMode("concise")}
+          title="简洁版（默认）：只展示题目批改关键里程碑与报错，正常小题周期控制在4条以内"
+        >
+          简洁版
+        </button>
+        <button
+          type="button"
+          className={mode === "detailed" ? "active" : ""}
+          onClick={() => toggleMode("detailed")}
+          title="详细版：展示微观阶段变换与探针"
+        >
+          详细版
+        </button>
+      </div>
+      <a href="/logs?electron=1">查看完整日志</a>
+    </div>
     <div className="desktop-live-message-list">
       {visible.length ? visible.map((event, index) => <article className={pipelineEventTone(event)} style={{ animationDelay: `${Math.min(index, 7) * 20}ms` }} key={`${event.timestamp || "event"}-${index}`}>
         <span className="desktop-live-message-dot" />

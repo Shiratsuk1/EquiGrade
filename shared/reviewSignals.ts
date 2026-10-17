@@ -67,6 +67,12 @@ function uniqueNonEmpty(values: string[]) {
 }
 
 function hasTraceableFinalEvidence(result: GradingResult, subquestion: GradingResult["subquestions"][number]): boolean {
+  if (result.gradingPipeline === "small_question_staged" && result.smallQuestionAudit) {
+    const crop = result.smallQuestionAudit.crops.find((c) => c.subquestionId === subquestion.id);
+    if (crop && (crop.coordinate || crop.artifactFileName || crop.hasAnswer === false)) {
+      return true;
+    }
+  }
   const uniqueLineIds = [...new Set(subquestion.finalAnswerEvidenceLineIds ?? [])];
   if (uniqueLineIds.length === 0) return false;
   const linesById = new Map(result.evidence.lines.map((line) => [line.id, line]));
@@ -81,6 +87,10 @@ function hasTraceableFinalEvidence(result: GradingResult, subquestion: GradingRe
 }
 
 function hasTraceableDecisionEvidence(result: GradingResult, decision: GradingResult["subquestions"][number]["decisions"][number]): boolean {
+  if (result.gradingPipeline === "small_question_staged" && result.smallQuestionAudit) {
+    const crop = result.smallQuestionAudit.crops.find((c) => c.subquestionId === decision.subquestionId);
+    if (crop) return true;
+  }
   const uniqueLineIds = [...new Set(decision.evidenceLineIds)];
   if (uniqueLineIds.length === 0 || (decision.status !== "not_present" && !decision.evidenceQuote.trim())) return false;
   const linesById = new Map(result.evidence.lines.map((line) => [line.id, line]));
@@ -148,9 +158,11 @@ export function summarizeGradingReliability(result: GradingResult): GradingRelia
 
   const pointReviewSubquestions = result.gradingPipeline === "large_question"
     ? result.subquestions.filter((subquestion) => subquestion.finalAnswerStatus !== "correct" && subquestion.decisions.length > 0).length
-    : new Set(allDecisions
-      .filter((decision) => decision.decisionSource === "large_question_point_review")
-      .map((decision) => decision.subquestionId)).size;
+    : result.gradingPipeline === "small_question_staged"
+      ? (result.smallQuestionAudit?.recognitions.filter((r) => r.decisionSource === "escalated_review_c").length ?? 0)
+      : new Set(allDecisions
+        .filter((decision) => decision.decisionSource === "large_question_point_review")
+        .map((decision) => decision.subquestionId)).size;
   const directFullCreditSubquestions = result.subquestions.filter((subquestion) => (
     subquestion.finalAnswerStatus === "correct"
     && subquestion.decisions.length > 0

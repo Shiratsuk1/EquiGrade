@@ -64,6 +64,8 @@ export function pipelineEventLabel(event: PipelineEvent): string {
     case "page_review_flagged": return `已标记复核，继续写分 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分（${event.reviewCount ?? "?"} 项）`;
     case "page_marked_excellent": return "已在卷面勾选“优”控件作为存疑标记，方便人工回评";
     case "page_completed": return `已提交 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分${event.requiresReview ? "（已标记复核）" : ""}`;
+    case "grading_completed": return event.summary ? `智能批改完成：${event.summary}` : `智能批改完成，初判得分 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分`;
+    case "score_writing": return `本地计分确认 ${event.score ?? "--"} / ${event.maxScore ?? "--"} 分，写入网页评分框`;
     case "pipeline_start_rejected": return `启动失败：${reason || "尚未选择批改任务"}`;
     case "pipeline_question_mismatch_rejected": return `启动被阻断：${reason || "网页题目与评分标准不一致"}`;
     case "pipeline_question_mismatch_stopped": return `已安全暂停：${reason || "检测到网页题目切换，与当前评分标准不一致"}`;
@@ -80,3 +82,27 @@ export function pipelineEventLabel(event: PipelineEvent): string {
     default: return String(event.message || event.type || "流水线事件");
   }
 }
+
+/**
+ * 简洁版运行日志过滤器：
+ * 正常情况下一份小题（或大题）的全生命周期严格控制在 4 条关键消息以内：
+ * 1. image_extracted (提取答卷)
+ * 2. grading_completed (作答识别与判定结论)
+ * 3. score_writing (本地计分确认与写入)
+ * 4. page_completed (提交成功与翻页)
+ * 
+ * 异常、报错与存疑事件（无条件透出展示）：
+ * - 错误级别：plugin_preflight_failed, page_failed, pipeline_question_mismatch_rejected, browser_load_failed 等
+ * - 警告/存疑级别：page_review_flagged, page_marked_excellent, pipeline_paused*, page_skipped 等
+ * - 批次生命周期：pipeline_started, pipeline_completed
+ * 
+ * 过滤掉琐碎的高频微观阶段转换（pipeline_phase）与成功的周期性预检心跳（plugin_preflight_completed）。
+ */
+export function isConcisePipelineEvent(event: PipelineEvent): boolean {
+  const type = event.type ?? "";
+  if (errorEvents.has(type) || warningEvents.has(type)) return true;
+  if (type === "image_extracted" || type === "grading_completed" || type === "score_writing" || type === "page_completed") return true;
+  if (type === "pipeline_started" || type === "pipeline_completed" || type === "pipeline_completed_after_skip") return true;
+  return false;
+}
+

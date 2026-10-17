@@ -954,6 +954,7 @@ function gradingFlowLabel(result: GradingResult) {
   if (result.gradingPipeline === "large_question_responses_agent") return "大题 Responses Agent（无 PaddleOCR）";
   if (result.gradingPipeline === "large_question") return "大题分阶段批改";
   if (result.gradingPipeline === "small_question_ocr") return "小题 OCR 独立批改";
+  if (result.gradingPipeline === "small_question_staged") return "小题视觉切片分阶段批改";
   return result.gradingMode === "vision_direct" ? "历史视觉直批" : "历史提取式兼容流程";
 }
 
@@ -1026,8 +1027,9 @@ function GradingReliabilityPanel({ result, rubric, artifacts, onPreviewArtifact 
     if (artifact.category !== "agent_region") continue;
     const stagedCrop = /^subquestion-(.+)-crop\.webp$/i.exec(artifact.fileName);
     const agentReviewCrop = /^responses-agent-local-review-(.+)\.webp$/i.exec(artifact.fileName);
-    const subquestionId = stagedCrop?.[1] ?? agentReviewCrop?.[1];
-    if (subquestionId) cropBySubquestion.set(subquestionId, artifact);
+    const smallBlankCrop = /^small-blank-(.+)-crop\.webp$/i.exec(artifact.fileName);
+    const subquestionId = stagedCrop?.[1] ?? agentReviewCrop?.[1] ?? smallBlankCrop?.[1];
+    if (subquestionId) cropBySubquestion.set(subquestionId.trim(), artifact);
   }
   return <section className={`grading-reliability-panel ${summary.level}`}>
     <header className="grading-reliability-heading">
@@ -1043,30 +1045,32 @@ function GradingReliabilityPanel({ result, rubric, artifacts, onPreviewArtifact 
     </div>
     <div className="grading-basis-list">
       <div className="grading-basis-list-heading"><div><strong>模型打分依据</strong><span>按小问汇总最终答案判定、卷面依据和审验去向</span></div><small>总分由本地计分引擎重算</small></div>
-      {result.subquestions.map((subquestion) => <article className={`grading-basis-row ${subquestion.finalAnswerStatus}`} key={subquestion.id}>
-        <div className="grading-basis-score"><strong>{scoreLabel(subquestion.score, subquestion.maximumPossibleScore)}</strong><span>/ {subquestion.maxScore}</span></div>
-        <div className="grading-basis-content">
-          <div className="grading-basis-title"><strong>{subquestion.id} · {subquestion.title}</strong><span className={`grading-basis-verdict ${subquestion.finalAnswerStatus}`}>{compactFinalAnswerLabel(subquestion.finalAnswerStatus)}</span><small>{finalAnswerSourceLabel(subquestion.finalAnswerDecisionSource)}{typeof subquestion.finalAnswerConfidence === "number" ? ` · ${percent(subquestion.finalAnswerConfidence)}` : ""}</small></div>
-          {finalAnswerReasonForDisplay(subquestion) && <div className="grading-basis-reason"><MathText value={finalAnswerReasonForDisplay(subquestion)} formulaByDefault /></div>}
-          <div className="grading-basis-facts">
-            <span>学生：<MathText value={subquestion.studentFinalAnswer || "未写出"} formulaByDefault /></span>
-            <span>参考：<MathText value={rubricReferenceAnswer(subquestion, rubric) || "未配置"} formulaByDefault /></span>
-            <span>卷面依据：{subquestion.finalAnswerEvidenceLineIds?.length ? subquestion.finalAnswerEvidenceLineIds.join("、") : subquestion.finalAnswerStatus === "missing" ? "模型确认未见答案" : "未记录定位"}</span>
+      {result.subquestions.map((subquestion) => {
+        const crop = cropBySubquestion.get(subquestion.id) ?? cropBySubquestion.get(String(subquestion.id).trim());
+        return <article className={`grading-basis-row ${subquestion.finalAnswerStatus}`} key={subquestion.id}>
+          <div className="grading-basis-score"><strong>{scoreLabel(subquestion.score, subquestion.maximumPossibleScore)}</strong><span>/ {subquestion.maxScore}</span></div>
+          <div className="grading-basis-content">
+            <div className="grading-basis-title"><strong>{subquestion.id} · {subquestion.title}</strong><span className={`grading-basis-verdict ${subquestion.finalAnswerStatus}`}>{compactFinalAnswerLabel(subquestion.finalAnswerStatus)}</span><small>{finalAnswerSourceLabel(subquestion.finalAnswerDecisionSource)}{typeof subquestion.finalAnswerConfidence === "number" ? ` · ${percent(subquestion.finalAnswerConfidence)}` : ""}</small></div>
+            {finalAnswerReasonForDisplay(subquestion) && <div className="grading-basis-reason"><MathText value={finalAnswerReasonForDisplay(subquestion)} formulaByDefault /></div>}
+            <div className="grading-basis-facts">
+              <span>学生：<MathText value={subquestion.studentFinalAnswer || "未写出"} formulaByDefault /></span>
+              <span>参考：<MathText value={rubricReferenceAnswer(subquestion, rubric) || "未配置"} formulaByDefault /></span>
+              <span>卷面依据：{subquestion.finalAnswerEvidenceLineIds?.length ? subquestion.finalAnswerEvidenceLineIds.join("、") : crop ? "小空高清切片定位" : subquestion.finalAnswerStatus === "missing" ? "模型确认未见答案" : "未记录定位"}</span>
+            </div>
+            <div className="grading-basis-crop">
+              <span className="grading-basis-crop-label"><ImagePlus size={12} />答案区域截图</span>
+              {(() => {
+                if (!crop) return <small>未捕获有效答案区域</small>;
+                const image = <img src={crop.url} alt={`${subquestion.id} 学生答案区域截图`} />;
+                return onPreviewArtifact
+                  ? <button type="button" title={`预览 ${crop.fileName}`} onClick={() => onPreviewArtifact(crop)}>{image}</button>
+                  : image;
+              })()}
+            </div>
+            <p className="grading-basis-audit"><ShieldCheck size={13} />{subquestionAuditSummary(result, subquestion)}</p>
           </div>
-          <div className="grading-basis-crop">
-            <span className="grading-basis-crop-label"><ImagePlus size={12} />答案区域截图</span>
-            {(() => {
-              const crop = cropBySubquestion.get(subquestion.id);
-              if (!crop) return <small>未捕获有效答案区域</small>;
-              const image = <img src={crop.url} alt={`${subquestion.id} 学生答案区域截图`} />;
-              return onPreviewArtifact
-                ? <button type="button" title={`预览 ${crop.fileName}`} onClick={() => onPreviewArtifact(crop)}>{image}</button>
-                : image;
-            })()}
-          </div>
-          <p className="grading-basis-audit"><ShieldCheck size={13} />{subquestionAuditSummary(result, subquestion)}</p>
-        </div>
-      </article>)}
+        </article>;
+      })}
     </div>
     <div className="grading-attention-list">
       <strong>注意事项</strong>

@@ -346,6 +346,21 @@ function scorePayload(grading: GradingResponse, answer: ExtractedAnswer, require
   };
 }
 
+function formatGradingSummary(grading: GradingResponse): string {
+  const subquestions = grading.result?.subquestions ?? [];
+  if (!subquestions.length) {
+    return `初评得分 ${grading.score} / ${grading.maxScore} 分`;
+  }
+  const parts = subquestions.map((sub) => {
+    const rawAnswer = (sub as unknown as { finalAnswer?: string; studentAnswer?: string }).finalAnswer
+      || (sub as unknown as { finalAnswer?: string; studentAnswer?: string }).studentAnswer
+      || "";
+    const answerDisplay = rawAnswer ? `: ${rawAnswer}` : "";
+    return `(${sub.id})${answerDisplay} [${sub.score}/${sub.maxScore}分]`;
+  });
+  return `${parts.join("，")} · 合计 ${grading.score}/${grading.maxScore}分`;
+}
+
 async function confirmCurrentAnswer(expected: ExtractedAnswer) {
   const currentPageKey = adapter.currentPageKey();
   if (expected.sourcePageKey && currentPageKey !== expected.sourcePageKey) {
@@ -439,6 +454,14 @@ async function runPipeline(explicitRubricTitle?: string) {
         checkInterruption();
         if (!canCommitGradingResult(grading)) throw new Error("教师模型未返回可写入的有效分数");
         if (grading.imageHash && grading.imageHash !== answer.imageHash) throw new Error("批改结果与当前答卷图像哈希不一致");
+        record({
+          type: "grading_completed",
+          pageKey: answer.pageKey,
+          sourcePageKey: answer.sourcePageKey,
+          score: grading.score,
+          maxScore: grading.maxScore,
+          summary: formatGradingSummary(grading)
+        });
         const reviewRequired = grading.requiresReview || grading.status === "needs_review";
         if (reviewRequired) {
           const reviewReasons = grading.result?.reviewReasons ?? [];
@@ -458,6 +481,13 @@ async function runPipeline(explicitRubricTitle?: string) {
         const score = scorePayload(grading, answer, reviewRequired);
 
         phase("writing_score", `正在写入 ${grading.score} 分`, { pageKey: transitionKey });
+        record({
+          type: "score_writing",
+          pageKey: answer.pageKey,
+          sourcePageKey: answer.sourcePageKey,
+          score: grading.score,
+          maxScore: grading.maxScore
+        });
         commitStage = "write_started";
         await adapter.writeScore(score);
         commitStage = "score_written";

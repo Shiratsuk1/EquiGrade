@@ -367,4 +367,59 @@ describe("detectHighRiskDeductions", () => {
     expect(audit.totalLostScore).toBe(2);
     expect(audit.badgeLabel).toBe("⚠️ 存疑已扣分 -2分");
   });
+
+  it("recognizes small_question_staged crop audits as traceable final and decision evidence", () => {
+    const result = {
+      status: "completed",
+      score: 6,
+      maxScore: 6,
+      reviewReasons: [],
+      gradingPipeline: "small_question_staged",
+      evidence: { lines: [], finalAnswers: [], ambiguities: [] },
+      metrics: { ruleCoverage: 1, evidenceTraceability: 1, autoDecisionRate: 1, ambiguityRate: 0, durationMs: 200 },
+      smallQuestionAudit: {
+        pipeline: "staged_vision_crops",
+        layoutDurationMs: 100,
+        dualRecognitionDurationMs: 100,
+        escalatedReviewDurationMs: 0,
+        crops: [
+          { subquestionId: "1", title: "(1)", coordinate: [100, 200, 300, 400], hasAnswer: true, artifactFileName: "small-blank-1-crop.webp" },
+          { subquestionId: "2", title: "(2)", coordinate: [100, 450, 300, 650], hasAnswer: true, artifactFileName: "small-blank-2-crop.webp" },
+          { subquestionId: "3", title: "(3)", coordinate: [100, 700, 300, 900], hasAnswer: true, artifactFileName: "small-blank-3-crop.webp" }
+        ],
+        recognitions: []
+      },
+      subquestions: [
+        {
+          id: "1",
+          title: "(1)",
+          score: 2,
+          maxScore: 2,
+          finalAnswerStatus: "correct",
+          finalAnswerConfidence: 0.98,
+          finalAnswerDecisionSource: "consensus_ab",
+          studentFinalAnswer: "C",
+          decisions: [{
+            subquestionId: "1",
+            pointId: "P1",
+            status: "satisfied",
+            evidenceLineIds: [],
+            evidenceQuote: "C",
+            reason: "初检一致",
+            confidence: 0.98,
+            requiresReview: false,
+            awardedScore: 2,
+            maxScore: 2,
+            decisionSource: "model"
+          }]
+        }
+      ]
+    } as unknown as GradingResult;
+
+    const summary = summarizeGradingReliability(result);
+    expect(summary.level).toBe("reliable");
+    expect(summary.finalAnswers.traceable).toBe(1);
+    expect(summary.finalAnswers.missingEvidence).toBe(0);
+  });
 });
+

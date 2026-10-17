@@ -327,11 +327,16 @@ body.electron-host { margin: 0; overflow: hidden; background: var(--prism-window
 .desktop-pipeline-rail.warning > div.active .desktop-pipeline-rail-dot { border-color: var(--desktop-amber); background: var(--desktop-amber); box-shadow: 0 0 0 3px var(--desktop-amber-soft); }
 .desktop-pipeline-rail.success > div.active .desktop-pipeline-rail-dot { border-color: var(--desktop-green); background: var(--desktop-green); box-shadow: 0 0 0 3px var(--desktop-green-soft); animation: none; }
 @keyframes desktop-pipeline-glow { 0%, 100% { box-shadow: 0 0 0 3px var(--desktop-accent-ring); } 50% { box-shadow: 0 0 0 6px transparent; } }
-.desktop-live-messages { display: grid; grid-template-columns: 142px minmax(0, 1fr); align-items: stretch; gap: 10px; flex: 0 0 64px; min-width: 0; padding: 8px 14px; border-bottom: 1px solid var(--desktop-line); background: #f4fbfb; }
-.desktop-live-messages-heading { display: flex; flex-direction: column; justify-content: center; gap: 5px; min-width: 0; }
+.desktop-live-messages { display: grid; grid-template-columns: 184px minmax(0, 1fr); align-items: stretch; gap: 10px; flex: 0 0 64px; min-width: 0; padding: 8px 14px; border-bottom: 1px solid var(--desktop-line); background: #f4fbfb; }
+.desktop-live-messages-heading { display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 0; }
 .desktop-live-messages-heading > span { display: flex; align-items: center; gap: 6px; color: var(--desktop-ink); font-size: var(--desktop-fs-small); font-weight: 750; }
 .desktop-live-messages-heading > span svg { color: var(--desktop-green); }
 .desktop-live-messages-heading a { color: var(--desktop-green-hover); font-size: var(--desktop-fs-micro); text-decoration: none; }
+.desktop-live-messages-heading .desktop-log-mode-tabs { align-self: flex-start; }
+.desktop-log-mode-tabs { display: inline-flex; align-items: center; padding: 2px; background: #e2ecec; border-radius: 5px; gap: 2px; }
+.desktop-log-mode-tabs button { padding: 1px 7px; font-size: 11px; font-weight: 500; border: none; background: transparent; color: var(--desktop-muted); border-radius: 3px; cursor: pointer; transition: all .15s ease; line-height: 1.4; }
+.desktop-log-mode-tabs button:hover { color: var(--desktop-ink); }
+.desktop-log-mode-tabs button.active { background: #fff; color: var(--desktop-green); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }
 .desktop-live-message-list { display: flex; gap: 7px; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
 .desktop-live-message-list article { display: grid; grid-template-columns: 7px minmax(0, 1fr) auto; align-items: center; gap: 7px; flex: 1 0 190px; min-width: 0; padding: 6px 8px; border: 1px solid var(--desktop-line); border-radius: 5px; background: #fff; animation: desktop-message-in 220ms var(--prism-ease) both; }
 @keyframes desktop-message-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
