@@ -15,6 +15,7 @@ import type {
   PluginDiagnosticRequest,
   PluginDiagnosticResult,
   PluginDiagnosticTargetResult,
+  PluginPhase,
   PluginRequest,
   PluginResponse,
   PluginStatus,
@@ -192,6 +193,9 @@ export class EmbeddedBrowserSession {
     reject: (reason: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }>();
+  private frameFinishReadyTimer: ReturnType<typeof setTimeout> | undefined;
+  private inPageNavigationTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastInPageNavigatedUrl: string | undefined;
 
   constructor({ window, preloadPath, homeUrl }: BrowserSessionOptions) {
     this.window = window;
@@ -236,13 +240,23 @@ export class EmbeddedBrowserSession {
       publish();
     });
     contents.on("did-navigate-in-page", (_event, url) => {
-      resetPluginForNavigation();
       this.rememberTargetUrl(url);
       publish();
-      contents.send("pipeline:page-invalidated");
-      setTimeout(() => {
+      const urlWithoutHash = url.split("#")[0];
+      const lastWithoutHash = this.lastInPageNavigatedUrl?.split("#")[0];
+      const isSubstantiveChange = urlWithoutHash !== lastWithoutHash;
+      this.lastInPageNavigatedUrl = url;
+
+      if (isSubstantiveChange) {
+        resetPluginForNavigation();
+        contents.send("pipeline:page-invalidated");
+      }
+
+      if (this.inPageNavigationTimer) clearTimeout(this.inPageNavigationTimer);
+      this.inPageNavigationTimer = setTimeout(() => {
+        this.inPageNavigationTimer = undefined;
         if (!contents.isDestroyed()) contents.send("pipeline:page-ready");
-      }, 120);
+      }, isSubstantiveChange ? 200 : 800);
     });
     contents.on("did-stop-loading", () => this.scheduleStorageFlush(700));
     contents.on("did-navigate", () => this.scheduleStorageFlush(700));
@@ -263,7 +277,14 @@ export class EmbeddedBrowserSession {
       publish();
     });
     contents.on("did-frame-finish-load", (_event, isMainFrame) => {
-      if (!isMainFrame) setTimeout(() => contents.send("pipeline:page-ready"), 120);
+      if (isMainFrame) return;
+      const activePhases: PluginPhase[] = ["extracting", "grading", "writing_score", "submitting", "verifying", "navigating_next"];
+      if (activePhases.includes(this.plugin.phase)) return;
+      if (this.frameFinishReadyTimer) clearTimeout(this.frameFinishReadyTimer);
+      this.frameFinishReadyTimer = setTimeout(() => {
+        this.frameFinishReadyTimer = undefined;
+        if (!contents.isDestroyed()) contents.send("pipeline:page-ready");
+      }, 600);
     });
     contents.setWindowOpenHandler(({ url }) => {
       if (/^https?:/i.test(url)) void contents.loadURL(url);

@@ -214,6 +214,14 @@ body.electron-host { margin: 0; overflow: hidden; background: var(--prism-window
 .desktop-check-list li svg { color: var(--desktop-red); }
 .desktop-check-list li.ok svg { color: var(--desktop-green); }
 .desktop-check-list li span { grid-column: 2; overflow: hidden; color: var(--desktop-subtle); font-size: var(--desktop-fs-small); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-readiness-guide { display: flex; align-items: flex-start; gap: 10px; margin-top: 13px; padding: 10px 12px; border-radius: 6px; border-left: 3px solid #f9ab00; background: #fef7e0; color: #3c4043; }
+.desktop-readiness-guide svg { flex: 0 0 auto; margin-top: 2px; color: #b06000; }
+.desktop-readiness-guide strong { display: block; font-size: var(--desktop-fs-small); font-weight: 750; color: #843b00; }
+.desktop-readiness-guide p { margin: 3px 0 0; font-size: var(--desktop-fs-small); line-height: 1.5; color: #5f6368; }
+[data-theme="dark"] .desktop-readiness-guide { border-left-color: #fdd663; background: rgba(253, 214, 99, 0.12); color: #e8eaed; }
+[data-theme="dark"] .desktop-readiness-guide svg { color: #fdd663; }
+[data-theme="dark"] .desktop-readiness-guide strong { color: #fdd663; }
+[data-theme="dark"] .desktop-readiness-guide p { color: #bdc1c6; }
 .desktop-primary-action { display: flex; align-items: center; gap: 7px; min-height: 37px; margin-top: 14px; padding: 0 12px; border: 1px solid var(--desktop-green); border-radius: 5px; background: var(--desktop-green); color: #fff; font-size: var(--desktop-fs-body); font-weight: 750; text-decoration: none; }
 .desktop-primary-action:hover { border-color: var(--desktop-green-hover); background: var(--desktop-green-hover); }
 .desktop-primary-action svg:last-child { margin-left: auto; }

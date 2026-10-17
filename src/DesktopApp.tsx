@@ -5,7 +5,8 @@ import {
   Code2, FileCheck2, FileClock, FileText, Globe2, History, Home, ImageDown, ImagePlus, KeyRound,
   LayoutDashboard, Link2, ListChecks, LoaderCircle, Lock, Plug, Plus, RefreshCw,
   RotateCcw, Save, Search, Settings, ShieldCheck, SkipForward, SlidersHorizontal,
-  Sparkles, Square, Star, TerminalSquare, Trash2, Unplug, Upload, Wifi, WifiOff, X, XCircle
+  Sparkles, Square, Star, TerminalSquare, Trash2, Unplug, Upload, Wifi, WifiOff, X, XCircle,
+  Info, ExternalLink
 } from "lucide-react";
 import type {
   BrowserAction, EmbeddedBrowserState, ElectronHostBridge, PipelineControl,
@@ -363,6 +364,10 @@ function sharedElementStyle(name: string) {
 
 function reducePipelineEvents(events: PipelineEvent[]): PipelineSummary {
   return events.reduce<PipelineSummary>((summary, event) => {
+    const last = summary.events[summary.events.length - 1];
+    if (event.type === "pipeline_phase" && last?.type === "pipeline_phase" && last.message === event.message && last.phase === event.phase) {
+      return summary;
+    }
     const next = { ...summary, events: [...summary.events, event].slice(-50) };
     if (event.type === "page_completed") {
       next.processed += 1;
@@ -490,7 +495,8 @@ function MetricStrip({ browser, summary, template }: { browser: EmbeddedBrowserS
 }
 
 function RecentEvents({ events, limit = 8 }: { events: PipelineEvent[]; limit?: number }) {
-  const visible = events.slice(-limit).reverse();
+  const conciseEvents = useMemo(() => events.filter(isConcisePipelineEvent), [events]);
+  const visible = conciseEvents.slice(-limit).reverse();
   return <ol className="desktop-event-list">
     {visible.length === 0 ? <li className="empty"><span>--:--:--</span><div><strong>等待批改记录</strong><p>打开实时批改并检查目标阅卷页面。</p></div></li> : visible.map((event, index) => <li key={`${event.timestamp || "event"}-${index}`}>
       <span>{formatTime(event.timestamp)}</span><div><strong>{pipelineEventLabel(event)}</strong><p>{event.phase ? phaseLabel(event.phase) : String(event.adapterId || "系统")}</p></div>
@@ -574,6 +580,8 @@ function DashboardPage({ browser, summary, template, onEnterTest }: { browser: E
   const imageReady = Boolean(browser.plugin.capabilities.answerImage);
   const controlsReady = Boolean(browser.plugin.capabilities.scoreInput && browser.plugin.capabilities.submit && browser.plugin.capabilities.next);
   const readyCount = [Boolean(template?.ready), browser.plugin.connected, imageReady, controlsReady].filter(Boolean).length;
+  const isLoginPage = browser.url.toLowerCase().includes("login");
+
   return <div className="desktop-page-body desktop-dashboard">
     <MetricStrip browser={browser} summary={summary} template={template} />
     <section className="desktop-dashboard-grid">
@@ -586,7 +594,38 @@ function DashboardPage({ browser, summary, template, onEnterTest }: { browser: E
           <li className={imageReady ? "ok" : ""}>{imageReady ? <Check size={15} /> : <XCircle size={15} />}学生答卷图像可提取<span>{imageReady ? "已成功识别答卷作答区域与图片元素" : "需页面装载学生手写作答图像"}</span></li>
           <li className={controlsReady ? "ok" : ""}>{controlsReady ? <Check size={15} /> : <XCircle size={15} />}写分与提交控件可用<span>{controlsReady ? "评分框、提交与换卷控制均已确认" : "需确认最终总分框与提交控件"}</span></li>
         </ul>
-        <a className="desktop-primary-action" href="/jobs/current?electron=1"><CirclePlay size={16} />查看当前批改<ChevronRight size={15} /></a>
+
+        {readyCount < 4 && (
+          <div className="desktop-readiness-guide">
+            <Info size={15} />
+            <div>
+              <strong>下一步操作指引</strong>
+              <p>
+                {!template?.ready
+                  ? "请先在下方或标准库中绑定与本次批改题目相符的评分标准。"
+                  : !browser.plugin.connected
+                    ? "请点击下方按钮前往阅卷页面打开目标阅卷网站（智学网/睿芽云）。"
+                    : (!imageReady || !controlsReady)
+                      ? (isLoginPage
+                        ? "当前处于阅卷网站登录界面。请前往阅卷页面在内嵌浏览器中完成登录，进入具体试卷批阅任务后，系统将自动就绪。"
+                        : "已连接阅卷网站，但尚未进入具体答卷页面。请在内嵌浏览器中打开目标答卷任务，页面载入后将自动就绪。")
+                      : "准备就绪，可以前往批改台开始批改。"}
+              </p>
+            </div>
+          </div>
+        )}
+
+        <a className="desktop-primary-action" href="/jobs/current?electron=1">
+          {readyCount === 4 ? <CirclePlay size={16} /> : <ExternalLink size={16} />}
+          {readyCount === 4
+            ? "前往批改台开始批改"
+            : !browser.plugin.connected
+              ? "前往阅卷页面连接"
+              : (!imageReady || !controlsReady)
+                ? (isLoginPage ? "前往阅卷页面登录" : "前往阅卷页面打开试卷")
+                : "前往当前批改"}
+          <ChevronRight size={15} />
+        </a>
       </div>
       <div className="desktop-section">
         <div className="desktop-section-heading"><div><span>实时事件</span><h2>最近流水线活动</h2></div><a href="/logs?electron=1">完整日志</a></div>
@@ -753,7 +792,7 @@ function PipelineControls({
     }
     finally { window.setTimeout(() => setPending(null), 280); }
   };
-  const active = ["extracting", "grading", "writing_score", "submitting", "verifying", "navigating_next", "preflight"].includes(browser.plugin.phase);
+  const active = ["extracting", "grading", "writing_score", "submitting", "verifying", "navigating_next"].includes(browser.plugin.phase);
   const questionMismatch = Boolean(questionAlignment && !questionAlignment.ok);
   const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities) && browser.plugin.phase === "ready" && !questionMismatch;
   const statusMessage = error || (questionMismatch ? questionAlignment!.issues[0] : dryRunMessage || browser.plugin.message);

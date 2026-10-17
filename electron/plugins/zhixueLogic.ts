@@ -28,7 +28,7 @@ export function matchesZhixueUrl(url: URL) {
   if (isLocalMock) return true;
   const isZhixue = hostname === "zhixue.com" || hostname.endsWith(".zhixue.com");
   if (url.protocol !== "https:" || !isZhixue) return false;
-  return url.pathname.startsWith("/htm-container-web/") || url.pathname.startsWith("/webmarking/");
+  return true;
 }
 
 export function buildZhixueScorePlan(payload: ScoreWritePayload, fields: ZhixueScoreField[]): ZhixueScorePlan {
