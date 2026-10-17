@@ -333,9 +333,9 @@ body.electron-host { margin: 0; overflow: hidden; background: var(--prism-window
 .desktop-live-messages-heading > span svg { color: var(--desktop-green); }
 .desktop-live-messages-heading a { color: var(--desktop-green-hover); font-size: var(--desktop-fs-micro); text-decoration: none; }
 .desktop-live-messages-heading .desktop-log-mode-tabs { align-self: flex-start; }
-.desktop-log-mode-tabs { display: inline-flex; align-items: center; padding: 2px; background: #e2ecec; border-radius: 5px; gap: 2px; }
+.desktop-log-mode-tabs { display: inline-flex; align-items: center; padding: 2px; background: #e2ecec; border-radius: 5px; gap: 2px; flex-shrink: 0; white-space: nowrap; }
 .desktop-log-mode-tabs button,
-.desktop-log-toolbar .desktop-log-mode-tabs button { height: 26px; padding: 2px 9px; font-size: 11px; font-weight: 550; border: none; background: transparent; color: var(--desktop-muted); border-radius: 4px; cursor: pointer; transition: all .15s ease; line-height: 1.4; box-shadow: none; }
+.desktop-log-toolbar .desktop-log-mode-tabs button { width: auto !important; height: 26px; padding: 2px 10px; font-size: 11px; font-weight: 550; border: none; background: transparent; color: var(--desktop-muted); border-radius: 4px; cursor: pointer; transition: all .15s ease; line-height: 1.4; box-shadow: none; white-space: nowrap; flex-shrink: 0; }
 .desktop-log-mode-tabs button:hover,
 .desktop-log-toolbar .desktop-log-mode-tabs button:hover { color: var(--desktop-ink); }
 .desktop-log-mode-tabs button.active,
@@ -715,9 +715,9 @@ body.electron-host { margin: 0; overflow: hidden; background: var(--prism-window
 .desktop-log-toolbar { display: flex; flex: 0 0 45px; align-items: center; gap: 7px; padding: 6px; border: 1px solid var(--desktop-line); border-radius: 6px; background: #fff; }
 .desktop-log-toolbar label { display: flex; align-items: center; gap: 7px; flex: 1 1 auto; min-width: 0; height: 31px; padding: 0 8px; border: 1px solid var(--desktop-line); border-radius: 4px; color: var(--desktop-muted); }
 .desktop-log-toolbar input { width: 100%; border: 0; outline: 0; font-size: 9px; }
-.desktop-log-toolbar button { display: flex; align-items: center; justify-content: center; gap: 5px; height: 31px; padding: 0 8px; border: 1px solid var(--desktop-line); border-radius: 4px; background: #fff; color: var(--desktop-muted); font-size: 9px; cursor: pointer; }
-.desktop-log-toolbar button:last-child { width: 31px; padding: 0; }
-.desktop-log-toolbar button.active { border-color: #bce6e2; background: var(--desktop-green-soft); color: var(--desktop-green-hover); }
+.desktop-log-toolbar > button { display: flex; align-items: center; justify-content: center; gap: 5px; height: 31px; padding: 0 8px; border: 1px solid var(--desktop-line); border-radius: 4px; background: #fff; color: var(--desktop-muted); font-size: 9px; cursor: pointer; }
+.desktop-log-toolbar > button:last-child { width: 31px; padding: 0; }
+.desktop-log-toolbar > button.active { border-color: #bce6e2; background: var(--desktop-green-soft); color: var(--desktop-green-hover); }
 .desktop-log-stop-error { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding: 7px 9px; border: 1px solid #ebd0cd; border-radius: 5px; background: var(--desktop-red-soft); color: var(--desktop-red); font-size: 9px; }
 .desktop-log-load-error { display: flex; align-items: center; gap: 7px; margin-top: 8px; padding: 7px 9px; border: 1px solid #ebd0cd; border-radius: 5px; background: var(--desktop-red-soft); color: var(--desktop-red); font-size: 9px; }
 .desktop-log-load-error span { min-width: 0; overflow-wrap: anywhere; }

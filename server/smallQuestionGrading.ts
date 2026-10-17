@@ -1583,7 +1583,7 @@ ${crop.criteriaGuidance ? `评分规则与特殊要求：${crop.criteriaGuidance
             extractedB: resB.extractedAnswer,
             issuesB: resB.issues,
             triggerReason: discrepancy.reason
-          }, "warning");
+          }, "info");
 
           const domainGuardC = buildDomainGuardC(crop.domain, crop.finalAnswers);
           const comparisonDetails = [
@@ -1798,7 +1798,7 @@ ${crop.criteriaGuidance ? `评分规则与特殊要求：${crop.criteriaGuidance
           statusB: resB.status,
           issuesB: resB.issues,
           triggerReason: effectiveTriggerReason
-        }, "warning");
+        }, "info");
 
         const domainGuardC = buildDomainGuardC(crop.domain, crop.finalAnswers);
         const comparisonDetails = [

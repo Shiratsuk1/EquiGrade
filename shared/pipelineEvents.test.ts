@@ -134,11 +134,23 @@ describe("pipelineEvents", () => {
         timestamp: new Date().toISOString(),
         level: "warning",
         status: "completed",
-        scope: "grading",
-        step: "review_flagged",
-        message: "小问(2)置信度偏低"
+        scope: "system",
+        step: "network_jitter",
+        message: "检测到网络轻微波动"
       };
       expect(isConciseLogEntry(warningEntry)).toBe(true);
+
+      const discrepancyProgressEntry: SystemLogEntry = {
+        id: "log-2b",
+        operationId: "op-1",
+        timestamp: new Date().toISOString(),
+        level: "warning",
+        status: "progress",
+        scope: "grading",
+        step: "small_question_discrepancy_detected",
+        message: "(3)初检出现分歧或疑点，正在调起思考预算拉满的深度终审模型(同时传入切片与全景)"
+      };
+      expect(isConciseLogEntry(discrepancyProgressEntry)).toBe(false);
     });
 
     it("delegates pipeline:* entries to isConcisePipelineEvent", () => {

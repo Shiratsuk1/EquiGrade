@@ -110,22 +110,43 @@ export function isConcisePipelineEvent(event: PipelineEvent): boolean {
 
 /**
  * 简洁版系统日志过滤器（用于运行日志全量流筛选）：
- * 1. 任何级别为 error / warning，或 status 为 failed 的日志无条件保留展示
- * 2. 流水线步骤（step 前缀为 pipeline:）：使用 isConcisePipelineEvent 严格把控，单题正常周期 4 条
- * 3. 评分标准保存等关键管理操作（scope: storage 且 step 为 template_saved / template_updated）保留
+ * 1. 严格过滤任何非流水线的中间过程/进行中探针（如内部调起终审、正在评分等，绝不流入简洁版）
+ * 2. 真实错误与失败无条件透出
+ * 3. 流水线核心事件严格按照 4 消息生命周期（提取答卷 -> 批改结论 -> 本地计分 -> 提交翻页）及异常门禁把控
  * 4. 隐藏内部常规模型调用明细、逐点打分演算与高频探针
  */
 export function isConciseLogEntry(entry: SystemLogEntry): boolean {
-  if (entry.level === "error" || entry.level === "warning" || entry.status === "failed") {
+  // 过滤内部进行中探针（中间演算、调起终审模型等一律不流入简洁版）
+  if (entry.status === "progress" || entry.status === "started") {
+    if (!entry.step.startsWith("pipeline:")) {
+      return false;
+    }
+  }
+
+  // 错误与失败无条件展示
+  if (entry.level === "error" || entry.status === "failed") {
     return true;
   }
+
+  // 流水线事件：严格通过 isConcisePipelineEvent 门禁
   if (entry.step.startsWith("pipeline:")) {
     const event = (entry.details || {}) as PipelineEvent;
     return isConcisePipelineEvent(event);
   }
+
+  // 评分标准关键管理变更保留
   if (entry.scope === "storage" && (entry.step === "template_saved" || entry.step === "template_updated")) {
     return true;
   }
+
+  // 其它内部非流水线告警（如模型、评分内部演算提示）在简洁版中隐藏，放入详细版
+  if (entry.level === "warning") {
+    if (entry.scope === "grading" || entry.scope === "scoring" || entry.scope === "model") {
+      return false;
+    }
+    return true;
+  }
+
   return false;
 }
 
