@@ -499,10 +499,7 @@ export function createZhixueAdapter(): SiteAdapter {
         markExcellent: Boolean(excellent)
       };
       const issues: string[] = [];
-      if (!doc) {
-        const isLogin = typeof window !== "undefined" && window.location.pathname.toLowerCase().includes("login");
-        issues.push(isLogin ? "当前处于智学网登录页面，请在内嵌浏览器中完成登录并进入阅卷页面" : "未找到智学网阅卷子页面，请进入具体试卷批阅页面");
-      }
+      if (!doc) issues.push("未找到智学网阅卷子页面");
       if (promptIssue) issues.push(promptIssue);
       if (!pageKey && !completed) issues.push("无法生成智学网当前答卷的稳定页面标识");
       if (!capabilities.answerImage) issues.push("未找到智学网学生作答原图");

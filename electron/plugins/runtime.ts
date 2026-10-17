@@ -139,16 +139,9 @@ function publish(patch: Partial<PluginStatus>) {
   if (document.body && document.documentElement) updateWidget();
 }
 
-let lastRecordedPhase: PluginPhase | undefined;
-let lastRecordedMessage: string | undefined;
-
 function phase(next: PluginPhase, message: string, patch: Partial<PluginStatus> = {}) {
   publish({ ...patch, phase: next, message });
-  if (next !== lastRecordedPhase || message !== lastRecordedMessage) {
-    lastRecordedPhase = next;
-    lastRecordedMessage = message;
-    record({ type: "pipeline_phase", nextPhase: next, message, pageKey: patch.pageKey });
-  }
+  record({ type: "pipeline_phase", nextPhase: next, message, pageKey: patch.pageKey });
 }
 
 function statusLabel(value: PluginPhase) {
@@ -227,17 +220,9 @@ function updateWidget() {
   widget.querySelector<HTMLButtonElement>("[data-hz-pause]")!.disabled = !running;
 }
 
-let lastPreflightCompletedAt = 0;
-let lastPreflightSuccess = false;
-
 async function runPreflight() {
   const target = currentPreflightTarget();
   if (preflightRun && samePreflightTarget(preflightRun.target, target)) return preflightRun.promise;
-
-  const now = Date.now();
-  if (!running && lastPreflightSuccess && samePreflightTarget({ generation: pageGeneration, url: window.location.href }, target) && (now - lastPreflightCompletedAt < 2000)) {
-    return true;
-  }
 
   const candidateAdapter = selectAdapter();
   adapter = candidateAdapter;
@@ -249,10 +234,7 @@ async function runPreflight() {
       capabilities: emptyPluginCapabilities(),
       pageKey: undefined
     });
-    const deadline = running
-      ? Date.now() + 12_000
-      : (typeof document !== "undefined" && document.readyState === "complete" ? Date.now() + 500 : Date.now() + 1_500);
-
+    const deadline = Date.now() + 12_000;
     let rawResult = await candidateAdapter.preflight();
     while (!rawResult.ok && Date.now() < deadline) {
       if (!isCurrentPreflight(target)) return false;
@@ -271,18 +253,10 @@ async function runPreflight() {
       questionLabel: result.questionLabel
     });
     if (!result.ok) {
-      lastPreflightSuccess = false;
-      lastPreflightCompletedAt = Date.now();
-      if (running) {
-        phase("failed", result.issues.join("；"));
-        record({ type: "plugin_preflight_failed", issues: result.issues, capabilities: result.capabilities });
-      } else {
-        phase("idle", result.issues[0] || "等待打开学生答卷页面");
-      }
+      phase("failed", result.issues.join("；"));
+      record({ type: "plugin_preflight_failed", issues: result.issues, capabilities: result.capabilities });
       return false;
     }
-    lastPreflightSuccess = true;
-    lastPreflightCompletedAt = Date.now();
     phase("ready", "站点适配完成，可以开始自动批改", { pageKey: result.pageKey });
     record({ type: "plugin_preflight_completed", capabilities: result.capabilities, pageKey: result.pageKey });
     return true;
@@ -947,9 +921,7 @@ export function bootPluginRuntime() {
     invalidatePage();
   });
   ipcRenderer.on("pipeline:page-ready", () => {
-    if (window.location.href !== lastObservedUrl) {
-      invalidatePage();
-    }
+    invalidatePage();
     if (!running) void runPreflight();
   });
   window.addEventListener("DOMContentLoaded", () => {
