@@ -450,12 +450,13 @@ function DesktopSidebar({ route, browser }: { route: DesktopRoute; browser: Embe
           </span>
         ) : undefined}
       />
-      <span className="desktop-nav-group">开发工具</span>
-      <NavLink route={{ id: "logs" }} current={route} icon={<FileClock size={17} />} label="运行日志" />
+      <span className="desktop-nav-group">系统设置</span>
       <NavLink route={{ id: "models" }} current={route} icon={<Bot size={17} />} label="教师模型" />
+      <NavLink route={{ id: "settings" }} current={route} icon={<Settings size={17} />} label="应用设置" />
+      <span className="desktop-nav-group">排查诊断</span>
+      <NavLink route={{ id: "logs" }} current={route} icon={<FileClock size={17} />} label="运行日志" />
       <NavLink route={{ id: "browser-debug" }} current={route} icon={<Globe2 size={17} />} label="浏览器诊断" />
       <NavLink route={{ id: "plugins-debug" }} current={route} icon={<Plug size={17} />} label="插件诊断" />
-      <NavLink route={{ id: "settings" }} current={route} icon={<Settings size={17} />} label="应用设置" />
     </nav>
     <div className="desktop-sidebar-status">
       <span className={browser.plugin.connected ? "desktop-live-dot online" : "desktop-live-dot"} />
@@ -570,8 +571,9 @@ function TestEntryButton({ onEnterTest }: { onEnterTest: () => Promise<unknown> 
 }
 
 function DashboardPage({ browser, summary, template, onEnterTest }: { browser: EmbeddedBrowserState; summary: PipelineSummary; template: TemplateContext | null; onEnterTest: () => Promise<unknown> }) {
-  const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities);
-  const readyCount = [template?.ready, browser.plugin.connected, pageReady].filter(Boolean).length;
+  const imageReady = Boolean(browser.plugin.capabilities.answerImage);
+  const controlsReady = Boolean(browser.plugin.capabilities.scoreInput && browser.plugin.capabilities.submit && browser.plugin.capabilities.next);
+  const readyCount = [Boolean(template?.ready), browser.plugin.connected, imageReady, controlsReady].filter(Boolean).length;
   return <div className="desktop-page-body desktop-dashboard">
     <MetricStrip browser={browser} summary={summary} template={template} />
     <section className="desktop-dashboard-grid">
@@ -581,8 +583,8 @@ function DashboardPage({ browser, summary, template, onEnterTest }: { browser: E
         <ul className="desktop-check-list">
           <li className={template?.ready ? "ok" : ""}>{template?.ready ? <Check size={15} /> : <XCircle size={15} />}评分标准已选择<span>{template?.title || "尚未选择评分标准"}</span></li>
           <li className={browser.plugin.connected ? "ok" : ""}>{browser.plugin.connected ? <Check size={15} /> : <XCircle size={15} />}目标阅卷页面已连接<span>{browser.plugin.adapterName || "等待打开阅卷页面"}</span></li>
-          <li className={pageReady ? "ok" : ""}>{pageReady ? <Check size={15} /> : <XCircle size={15} />}学生答卷可以读取<span>{pageReady ? "答卷、评分和翻页控件均已确认" : "需同时确认答卷、评分、提交和翻页控件"}</span></li>
-          <li className={pageReady ? "ok" : ""}>{pageReady ? <Check size={15} /> : <XCircle size={15} />}最终总分框可以使用<span>{pageReady ? "提交后自动进入下一份" : "当前页面尚未通过完整检查"}</span></li>
+          <li className={imageReady ? "ok" : ""}>{imageReady ? <Check size={15} /> : <XCircle size={15} />}学生答卷图像可提取<span>{imageReady ? "已成功识别答卷作答区域与图片元素" : "需页面装载学生手写作答图像"}</span></li>
+          <li className={controlsReady ? "ok" : ""}>{controlsReady ? <Check size={15} /> : <XCircle size={15} />}写分与提交控件可用<span>{controlsReady ? "评分框、提交与换卷控制均已确认" : "需确认最终总分框与提交控件"}</span></li>
         </ul>
         <a className="desktop-primary-action" href="/jobs/current?electron=1"><CirclePlay size={16} />查看当前批改<ChevronRight size={15} /></a>
       </div>
@@ -878,6 +880,7 @@ function TemplateInspector({
   onNavigateRecord?: (recordId: string) => void;
 }) {
   const [internalTab, setInternalTab] = useState<"question" | "rubric" | "result">("rubric");
+  const [artifactPreview, setArtifactPreview] = useState<GradingArtifact | null>(null);
   const tab = activeTab ?? internalTab;
   const setTab = onTabChange ?? setInternalTab;
 
@@ -927,15 +930,38 @@ function TemplateInspector({
               {latestRecord.result.subquestions.map((subq) => {
                 const cropArtifact = findSubquestionCropArtifact(subq, latestRecord);
                 const isFull = subq.score >= subq.maxScore;
+                const recognitionAudit = latestRecord.result.smallQuestionAudit?.recognitions?.find((r) => r.subquestionId === subq.id);
+                const rawRiskPoints = recognitionAudit?.skepticAssessor?.riskPoints?.filter((p) => p !== "无") ?? [];
+                const finalRiskPoints = recognitionAudit?.finalRiskPoints?.filter((p) => p !== "无") ?? rawRiskPoints;
+
                 return (
-                  <article key={subq.id} className="desktop-result-subq-card">
+                  <article key={subq.id} className={`desktop-result-subq-card ${isFull ? "card-full" : "card-deducted"}`}>
                     <header>
-                      <strong>{subq.id} · {subq.title}</strong>
-                      <b className={isFull ? "score-full" : "score-deducted"}>{subq.score} / {subq.maxScore} 分</b>
+                      <div className="subq-title-wrap">
+                        <strong>{subq.id} · {subq.title}</strong>
+                        {finalRiskPoints.map((risk) => (
+                          <span key={risk} className="desktop-risk-badge" title="模型检测到卷面风险">
+                            ⚠️ {risk}
+                          </span>
+                        ))}
+                      </div>
+                      <b className={isFull ? "score-full" : "score-deducted"}>
+                        {subq.score} / {subq.maxScore} 分
+                      </b>
                     </header>
                     {cropArtifact ? (
-                      <div className="desktop-result-crop-wrap">
-                        <span className="crop-label">作答切片证据：</span>
+                      <div
+                        className="desktop-result-crop-wrap interactive"
+                        onClick={() => setArtifactPreview(cropArtifact)}
+                        title="点击全屏查看高清作答切片"
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setArtifactPreview(cropArtifact); }}
+                      >
+                        <div className="desktop-crop-label-bar">
+                          <span className="crop-label">作答切片证据</span>
+                          <span className="crop-zoom-hint"><Search size={11} /> 点击放大</span>
+                        </div>
                         <img src={cropArtifact.url} alt={`第${subq.id}问作答切片`} className="desktop-result-crop-img" />
                       </div>
                     ) : subq.studentFinalAnswer ? (
@@ -994,6 +1020,9 @@ function TemplateInspector({
       <BookOpenCheck size={13} />
       <span>{template?.ready ? `本次任务使用评分标准 v${template.rubric.version}` : "尚未选择评分标准"}</span>
     </div>
+    {artifactPreview && (
+      <GradingArtifactPreview artifact={artifactPreview} onClose={() => setArtifactPreview(null)} />
+    )}
   </aside>;
 }
 
@@ -1026,13 +1055,22 @@ function GradingResultToast({
 
   if (!record) return null;
 
+  const isReview = record.result.status === "needs_review" || (record.result.reviewReasons && record.result.reviewReasons.length > 0);
+
   return (
-    <div className="desktop-grading-toast" onClick={onOpenResult} role="status" aria-live="polite">
+    <div
+      className={`desktop-grading-toast ${isReview ? "warning" : "success"}`}
+      onClick={onOpenResult}
+      role="status"
+      aria-live="polite"
+    >
       <div className="desktop-grading-toast-head">
         <div className="desktop-grading-toast-title">
-          <span className="desktop-live-dot online pulse" />
-          <strong>最新批改完成</strong>
-          <span className="desktop-toast-score">{record.result.score} / {record.result.maxScore} 分</span>
+          <span className={`desktop-live-dot ${isReview ? "offline" : "online"} pulse`} />
+          <strong>{isReview ? "批改完成 · 需人工复核" : "最新批改完成"}</strong>
+          <span className={`desktop-toast-score ${record.result.score >= record.result.maxScore ? "score-full" : "score-deducted"}`}>
+            {record.result.score} / {record.result.maxScore} 分
+          </span>
         </div>
         <div className="desktop-grading-toast-actions">
           <span className="desktop-toast-countdown">{seconds}s</span>
@@ -1042,7 +1080,7 @@ function GradingResultToast({
         </div>
       </div>
       <div className="desktop-grading-toast-subquestions">
-        {record.result.subquestions.slice(0, 3).map((subq) => (
+        {record.result.subquestions.map((subq) => (
           <div key={subq.id} className="desktop-toast-subq-chip">
             <span>{subq.id}</span>
             <b className={subq.score >= subq.maxScore ? "score-full" : "score-deducted"}>{subq.score}分</b>
@@ -1154,13 +1192,6 @@ function ActiveJobPage({ browser, summary, template, preferences }: { browser: E
     <PipelineStageRail phase={browser.plugin.phase} />
     {preferences.showLiveMessages && <PipelineMessageFeed browser={browser} events={summary.events} />}
     <div className="desktop-workbench">
-      <TemplateInspector
-        template={template}
-        latestRecord={latestRecord}
-        activeTab={inspectorTab}
-        onTabChange={setInspectorTab}
-        onNavigateRecord={(id) => pushRoute(`/history/${encodeURIComponent(id)}?electron=1`)}
-      />
       <section className="desktop-browser-pane">
         <BrowserToolbar browser={browser} compact />
         <BrowserSurface />
@@ -1172,6 +1203,13 @@ function ActiveJobPage({ browser, summary, template, preferences }: { browser: E
           <span className="right">目标页与模型密钥保持进程隔离</span>
         </footer>
       </section>
+      <TemplateInspector
+        template={template}
+        latestRecord={latestRecord}
+        activeTab={inspectorTab}
+        onTabChange={setInspectorTab}
+        onNavigateRecord={(id) => pushRoute(`/history/${encodeURIComponent(id)}?electron=1`)}
+      />
     </div>
     <GradingResultToast record={toastRecord} onClose={() => setToastRecord(null)} onOpenResult={handleOpenToastResult} />
   </div>;
