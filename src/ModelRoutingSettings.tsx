@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { ChevronDown, ShieldCheck } from "lucide-react";
 import { ACTIVE_MODEL_ROUTE_DEFINITIONS } from "../shared/modelRouting";
 import { getBuiltInSystemPrompt, getBuiltInSystemPromptVariants } from "../shared/modelPrompts";
 import {
@@ -162,7 +163,7 @@ function StaticAgentContract({ variant }: { variant: SettingsVariant }) {
   </div>;
 }
 
-function ResponsesAgentSettings({ form, update, variant }: { form: ModelConfigInput; update: UpdateModelConfig; variant: SettingsVariant }) {
+export function ResponsesAgentSettings({ form, update, variant }: { form: ModelConfigInput; update: UpdateModelConfig; variant: SettingsVariant }) {
   const agent = agentValue(form);
   const setAgent = (patch: Partial<ResponsesAgentFormConfig>) => {
     const nextAgent: ResponsesAgentFormConfig = { ...agent, ...patch };
@@ -214,7 +215,7 @@ function ResponsesAgentSettings({ form, update, variant }: { form: ModelConfigIn
   </div>;
 }
 
-function AgentRoutePromptSettings({ form, update }: { form: ModelConfigInput; update: UpdateModelConfig }) {
+export function AgentRoutePromptSettings({ form, update }: { form: ModelConfigInput; update: UpdateModelConfig }) {
   const routeKey: ModelRouteKey = "large_question_responses_agent";
   const route = routeValue(form, routeKey);
   const promptVariants = getBuiltInSystemPromptVariants(routeKey);
@@ -230,7 +231,7 @@ function AgentRoutePromptSettings({ form, update }: { form: ModelConfigInput; up
   </article>;
 }
 
-function StablePaddleOcrSettings({ form, update }: { form: ModelConfigInput; update: UpdateModelConfig }) {
+export function StablePaddleOcrSettings({ form, update }: { form: ModelConfigInput; update: UpdateModelConfig }) {
   return <details className="model-ocr-settings">
     <summary className="model-ocr-settings-summary">
       <div><strong>卷面识别服务（PaddleOCR）</strong><small>{form.paddleOcr?.model?.trim() || "PaddleOCR-VL-1.6"} · 稳定大题/小题链路的整页分块和 bbox 定位</small></div>
@@ -253,7 +254,7 @@ function StablePaddleOcrSettings({ form, update }: { form: ModelConfigInput; upd
   </details>;
 }
 
-function StagedLayoutEngineSettings({ form, update }: { form: ModelConfigInput; update: UpdateModelConfig }) {
+export function StagedLayoutEngineSettings({ form, update }: { form: ModelConfigInput; update: UpdateModelConfig }) {
   const engine = form.stagedLayoutEngine ?? "paddleocr";
   const isModelNative = engine === "model_native";
   return <div className="staged-layout-engine-card">
@@ -444,22 +445,53 @@ function StableRouteGroups({ form, update, includeLargeQuestion }: { form: Model
 }
 
 export function ModelRoutingSettings({ form, update, variant }: { form: ModelConfigInput; update: UpdateModelConfig; variant: SettingsVariant }) {
-  const workflow = form.largeQuestionWorkflow ?? "staged";
-  const isAgent = workflow === "responses_agent";
+  useEffect(() => {
+    if (form.largeQuestionWorkflow !== "staged") {
+      update("largeQuestionWorkflow", "staged");
+    }
+    if (form.stagedLayoutEngine !== "model_native") {
+      update("stagedLayoutEngine", "model_native");
+    }
+  }, [form.largeQuestionWorkflow, form.stagedLayoutEngine, update]);
+
   const sectionClass = variant === "desktop" ? "desktop-section model-routing-section desktop-model-routing-section" : "settings-section model-routing-section";
   const headingClass = variant === "desktop" ? "desktop-section-heading" : "section-heading";
-  const chooseWorkflow = (next: "staged" | "responses_agent") => {
-    if (next === workflow) return;
-    if (next === "responses_agent" && !form.responsesAgent) update("responsesAgent", createAgentDefaults(form));
-    update("largeQuestionWorkflow", next);
-  };
-  return <section className={`${sectionClass} ${isAgent ? "responses-agent-mode" : "stable-staged-mode"}`}>
-    <div className={headingClass}><div>{variant === "desktop" ? <span>大题批改链路</span> : null}<h2>选择大题批改链路</h2><p>切换只改变大题执行路径；两套连接和运行参数分别保存，稳定分阶段链路仍是默认值。</p></div></div>
-    <div className="large-question-workflow-switcher" role="radiogroup" aria-label="大题批改链路">
-      <button type="button" role="radio" aria-checked={!isAgent} className={!isAgent ? "selected" : ""} onClick={() => chooseWorkflow("staged")}><span className="workflow-option-kicker">默认稳定</span><strong>稳定分阶段</strong><small>{form.stagedLayoutEngine === "model_native" ? "模型原生分块 → 教师首轮 → 按需复核 → 后端计分" : "PaddleOCR 分块 → 教师首轮 → 按需复核 → 后端计分"}</small><em>{!isAgent ? "当前启用" : "保留原配置"}</em></button>
-      <button type="button" role="radio" aria-checked={isAgent} className={isAgent ? "selected agent" : "agent"} onClick={() => chooseWorkflow("responses_agent")}><span className="workflow-option-kicker">新链路 · Responses</span><strong>Responses Agent</strong><small>整页视觉 → 自主局部工具 → 后端计分；完全不调用 PaddleOCR</small><em>{isAgent ? "当前启用" : "手动启用"}</em></button>
+
+  return <section className={`${sectionClass} stable-staged-mode`}>
+    <div className={headingClass}>
+      <div>
+        {variant === "desktop" ? <span>批改策略与步骤设置</span> : null}
+        <h2>批改链路与小步骤路由</h2>
+        <p>当前系统统一采用纯多模态原生视觉定位与分阶段核验链路，彻底免除外部 PaddleOCR 与 Agent 依赖。</p>
+      </div>
     </div>
-    {isAgent ? <><div className="model-route-policy responses-agent-policy"><strong>Responses Agent 已选中</strong><span>只有大题走新链路；小题、评分标准和稳定模式配置仍保留。PaddleOCR 在本链路完全禁用，连接测试必须使用下方专用 Agent 测试。</span></div><ResponsesAgentSettings form={form} update={update} variant={variant} /><div className="model-route-groups responses-agent-route-groups"><div className="model-route-group"><div className="model-route-group-heading"><div><span>Responses Agent 步骤提示词</span><strong>查看实际生效的内置基线，按需追加或替换</strong></div><small>1 条业务路由</small></div><div className="model-route-list"><AgentRoutePromptSettings form={form} update={update} /></div></div></div><StableRouteGroups form={form} update={update} includeLargeQuestion={false} /></> : <><div className="model-route-policy"><strong>稳定分阶段链路已选中</strong><span>大题按{form.stagedLayoutEngine === "model_native" ? "模型原生分块定位" : "PaddleOCR 分块定位"} → 教师首轮答案判定 → 按需局部视觉复核与评分点审验 → 本地计分；严格 JSON Schema、复核不阻断和后端重算均为系统约束。</span></div><StagedLayoutEngineSettings form={form} update={update} /><StableRouteGroups form={form} update={update} includeLargeQuestion /></>}
-    <details className="model-route-compatibility"><summary>兼容说明</summary><small>旧版证据提取和旧版整题视觉直批仅保留历史代码兼容，不作为当前页面入口；Responses Agent 与稳定分阶段配置互不清空。</small></details>
+
+    <div className="model-route-policy" style={{ margin: "14px 0", display: "flex", gap: "10px", alignItems: "flex-start" }}>
+      <ShieldCheck size={18} style={{ color: "var(--desktop-green)", flexShrink: 0, marginTop: "2px" }} />
+      <div>
+        <strong>当前生效链路：纯多模态原生视觉批改（免外部 OCR · 免 Agent）</strong>
+        <span>大题由多模态大模型原生分析版面与作答区域边界，首轮最终答案核验后按需局部复核与评分点审验；小题由整卷全景初检结合靶向高清切片进行正交双路核验。全流程免除外部 PaddleOCR 与 Agent 依赖，最终总分由本地计分引擎权威重算。</span>
+      </div>
+    </div>
+
+    <details className="desktop-model-settings-details desktop-model-substeps-details">
+      <summary>
+        <div>
+          <strong>各业务步骤单独模型设置（可选微调）</strong>
+          <span>默认已折叠 · 评分标准、大题与小题各步骤均自动继承上方主视觉/文本模型，无需单独配置</span>
+        </div>
+        <ChevronDown size={15} />
+      </summary>
+      <div className="desktop-model-settings-content" style={{ padding: "14px" }}>
+        <StableRouteGroups form={form} update={update} includeLargeQuestion={true} />
+      </div>
+    </details>
+
+    <details className="model-route-compatibility" style={{ marginTop: "14px" }}>
+      <summary>本地调试与实验性历史链路说明</summary>
+      <small>
+        实测效果不佳的 Responses Agent 链路与 PaddleOCR 独立服务已从主界面废除；其完整源代码已在工程中保留，以便未来本地调试与实验。
+      </small>
+    </details>
   </section>;
 }

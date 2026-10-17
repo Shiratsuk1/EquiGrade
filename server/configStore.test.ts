@@ -75,11 +75,11 @@ describe("model configuration persistence", () => {
       const active = await store.readModelConfig();
 
       expect(saved.largeQuestionWorkflow).toBe("staged");
-      expect(saved.stagedLayoutEngine).toBe("paddleocr");
+      expect(saved.stagedLayoutEngine).toBe("model_native");
       expect(saved.supportsJsonSchema).toBe(true);
       expect(saved.supportsJsonObject).toBe(false);
       expect(active?.largeQuestionWorkflow).toBe("staged");
-      expect(active?.stagedLayoutEngine).toBe("paddleocr");
+      expect(active?.stagedLayoutEngine).toBe("model_native");
       expect(active?.responsesAgent).toMatchObject({
         reasoningEffort: "low",
         maxToolRounds: 3,
