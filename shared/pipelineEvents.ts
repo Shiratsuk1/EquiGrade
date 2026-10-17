@@ -1,4 +1,5 @@
 import type { PipelineEvent } from "./electron.js";
+import type { SystemLogEntry } from "./types.js";
 
 /**
  * 流水线事件的共享文案与风险色调映射。
@@ -27,6 +28,7 @@ const errorEvents = new Set([
 
 const warningEvents = new Set([
   "page_skipped",
+  "page_retry",
   "page_review_flagged",
   "page_marked_excellent",
   "pipeline_paused",
@@ -103,6 +105,27 @@ export function isConcisePipelineEvent(event: PipelineEvent): boolean {
   if (errorEvents.has(type) || warningEvents.has(type)) return true;
   if (type === "image_extracted" || type === "grading_completed" || type === "score_writing" || type === "page_completed") return true;
   if (type === "pipeline_started" || type === "pipeline_completed" || type === "pipeline_completed_after_skip") return true;
+  return false;
+}
+
+/**
+ * 简洁版系统日志过滤器（用于运行日志全量流筛选）：
+ * 1. 任何级别为 error / warning，或 status 为 failed 的日志无条件保留展示
+ * 2. 流水线步骤（step 前缀为 pipeline:）：使用 isConcisePipelineEvent 严格把控，单题正常周期 4 条
+ * 3. 评分标准保存等关键管理操作（scope: storage 且 step 为 template_saved / template_updated）保留
+ * 4. 隐藏内部常规模型调用明细、逐点打分演算与高频探针
+ */
+export function isConciseLogEntry(entry: SystemLogEntry): boolean {
+  if (entry.level === "error" || entry.level === "warning" || entry.status === "failed") {
+    return true;
+  }
+  if (entry.step.startsWith("pipeline:")) {
+    const event = (entry.details || {}) as PipelineEvent;
+    return isConcisePipelineEvent(event);
+  }
+  if (entry.scope === "storage" && (entry.step === "template_saved" || entry.step === "template_updated")) {
+    return true;
+  }
   return false;
 }
 

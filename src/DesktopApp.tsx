@@ -28,7 +28,7 @@ import type {
   ModelCallHistoryEntry, ModelCallLogDetails, PublicModelConfig, QuestionType, Rubric, SystemLogEntry, SystemLogSnapshot
 } from "../shared/types";
 import { api, uploadDocument } from "./api";
-import { cleanPipelineError, isConcisePipelineEvent, pipelineEventLabel, pipelineEventTone } from "../shared/pipelineEvents";
+import { cleanPipelineError, isConciseLogEntry, isConcisePipelineEvent, pipelineEventLabel, pipelineEventTone } from "../shared/pipelineEvents";
 import { detectHighRiskDeductions, summarizeReviewSignals } from "../shared/reviewSignals";
 import { GradingArtifactList, GradingArtifactPreview, ResultDetail } from "./App";
 import { LogDetailsSummary, ModelCallDetails, ModelCallHistory, logScopeLabel, logStatusLabel } from "./logPresentation";
@@ -2352,11 +2352,28 @@ function RecordPage({ recordId }: { recordId?: string }) {
 function LogsPage() {
   const [snapshot, setSnapshot] = useState<SystemLogSnapshot | null>(null);
   const [query, setQuery] = useState("");
+  const [mode, setMode] = useState<"concise" | "detailed">(() => {
+    try {
+      return (localStorage.getItem("hengzhun.logViewMode") as "concise" | "detailed") || "concise";
+    } catch {
+      return "concise";
+    }
+  });
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [stoppingId, setStoppingId] = useState<string | null>(null);
   const [stopError, setStopError] = useState("");
   const [loadError, setLoadError] = useState("");
   const reloadSequence = useRef(0);
+
+  const toggleMode = (next: "concise" | "detailed") => {
+    setMode(next);
+    try {
+      localStorage.setItem("hengzhun.logViewMode", next);
+    } catch {
+      // ignore
+    }
+  };
+
   const reload = useCallback(() => {
     const sequence = reloadSequence.current + 1;
     reloadSequence.current = sequence;
@@ -2392,9 +2409,41 @@ function LogsPage() {
       setStoppingId(null);
     }
   };
-  const entries = useMemo(() => (snapshot?.entries || []).filter((entry) => `${entry.scope} ${entry.step} ${entry.message}`.toLowerCase().includes(query.toLowerCase())).slice().reverse(), [query, snapshot]);
+  const entries = useMemo(() => {
+    const raw = snapshot?.entries || [];
+    return raw
+      .filter((entry) => {
+        if (mode === "concise" && !isConciseLogEntry(entry)) return false;
+        if (!query.trim()) return true;
+        return `${entry.scope} ${entry.step} ${entry.message}`.toLowerCase().includes(query.toLowerCase());
+      })
+      .slice()
+      .reverse();
+  }, [query, snapshot, mode]);
   return <div className="desktop-page-body desktop-logs-page">
-    <section className="desktop-log-toolbar"><label><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选消息、步骤或范围" /></label><button className={autoRefresh ? "active" : ""} onClick={() => setAutoRefresh((value) => !value)}><RefreshCw className={autoRefresh ? "spin-slow" : ""} size={14} />自动刷新</button><button title="立即刷新" onClick={reload}><RefreshCw size={15} /></button></section>
+    <section className="desktop-log-toolbar">
+      <div className="desktop-log-mode-tabs" role="tablist">
+        <button
+          type="button"
+          className={mode === "concise" ? "active" : ""}
+          onClick={() => toggleMode("concise")}
+          title="简洁版（默认推荐）：只展示题目批改关键里程碑与报错，单题周期控制在4条以内"
+        >
+          简洁版（推荐）
+        </button>
+        <button
+          type="button"
+          className={mode === "detailed" ? "active" : ""}
+          onClick={() => toggleMode("detailed")}
+          title="详细版：展示微观阶段变换、探针与底层模型调用"
+        >
+          详细版
+        </button>
+      </div>
+      <label><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选消息、步骤或范围" /></label>
+      <button className={autoRefresh ? "active" : ""} onClick={() => setAutoRefresh((value) => !value)}><RefreshCw className={autoRefresh ? "spin-slow" : ""} size={14} />自动刷新</button>
+      <button title="立即刷新" onClick={reload}><RefreshCw size={15} /></button>
+    </section>
     {loadError && <div className="desktop-log-load-error"><AlertTriangle size={13} /><span>日志刷新失败：{loadError}</span><button type="button" onClick={reload}>重试</button></div>}
     {stopError && <div className="desktop-log-stop-error"><AlertTriangle size={13} />{stopError}</div>}
     <section className="desktop-log-layout"><aside><span>活动操作</span>{snapshot?.activeOperations.length ? snapshot.activeOperations.map((operation) => <div key={operation.id}><LoaderCircle className="spin" size={14} /><strong>{operation.label}</strong><small>{operation.step}</small>{operation.cancellable && <button className="desktop-force-stop" title="强制停止任务" disabled={stoppingId !== null} onClick={() => void forceStop(operation.id, operation.label, operation.scope)}>{stoppingId === operation.id ? <LoaderCircle className="spin" size={12} /> : <Square size={11} />}<span>{stoppingId === operation.id ? "正在停止" : "强制停止"}</span></button>}</div>) : <p>当前没有运行中的模型调用</p>}</aside><div className="desktop-log-stream">{entries.map((entry) => <LogEntry key={entry.id} entry={entry} />)}{!entries.length && <div className="desktop-empty-state"><TerminalSquare size={22} /><strong>暂无匹配日志</strong><span>运行任务后，模型调用和流水线步骤会显示在这里。</span></div>}</div></section>
