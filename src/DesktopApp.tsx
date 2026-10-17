@@ -683,23 +683,38 @@ function PipelineControls({
   const pageReady = hasCompletePluginCapabilities(browser.plugin.capabilities) && browser.plugin.phase === "ready" && !questionMismatch;
   const statusMessage = error || (questionMismatch ? questionAlignment!.issues[0] : dryRunMessage || browser.plugin.message);
   return <div className="desktop-pipeline-controls">
-    <div><span className={active ? "desktop-live-dot online pulse" : questionMismatch ? "desktop-live-dot offline" : "desktop-live-dot"} /><div><strong>{error ? "启动失败" : questionMismatch ? "题目不匹配" : phaseLabel(browser.plugin.phase)}</strong><small title={statusMessage}>{statusMessage}</small></div></div>
-    {onDryRun && (
-      <button
-        type="button"
-        className="desktop-trial-btn"
-        disabled={active || dryRunBusy || !hasCompletePluginCapabilities(browser.plugin.capabilities)}
-        title="单题试评当前答卷：计算总分并填入网页评分框，但不提交成绩、不翻页"
-        onClick={() => void onDryRun()}
-      >
-        {dryRunBusy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
-        {dryRunBusy ? "正在试评并填分…" : "单题试评 (仅填分·不提交)"}
-      </button>
+    <div className="desktop-pipeline-status-group">
+      <span className={active ? "desktop-live-dot online pulse" : questionMismatch ? "desktop-live-dot offline" : "desktop-live-dot"} />
+      <div>
+        <strong>{error ? "启动失败" : questionMismatch ? "题目不匹配" : phaseLabel(browser.plugin.phase)}</strong>
+        <small title={statusMessage}>{statusMessage}</small>
+      </div>
+    </div>
+    {template && (
+      <div className="desktop-pipeline-template-chip" title={`当前评分标准：${template.title}（满分 ${template.rubric.totalScore} 分）`}>
+        <BookOpenCheck size={14} />
+        <span>{template.title}</span>
+        <b>{template.rubric.totalScore}分</b>
+      </div>
     )}
-    <button className="primary" disabled={active || pending !== null || !pageReady} title={questionMismatch ? questionAlignment!.issues[0] : undefined} onClick={() => void send("start")}>{pending === "start" ? <LoaderCircle className="spin" size={15} /> : <CirclePlay size={15} />}开始批改</button>
-    <button title="暂停流水线" disabled={!active || pending !== null} onClick={() => void send("pause")}><CirclePause size={16} /></button>
-    <button title="停止流水线" disabled={!active || pending !== null} onClick={() => void send("stop")}><Square size={15} /></button>
-    <button title={browser.plugin.capabilities.skip ? "记录异常并跳过当前答卷" : "当前页面不支持跳过（批完当前份前无法进入下一份）"} disabled={pending !== null || !browser.plugin.capabilities.skip} onClick={() => void send("skip")}><SkipForward size={16} /></button>
+    <div className="desktop-pipeline-actions">
+      {onDryRun && (
+        <button
+          type="button"
+          className="desktop-trial-btn"
+          disabled={active || dryRunBusy || !hasCompletePluginCapabilities(browser.plugin.capabilities)}
+          title="单题试评当前答卷：计算总分并填入网页评分框，但不提交成绩、不翻页"
+          onClick={() => void onDryRun()}
+        >
+          {dryRunBusy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
+          {dryRunBusy ? "正在试评并填分…" : "单题试评 (仅填分·不提交)"}
+        </button>
+      )}
+      <button className="primary" disabled={active || pending !== null || !pageReady} title={questionMismatch ? questionAlignment!.issues[0] : undefined} onClick={() => void send("start")}>{pending === "start" ? <LoaderCircle className="spin" size={15} /> : <CirclePlay size={15} />}开始批改</button>
+      <button title="暂停流水线" disabled={!active || pending !== null} onClick={() => void send("pause")}><CirclePause size={16} /></button>
+      <button title="停止流水线" disabled={!active || pending !== null} onClick={() => void send("stop")}><Square size={15} /></button>
+      <button title={browser.plugin.capabilities.skip ? "记录异常并跳过当前答卷" : "当前页面不支持跳过（批完当前份前无法进入下一份）"} disabled={pending !== null || !browser.plugin.capabilities.skip} onClick={() => void send("skip")}><SkipForward size={16} /></button>
+    </div>
   </div>;
 }
 
@@ -1027,6 +1042,7 @@ function ActiveJobPage({ browser, summary, template, preferences, onEnterTest }:
   const [inspectorTab, setInspectorTab] = useState<"question" | "rubric" | "result">("rubric");
   const [trialGrading, setTrialGrading] = useState(false);
   const [trialMessage, setTrialMessage] = useState("");
+  const isPipelineActive = Boolean(browser.plugin.connected && ["extracting", "grading", "writing_score", "submitting", "verifying", "navigating_next"].includes(browser.plugin.phase));
 
   const questionAlignment = useMemo(() => {
     if (!template) return null;
@@ -1115,7 +1131,7 @@ function ActiveJobPage({ browser, summary, template, preferences, onEnterTest }:
       </div>
     )}
     <PipelineStageRail phase={browser.plugin.phase} />
-    {preferences.showLiveMessages && <PipelineMessageFeed browser={browser} events={summary.events} />}
+    {preferences.showLiveMessages && isPipelineActive && <PipelineMessageFeed browser={browser} events={summary.events} />}
     <div className="desktop-workbench">
       <section className="desktop-browser-pane">
         <BrowserToolbar browser={browser} compact />
@@ -3278,7 +3294,7 @@ export default function DesktopApp() {
   return <div className={browserPage ? "desktop-shell browser-active" : "desktop-shell"} data-font-size={preferences.fontSize} data-density={preferences.density} data-accent={preferences.accent} data-material={preferences.materialMode} data-motion={preferences.motionIntensity} data-reduce-motion={reduceMotion ? "true" : "false"} style={prismStyle}>
     <DesktopSidebar route={route} browser={browser} />
     <main className="desktop-main">
-      <PageHeader route={route} browser={browser} />
+      {!browserPage && <PageHeader route={route} browser={browser} />}
       {templateError && <div className="desktop-global-error"><AlertTriangle size={15} />评分模板读取失败：{templateError}</div>}
       <div className="desktop-route-stage">
         <DesktopPage route={route} browser={browser} summary={summary} template={template} preferences={preferences} onPreferencesChange={changePreferences} onBindTemplate={bindTemplate} onEnterTest={enterTest} />

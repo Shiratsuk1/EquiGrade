@@ -311,18 +311,23 @@ body.electron-host { margin: 0; overflow: hidden; background: var(--prism-window
 
 .browser-active .desktop-main { overflow: hidden; }
 .desktop-job-page { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; padding: 0; }
-.desktop-pipeline-controls { flex: 0 0 60px; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 16px; border-bottom: 1px solid var(--desktop-line); background: #fff; }
-.desktop-pipeline-controls > div:first-child { display: flex; align-items: center; gap: 10px; min-width: 0; margin-right: auto; }
-.desktop-pipeline-controls > div:first-child > div { min-width: 0; }
-.desktop-pipeline-controls strong, .desktop-pipeline-controls small { display: block; }
-.desktop-pipeline-controls strong { font-size: 13px; font-weight: 750; color: var(--desktop-ink); }
-.desktop-pipeline-controls small { max-width: 580px; margin-top: 3px; overflow: hidden; color: var(--desktop-muted); font-size: var(--desktop-fs-micro); text-overflow: ellipsis; white-space: nowrap; }
+.desktop-pipeline-controls { flex: 0 0 50px; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 8px 16px; border-bottom: 1px solid var(--desktop-line); background: #fff; }
+.desktop-pipeline-status-group { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 0 1 auto; }
+.desktop-pipeline-status-group > div { min-width: 0; }
+.desktop-pipeline-status-group strong, .desktop-pipeline-status-group small { display: block; }
+.desktop-pipeline-status-group strong { font-size: 13px; font-weight: 750; color: var(--desktop-ink); }
+.desktop-pipeline-status-group small { max-width: 440px; margin-top: 2px; overflow: hidden; color: var(--desktop-muted); font-size: var(--desktop-fs-micro); text-overflow: ellipsis; white-space: nowrap; }
+.desktop-pipeline-template-chip { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; max-width: 320px; padding: 4px 10px; border: 1px solid var(--desktop-line); border-radius: 5px; background: var(--desktop-soft); color: var(--desktop-ink); font-size: var(--desktop-fs-small); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.desktop-pipeline-template-chip svg { color: var(--desktop-green); flex-shrink: 0; }
+.desktop-pipeline-template-chip span { overflow: hidden; text-overflow: ellipsis; }
+.desktop-pipeline-template-chip b { color: var(--desktop-green); font-family: var(--desktop-mono-font-family); margin-left: 2px; }
+.desktop-pipeline-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 .desktop-pipeline-controls button { display: grid; place-items: center; flex: 0 0 auto; width: 36px; height: 34px; border: 1px solid var(--desktop-line-strong); border-radius: 5px; background: #fff; color: var(--desktop-muted); cursor: pointer; transition: all 0.15s ease; }
 .desktop-pipeline-controls button:hover:not(:disabled) { border-color: var(--desktop-line); background: var(--desktop-soft); color: var(--desktop-ink); }
 .desktop-pipeline-controls button.primary { display: flex; width: 106px; gap: 6px; border-color: var(--desktop-green); background: var(--desktop-green); color: #fff; font-size: 12px; font-weight: 750; }
 .desktop-pipeline-controls button.primary:hover, .desktop-save-button:hover:not(:disabled) { border-color: var(--desktop-green-hover); background: var(--desktop-green-hover); }
 .desktop-pipeline-controls button:disabled { opacity: .45; cursor: default; }
-.desktop-pipeline-rail { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; flex: 0 0 58px; min-width: 0; padding: 10px 18px 8px; border-bottom: 1px solid var(--desktop-line); background: var(--prism-content-surface); }
+.desktop-pipeline-rail { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; flex: 0 0 38px; min-width: 0; padding: 8px 18px 6px; border-bottom: 1px solid var(--desktop-line); background: var(--prism-content-surface); }
 .desktop-pipeline-rail > div { position: relative; display: grid; grid-template-columns: 11px minmax(0, 1fr); align-items: center; gap: 7px; min-width: 0; color: var(--desktop-subtle); }
 .desktop-pipeline-rail > div > strong { overflow: hidden; font-size: var(--desktop-fs-micro); font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-pipeline-rail-dot { position: relative; z-index: 1; display: block; width: 9px; height: 9px; border: 2px solid var(--desktop-line-strong); border-radius: 50%; background: var(--prism-content-surface); }
@@ -417,7 +422,11 @@ body.electron-host { margin: 0; overflow: hidden; background: var(--prism-window
 .desktop-template-rubric-preview .score-point-guidance-groups li, .desktop-template-rubric-preview .score-point-guidance-groups .math-text { font-size: var(--desktop-fs-small); }
 .desktop-inspector-foot { display: flex; align-items: center; gap: 6px; flex: 0 0 35px; padding: 0 12px; border-top: 1px solid var(--desktop-line); background: var(--desktop-soft); color: var(--desktop-muted); font-size: var(--desktop-fs-micro); font-weight: 600; }
 .desktop-inspector-foot svg { color: var(--desktop-green); }
-.desktop-browser-pane { display: grid; grid-template-rows: 46px minmax(0, 1fr) 31px; min-width: 0; min-height: 0; overflow: hidden; background: #e8eef0; }
+.desktop-browser-pane { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; background: #e8eef0; }
+.desktop-browser-pane > .desktop-browser-toolbar { flex: 0 0 auto; }
+.desktop-browser-pane > .desktop-workbench-inline-guide { flex: 0 0 auto; }
+.desktop-browser-pane > .desktop-browser-surface { flex: 1 1 auto; min-width: 0; min-height: 0; width: 100%; position: relative; }
+.desktop-browser-pane > .desktop-workbench-footer { flex: 0 0 31px; }
 .desktop-browser-toolbar { position: relative; display: flex; align-items: center; gap: 7px; min-width: 0; height: 50px; padding: 7px 10px; border-bottom: 1px solid var(--desktop-line-strong); background: var(--desktop-soft); }
 .desktop-browser-toolbar.compact { height: 46px; padding: 6px 8px; }
 .desktop-browser-nav, .desktop-browser-tools { display: flex; flex: 0 0 auto; gap: 3px; }
