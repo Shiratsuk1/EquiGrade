@@ -1,0 +1,2400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>衡准 · 原地聚光灯顶级动效原型 (Apple / Linear 级 Motion)</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    :root {
+      --prism-brand: #0e9f98;
+      --prism-brand-hover: #0d8c88;
+      --prism-brand-soft: #e8f8f6;
+      --prism-graphite: #172126;
+      --prism-muted: #66717d;
+      --prism-subtle: #929ca6;
+      --prism-canvas: #f5f8f8;
+      --prism-paper: #ffffff;
+      --prism-line: #e2e8ec;
+      --prism-line-strong: #cfd9de;
+      --prism-success: #2e9b65;
+      --prism-amber: #c98718;
+      --prism-blue: #3478f6;
+
+      /* 工业级高阶缓动曲线定义 */
+      --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+      --ease-bounce: cubic-bezier(0.34, 1.45, 0.64, 1);
+      --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    body {
+      color: var(--prism-graphite);
+      background-color: var(--prism-canvas);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+    }
+
+    .font-mono {
+      font-family: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+    }
+
+    /* 聚光灯镂空平滑变形 */
+    #spotlight-cutout {
+      transition: all 0.5s var(--ease-spring);
+    }
+
+    /* 聚光灯边缘动态呼吸光环与容积光 */
+    #spotlight-aura {
+      transition: all 0.5s var(--ease-spring);
+      box-shadow: 0 0 0 3px rgba(14, 159, 152, 0.7), 0 0 45px rgba(14, 159, 152, 0.45);
+      animation: aura-glow 2.4s infinite alternate ease-in-out;
+    }
+
+    @keyframes aura-glow {
+      0% { box-shadow: 0 0 0 3px rgba(14, 159, 152, 0.5), 0 0 25px rgba(14, 159, 152, 0.35); }
+      100% { box-shadow: 0 0 0 5px rgba(14, 159, 152, 0.85), 0 0 55px rgba(14, 159, 152, 0.55); }
+    }
+
+    /* 浮动气泡高阶弹簧飞行与回弹动效 */
+    #spotlight-bubble {
+      transition: top 0.5s var(--ease-spring), left 0.5s var(--ease-spring), opacity 0.3s ease, transform 0.45s var(--ease-bounce);
+      transform-origin: top center;
+    }
+    #spotlight-bubble.entering {
+      transform: scale(0.95) translateY(-6px);
+      opacity: 0;
+    }
+    #spotlight-bubble.entered {
+      transform: scale(1) translateY(0);
+      opacity: 1;
+    }
+
+    /* 激光雷达扫描线动效 (Laser Scanline) */
+    @keyframes laser-scan {
+      0% { top: 0%; opacity: 0; }
+      15% { opacity: 1; }
+      85% { opacity: 1; }
+      100% { top: 100%; opacity: 0; }
+    }
+    .laser-scanner {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, transparent, #0e9f98, #2e9b65, transparent);
+      box-shadow: 0 0 16px 4px rgba(14, 159, 152, 0.6);
+      animation: laser-scan 2.2s infinite ease-in-out;
+      pointer-events: none;
+      z-index: 25;
+    }
+
+    /* 水波纹扩散冲击波动效 */
+    @keyframes ripple-wave {
+      0% { transform: scale(0.99); opacity: 0.95; box-shadow: 0 0 0 0 rgba(14, 159, 152, 0.8); }
+      70% { transform: scale(1.008); opacity: 1; box-shadow: 0 0 0 35px rgba(14, 159, 152, 0); }
+      100% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0 rgba(14, 159, 152, 0); }
+    }
+    .animate-ripple {
+      animation: ripple-wave 1.4s cubic-bezier(0.1, 0.8, 0.2, 1) infinite;
+    }
+
+    /* 按钮物理按压动效 */
+    .btn-pressable {
+      transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.15s ease, background-color 0.15s ease;
+    }
+    .btn-pressable:hover {
+      transform: translateY(-1px);
+    }
+    .btn-pressable:active {
+      transform: translateY(1.5px) scale(0.97);
+    }
+
+    /* 粒子 Canvas 全屏置顶 */
+    #confetti-canvas {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 60;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col antialiased select-none overflow-hidden relative">
+
+  <!-- 全屏物理粒子 Canvas (通关庆祝烟火) -->
+  <canvas id="confetti-canvas"></canvas>
+
+  <!-- 顶部快速调试与演示栏 -->
+  <header class="h-9 bg-white border-b border-[#e2e8ec] px-4 flex items-center justify-between text-xs z-30 shrink-0">
+    <div class="flex items-center gap-2">
+      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#e8f8f6] text-[#0e9f98] font-bold border border-[#0e9f98]/30">
+        <span class="w-1.5 h-1.5 rounded-full bg-[#0e9f98] animate-ping"></span>
+        顶级大厂级 Motion 动效引擎已挂载
+      </span>
+      <span class="text-[#66717d] hidden md:inline">| 弹性阻尼飞行 · 激光扫描 · 粒子爆炸 · 物理微触感</span>
+    </div>
+
+    <!-- 聚光灯重放与日常切换演练按钮 -->
+    <div class="flex items-center gap-2">
+      <button onclick="navigateToRubricManagement('create_q14')" class="btn-pressable px-2.5 py-1 rounded-lg text-xs font-bold bg-[#e8f8f6] text-[#0e9f98] border border-[#0e9f98]/30 hover:bg-[#d8f2ee] flex items-center gap-1 shadow-2xs" title="新建评分标准：直接引导至侧边评分标准处管理与创建，保存后自动返回工作台">
+        <span>📋 演练：侧边栏新建标准并自动返回</span>
+      </button>
+      <button onclick="simulateSwitchToNewQuestion14()" class="btn-pressable px-2.5 py-1 rounded-lg text-xs font-bold bg-[#fff6e7] text-[#c98718] border border-[#fbd89a] hover:bg-[#ffeed3] flex items-center gap-1 shadow-2xs" title="模拟教师第二次使用：在智学网切换到第14题新题并秒配新标准">
+        <span>🔄 演练日常使用：切到第14题新题</span>
+      </button>
+      <button onclick="startSpotlightTour()" class="btn-pressable px-3 py-1 rounded-lg text-xs font-bold bg-[#0e9f98] text-white shadow-xs flex items-center gap-1">
+        <span>✨ 触发全流程新手导览</span>
+      </button>
+      <button onclick="exitSpotlightTour()" class="btn-pressable px-2.5 py-1 rounded-lg text-xs text-[#66717d] hover:text-[#172126] hover:bg-[#f5f8f8] border border-[#e2e8ec]">
+        退出
+      </button>
+    </div>
+  </header>
+
+  <!-- 工作台真实全景主场 -->
+  <div class="flex-1 flex overflow-hidden relative">
+
+    <!-- 侧边栏 (微缩高保真) -->
+    <aside class="w-48 bg-white border-r border-[#e2e8ec] flex flex-col justify-between shrink-0 select-none z-10">
+      <div>
+        <div class="p-3.5 flex items-center gap-2.5 border-b border-[#e2e8ec]">
+          <div class="w-7 h-7 rounded-lg bg-[#0e9f98] text-white flex items-center justify-center font-bold text-sm shadow-xs">
+            衡
+          </div>
+          <div>
+            <span class="font-bold text-xs text-[#172126] block leading-tight">衡准物理改卷</span>
+            <span class="text-[10px] text-[#66717d] block leading-tight">全自动智能工作台</span>
+          </div>
+        </div>
+
+        <div class="p-2 space-y-3 text-xs">
+          <div>
+            <span class="px-2 text-[10px] font-bold text-[#929ca6] block uppercase tracking-wider">阅卷主场</span>
+            <div class="mt-1">
+              <button onclick="navigateToView('workbench')" id="nav-btn-workbench" class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-[#e8f8f6] text-[#0e9f98] font-bold relative transition text-left">
+                <span>🎯 工作台</span>
+                <span id="nav-indicator-workbench" class="absolute right-0 top-1.5 bottom-1.5 w-1 bg-[#0e9f98] rounded-l"></span>
+              </button>
+            </div>
+          </div>
+          <div>
+            <span class="px-2 text-[10px] font-bold text-[#929ca6] block uppercase tracking-wider">资料管理</span>
+            <div class="mt-1 space-y-0.5 text-[#66717d]">
+              <button onclick="navigateToView('templates')" id="nav-btn-templates" class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-[#f5f8f8] hover:text-[#172126] transition text-left relative">
+                <span>📋 评分标准</span>
+                <span id="nav-indicator-templates" class="hidden absolute right-0 top-1.5 bottom-1.5 w-1 bg-[#0e9f98] rounded-l"></span>
+              </button>
+              <button onclick="alert('批改历史记录可在工作台右侧结果面板中抽查回放')" class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-[#f5f8f8] hover:text-[#172126] transition text-left">
+                <span>📊 批改历史</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="p-2.5 border-t border-[#e2e8ec] bg-[#f7fafb] text-[10px] text-[#66717d] flex items-center gap-1.5">
+        <span class="w-2 h-2 rounded-full bg-[#0e9f98] animate-pulse"></span>
+        <span>自动化守护已就绪</span>
+      </div>
+    </aside>
+
+    <!-- 工作台右侧主体 (平时 100% 宽阔大视口) -->
+    <div id="view-workbench" class="flex-1 flex flex-col overflow-hidden">
+
+      <!-- 顶部驾驶舱态势栏 (真实控件锚点) -->
+      <header class="h-16 bg-white border-b border-[#e2e8ec] px-5 flex items-center justify-between gap-4 shrink-0 shadow-xs z-10">
+        
+        <!-- 控件锚点 2: 评分标准选择器 (点击进入侧边栏评分标准管理) -->
+        <div id="anchor-rubric-selector" onclick="navigateToRubricManagement()" class="flex items-center gap-3 p-1.5 rounded-xl transition cursor-pointer hover:bg-[#f5f8f8] btn-pressable" title="点击前往侧栏【评分标准】管理与新建">
+          <div class="w-10 h-10 rounded-xl bg-[#e8f8f6] border border-[#0e9f98]/30 flex items-center justify-center text-[#0e9f98] shrink-0">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="font-bold text-sm text-[#172126]">第 13 题 物理实验题</span>
+              <span class="px-2 py-0.5 rounded bg-[#f5f8f8] text-[#0e9f98] font-bold font-mono text-xs border border-[#cfd9de]">满分 6.0 分</span>
+              <span class="text-xs text-[#0e9f98] font-semibold hover:underline">管理/新建 ↗</span>
+            </div>
+            <p id="rubric-header-desc" class="text-xs text-[#2e9b65] font-semibold">✓ 官方已内置：验证牛顿第二定律 3小问细则 (6.0分) · 已锁定</p>
+          </div>
+        </div>
+
+        <!-- 控件锚点 1: AI 模型状态胶囊 + 控件锚点 4: 开始批改大按钮 -->
+        <div class="flex items-center gap-3">
+          
+          <!-- 锚点 1: AI 模型连接指示胶囊 -->
+          <div id="anchor-model-capsule" class="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#fff6e7] border border-[#c98718]/40 text-[#c98718] text-xs font-semibold cursor-pointer hover:shadow-xs transition btn-pressable">
+            <span id="model-capsule-dot" class="w-2.5 h-2.5 rounded-full bg-[#c98718] animate-pulse"></span>
+            <span id="model-capsule-text">🧠 待接入 DeepSeek AI 大脑</span>
+          </div>
+
+          <!-- 锚点 4: 开始自动批改主控按钮 -->
+          <div class="flex items-center gap-2">
+            <button id="anchor-main-btn" onclick="triggerRun()" class="btn-pressable h-10 px-6 rounded-xl bg-[#0e9f98] hover:bg-[#0d8c88] flex items-center gap-2 font-bold text-white shadow-sm text-xs">
+              <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              <span>开始自动批改 (Space)</span>
+            </button>
+          </div>
+
+        </div>
+
+        <!-- 右侧操作与统计 -->
+        <div class="flex items-center gap-3">
+          <!-- 题目与评分标准面板显隐切换按钮 -->
+          <button onclick="toggleInspectorPanel()" id="btn-toggle-inspector" class="btn-pressable px-3 py-1.5 rounded-xl border border-[#0e9f98]/40 bg-[#e8f8f6] text-[#0e9f98] font-bold text-xs flex items-center gap-1.5 hover:bg-[#d8f2ee] transition shadow-2xs" title="折叠/展开右侧 题目原文与评分标准核对面 (快捷键 R)">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+            <span id="btn-toggle-inspector-text">题目与评分标准</span>
+          </button>
+
+          <div class="hidden lg:flex items-center gap-3 px-3 py-1.5 rounded-lg bg-[#f7fafb] border border-[#e2e8ec] text-xs">
+            <div class="text-center">
+              <span class="text-[#929ca6] block text-[11px]">已批改</span>
+              <span id="counter-processed" class="font-bold font-mono text-[#0e9f98] text-sm transition-all duration-300">0</span>
+            </div>
+            <div class="w-px h-6 bg-[#e2e8ec]"></div>
+            <div class="text-center">
+              <span class="text-[#929ca6] block text-[11px]">均分</span>
+              <span class="font-bold font-mono text-[#172126] text-sm">--</span>
+            </div>
+          </div>
+        </div>
+
+      </header>
+
+      <!-- 工作台主内容区：分屏视口 (左/中: 智学网真实验卷浏览器 + 右: 题目原文与评分标准核对视口) -->
+      <div class="flex-1 flex overflow-hidden relative">
+
+        <!-- 智学网真实验卷浏览器视口 (控件锚点 3) -->
+        <main class="flex-1 p-4 lg:p-5 overflow-auto flex flex-col justify-start items-center bg-[#f5f8f8] min-w-0 transition-all duration-300">
+          
+          <!-- 日常使用智能感知切题悬浮条 (Smart Question Match Banner) -->
+          <div id="smart-question-banner" class="w-full max-w-4xl bg-white/95 backdrop-blur-md rounded-xl p-3 border-2 border-[#0e9f98] shadow-md mb-3 transition-all duration-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hidden animate-pulse">
+            <div class="flex items-center gap-3">
+              <div class="w-8 h-8 rounded-lg bg-[#e8f8f6] text-[#0e9f98] flex items-center justify-center font-bold text-base shrink-0">
+                🧭
+              </div>
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-xs text-[#172126]">智能感知到您已切换至：第 14 题 计算题</span>
+                  <span class="px-2 py-0.5 rounded bg-[#f5f8f8] text-[#0e9f98] font-bold font-mono text-[11px] border border-[#cfd9de]">满分 10.0 分</span>
+                </div>
+                <p id="smart-banner-desc" class="text-[11px] text-[#66717d] mt-0.5">当前工作台标准仍为第 13 题 (6分)。请选择极速配对方案：</p>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2 shrink-0">
+              <button onclick="quickApplyNewQuestion14('preset')" class="btn-pressable px-3 py-1.5 bg-[#f0fdf4] hover:bg-[#dcfce7] border border-[#bbf7d0] text-[#2e9b65] rounded-lg font-bold text-xs flex items-center gap-1 transition">
+                <span>📋 发现库中已有第14题标准 · 一键套用</span>
+              </button>
+              <button onclick="navigateToRubricManagement('create_q14')" class="btn-pressable px-3 py-1.5 bg-[#0e9f98] hover:bg-[#0d8c88] text-white rounded-lg font-bold text-xs flex items-center gap-1 shadow-xs transition" title="前往侧边栏【评分标准】进行管理与全屏创建，保存后自动返回">
+                <span>📋 前往侧边栏新建第14题标准 ›</span>
+              </button>
+              <button onclick="dismissSmartBanner()" class="text-[#929ca6] hover:text-[#172126] p-1 rounded-lg hover:bg-[#f5f8f8] text-xs">✕</button>
+            </div>
+          </div>
+
+          <!-- 智学网真实验卷内嵌容器 (控件锚点 3) -->
+          <div id="anchor-browser-viewport" class="w-full max-w-4xl bg-white rounded-xl shadow-sm border border-[#cfd9de] flex flex-col overflow-hidden min-h-[560px] relative transition-all duration-500">
+            
+            <!-- 激光雷达扫描线动效层 -->
+            <div id="laser-scanner" class="laser-scanner hidden"></div>
+
+            <!-- 视口 Header (支持 沙盒演示模式 与 智学网真实模式) -->
+            <div id="viewport-header-bar" class="bg-gradient-to-r from-[#0e9f98] to-[#144f88] text-white px-4 py-2.5 flex items-center justify-between text-xs transition-colors duration-500">
+              <div class="flex items-center gap-2">
+                <span id="viewport-site-title" class="font-bold text-sm flex items-center gap-1.5">
+                  <span id="viewport-mode-badge" class="px-1.5 py-0.5 rounded bg-white/20 text-white text-[10px] uppercase font-bold tracking-wider">SANDBOX</span>
+                  <span id="viewport-mode-title-text">衡准官方虚拟改卷沙盒</span>
+                </span>
+                <span id="viewport-site-task" class="px-2 py-0.5 bg-black/20 rounded text-[11px] font-mono">
+                  高频真实答卷样本 · 第13题 (满分6.0分)
+                </span>
+              </div>
+              <div class="flex items-center gap-3">
+                <span id="viewport-paper-idx" class="text-white/90">答卷编号: <b>#SAMPLE-01</b></span>
+                <span id="viewport-user-tag" class="px-2 py-0.5 rounded bg-emerald-500/30 text-emerald-100 border border-emerald-400/40 text-[10px] font-bold">免登录 · 零风险演示</span>
+                <button onclick="toggleSandboxZhixueMode()" id="btn-switch-viewport-mode" class="px-2 py-0.5 rounded bg-white/15 hover:bg-white/25 text-white text-[11px] transition border border-white/20 flex items-center gap-1">
+                  <span id="txt-switch-mode">🌐 切至真实智学网</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- 答卷真实验卷现场 -->
+            <div class="flex-1 p-5 flex flex-col md:flex-row gap-5 bg-[#f8f9fa] relative">
+              <!-- 答卷原图 -->
+              <div class="flex-1 bg-white p-4 rounded-lg border border-[#dee2e6] shadow-2xs flex flex-col relative overflow-hidden">
+                <div class="text-xs text-[#868e96] mb-2 flex justify-between items-center border-b pb-1">
+                  <span id="lbl-paper-title" class="font-bold text-[#495057]">学生手写作答扫描原图 (演示样本)</span>
+                  <span class="font-mono text-[#0e9f98] bg-[#e8f8f6] px-1.5 rounded">SHA: a18c...33b9</span>
+                </div>
+                
+                <div class="flex-1 bg-amber-50/40 border-2 border-dashed border-amber-200 rounded-lg p-4 font-serif text-sm text-slate-800 space-y-3 relative">
+                  <div class="p-2 bg-blue-50/60 rounded text-xs text-blue-900 font-sans border border-blue-200 flex items-center justify-between">
+                    <div><b>第13题 (6.0分)：</b>在“验证牛顿第二定律”实验中，打点计时器频率为 50Hz...</div>
+                    <span class="text-[10px] bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded font-mono font-bold">3个小问</span>
+                  </div>
+                  <p>(1) 调节木板倾角使打点纸带上的点迹分布 <span class="border-b-2 border-blue-600 font-bold px-3 text-blue-900">间距相等</span>。</p>
+                  <p>(2) 加速度大小测量值为 <span class="border-b-2 border-amber-600 font-bold px-3 text-amber-900">a = 1.4 m/s²</span> <span class="text-xs text-rose-600 font-sans font-bold">(标答要求1.40，未保留两位)</span></p>
+                  <p>(3) 作出的 $a - 1/M$ 图像为 <span class="border-b-2 border-blue-600 font-bold px-3 text-blue-900">过原点的倾斜直线</span>。</p>
+
+                  <!-- AI 识别切片高亮框依次展开动效 -->
+                  <div id="ai-scan-markers" class="hidden absolute inset-0 pointer-events-none">
+                    <div class="absolute top-[138px] left-[260px] w-28 h-7 border-2 border-[#2e9b65] bg-[#2e9b65]/15 rounded flex items-center justify-end pr-1 shadow-sm transition-all duration-300">
+                      <span class="text-[10px] bg-[#2e9b65] text-white px-1 rounded font-sans font-bold">满分 2.0</span>
+                    </div>
+                    <div class="absolute top-[182px] left-[270px] w-48 h-7 border-2 border-[#c94b50] bg-[#c94b50]/15 rounded flex items-center justify-end pr-1 shadow-sm transition-all duration-300">
+                      <span class="text-[10px] bg-[#c94b50] text-white px-1 rounded font-sans font-bold">扣1分(未留2位有效数字)</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 评卷打分侧栏 -->
+              <div class="w-full md:w-56 flex flex-col gap-3">
+                <div class="bg-white p-3 rounded-lg border border-[#dee2e6] shadow-2xs">
+                  <span id="lbl-score-box-title" class="text-xs font-bold text-[#495057] block mb-2">沙盒总分输入框</span>
+                  <div class="flex items-center gap-2">
+                    <input id="score-display-input" type="text" value="--" readonly class="w-full text-center text-2xl font-bold font-mono text-[#0e9f98] bg-[#e8f8f6] border-2 border-[#0e9f98] rounded-lg py-1.5 shadow-inner transition-all duration-300">
+                    <span class="text-sm font-bold text-[#868e96]">/ 6分</span>
+                  </div>
+                  <div id="lbl-score-desc" class="text-[11px] text-[#868e96] mt-2 text-center">
+                    待 AI 极速回填
+                  </div>
+                </div>
+
+                <div class="mt-auto space-y-2">
+                  <!-- 试水批改按钮 (沙盒中为体验批改，不提交) -->
+                  <button onclick="trialGradeCurrentPaper()" id="btn-trial-grade" class="w-full py-2 bg-[#e8f8f6] hover:bg-[#d4f2ed] border border-[#0e9f98]/40 text-[#0e9f98] text-xs font-bold rounded-lg shadow-2xs btn-pressable flex items-center justify-center gap-1.5 transition">
+                    <span class="w-2 h-2 rounded-full bg-[#0e9f98] animate-pulse"></span>
+                    <span id="txt-trial-grade">🧪 开始体验批改 (沙盒回填·展示证据链)</span>
+                  </button>
+                  <button id="btn-submit-real" class="w-full py-2.5 bg-[#1864ab] text-white text-xs font-bold rounded-lg shadow-sm btn-pressable">
+                    提交并进入下一份
+                  </button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+        </main>
+
+        <!-- ======================================================== -->
+        <!-- 题目原文与评分标准展示空间 (智能核对伴侣面板)            -->
+        <!-- ======================================================== -->
+        <aside id="inspector-companion-panel" class="w-[360px] xl:w-[390px] bg-white border-l border-[#e2e8ec] flex flex-col shrink-0 shadow-xs z-10 transition-all duration-300 overflow-hidden">
+          
+          <!-- 面板 Header (对齐用户截图：当前评分标准 / 第13题 实验题 / 6分) -->
+          <div class="p-3.5 border-b border-[#e2e8ec] flex items-center justify-between bg-white shrink-0">
+            <div>
+              <span class="text-[10px] font-bold text-[#929ca6] block uppercase tracking-wider">当前评分标准</span>
+              <strong id="inspector-panel-title" class="font-bold text-sm text-[#172126] block mt-0.5">第13题 实验题</strong>
+            </div>
+            <div class="flex items-center gap-2">
+              <b id="inspector-panel-score" class="font-mono font-bold text-sm text-[#0e9f98] bg-[#e8f8f6] px-2 py-0.5 rounded-lg border border-[#0e9f98]/30">6 分</b>
+              <button onclick="toggleInspectorPanel()" class="text-[#929ca6] hover:text-[#172126] p-1 rounded-lg hover:bg-[#f5f8f8] transition" title="收起面板">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- 分段切换器 (支持三个模式：[ 题目原文 ] | [ 评分标准 ] | [ 批改结果 ]) -->
+          <div class="px-3 pt-2.5 pb-2 border-b border-[#e2e8ec] bg-[#f8fafb] shrink-0">
+            <div class="flex bg-[#eef2f5] p-1 rounded-xl border border-[#e2e8ec]">
+              <button onclick="switchInspectorTab('question')" id="inspector-tab-question" class="flex-1 py-1.5 rounded-lg text-[#66717d] hover:text-[#172126] font-bold text-xs transition flex items-center justify-center gap-1">
+                <span>题目原文</span>
+              </button>
+              <button onclick="switchInspectorTab('rubric')" id="inspector-tab-rubric" class="flex-1 py-1.5 rounded-lg bg-white text-[#0e9f98] font-bold shadow-2xs text-xs transition flex items-center justify-center gap-1">
+                <span>评分标准</span>
+              </button>
+              <button onclick="switchInspectorTab('result')" id="inspector-tab-result" class="flex-1 py-1.5 rounded-lg text-[#66717d] hover:text-[#172126] font-bold text-xs transition flex items-center justify-center gap-1 relative">
+                <span>批改结果</span>
+                <span id="tab-result-badge" class="hidden w-2 h-2 rounded-full bg-[#0e9f98] absolute top-1 right-2 animate-ping"></span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 滚动内容区 -->
+          <div class="flex-1 overflow-y-auto p-3 space-y-3 bg-[#f8fafb]/60">
+            
+            <!-- 视图 1: 评分标准 (100% 完整复刻用户截图中的 1·(1)、2·(2)、3·(3) 卡片) -->
+            <div id="inspector-content-rubric" class="space-y-3">
+              
+              <!-- 1 · (1) 卡片 -->
+              <details class="bg-white border border-[#e2e8ec] rounded-xl overflow-hidden shadow-2xs group transition" open>
+                <summary class="flex items-center justify-between p-3 cursor-pointer hover:bg-[#f8fafb] transition list-none select-none">
+                  <div>
+                    <strong class="text-xs font-bold text-[#172126]">1 · (1)</strong>
+                    <span class="text-[10px] text-[#929ca6] block mt-0.5">1 个评分点</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs font-bold font-mono text-[#0e9f98]">2 分</span>
+                    <svg class="w-3.5 h-3.5 text-[#929ca6] transform transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                  </div>
+                </summary>
+                <div class="p-3 pt-0 border-t border-[#f1f5f7] space-y-2 text-xs">
+                  <div class="flex items-center justify-between text-[11px] pt-2">
+                    <span class="font-mono font-bold text-[#0e9f98]">1-1</span>
+                    <b class="text-[#0e9f98] font-mono">2 分</b>
+                  </div>
+                  <strong class="text-xs text-[#172126] block">第(1)问答案</strong>
+                  <p class="text-xs text-[#495057]">选填 C</p>
+                  <div class="p-2.5 bg-[#e8f8f6] border-l-3 border-[#0e9f98] rounded-r-lg text-xs space-y-0.5">
+                    <span class="text-[10px] font-bold text-[#0e9f98] block">判分依据</span>
+                    <span class="font-bold text-[#172126] font-mono">C</span>
+                  </div>
+                  <details class="text-[11px] text-[#929ca6]">
+                    <summary class="cursor-pointer hover:text-[#172126] flex items-center justify-between py-1 border-t border-dashed border-[#e2e8ec] mt-1">
+                      <span>作答形式辅助</span>
+                      <span class="text-[10px] text-[#0e9f98]">1 项 ‹</span>
+                    </summary>
+                    <div class="p-2 bg-[#f8fafb] rounded text-[10px] text-[#66717d] mt-1 border border-[#e2e8ec]">
+                      支持大写或小写：如 C、c、(C)
+                    </div>
+                  </details>
+                </div>
+              </details>
+
+              <!-- 2 · (2) 卡片 (核心：严查2位有效数字) -->
+              <details class="bg-white border border-[#e2e8ec] rounded-xl overflow-hidden shadow-2xs group transition" open>
+                <summary class="flex items-center justify-between p-3 cursor-pointer hover:bg-[#f8fafb] transition list-none select-none">
+                  <div>
+                    <strong class="text-xs font-bold text-[#172126]">2 · (2)</strong>
+                    <span class="text-[10px] text-[#929ca6] block mt-0.5">1 个评分点</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs font-bold font-mono text-[#0e9f98]">2 分</span>
+                    <svg class="w-3.5 h-3.5 text-[#929ca6] transform transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                  </div>
+                </summary>
+                <div class="p-3 pt-0 border-t border-[#f1f5f7] space-y-2 text-xs">
+                  <div class="flex items-center justify-between text-[11px] pt-2">
+                    <span class="font-mono font-bold text-[#0e9f98]">2-1</span>
+                    <b class="text-[#0e9f98] font-mono">2 分</b>
+                  </div>
+                  <strong class="text-xs text-[#172126] block">第(2)问答案</strong>
+                  <p class="text-xs text-[#495057] leading-relaxed">
+                    填入 2.4。必须严格保留两位有效数字，未保留两位有效数字（如写成 2、2.40、12/5 等）不得分。
+                  </p>
+                  <div class="p-2.5 bg-[#e8f8f6] border-l-3 border-[#0e9f98] rounded-r-lg text-xs space-y-0.5">
+                    <span class="text-[10px] font-bold text-[#0e9f98] block">判分依据</span>
+                    <span class="font-bold text-[#172126] font-mono">2.4</span>
+                  </div>
+                  <details class="text-[11px] text-[#929ca6]">
+                    <summary class="cursor-pointer hover:text-[#172126] flex items-center justify-between py-1 border-t border-dashed border-[#e2e8ec] mt-1">
+                      <span>作答形式辅助</span>
+                      <span class="text-[10px] text-[#0e9f98]">1 项 ‹</span>
+                    </summary>
+                    <div class="p-2 bg-[#f8fafb] rounded text-[10px] text-[#66717d] mt-1 border border-[#e2e8ec]">
+                      严格保留两位有效数字：仅接受 2.4 或 2.4 m/s²
+                    </div>
+                  </details>
+                </div>
+              </details>
+
+              <!-- 3 · (3) 卡片 -->
+              <details class="bg-white border border-[#e2e8ec] rounded-xl overflow-hidden shadow-2xs group transition" open>
+                <summary class="flex items-center justify-between p-3 cursor-pointer hover:bg-[#f8fafb] transition list-none select-none">
+                  <div>
+                    <strong class="text-xs font-bold text-[#172126]">3 · (3)</strong>
+                    <span class="text-[10px] text-[#929ca6] block mt-0.5">1 个评分点</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs font-bold font-mono text-[#0e9f98]">2 分</span>
+                    <svg class="w-3.5 h-3.5 text-[#929ca6] transform transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                  </div>
+                </summary>
+                <div class="p-3 pt-0 border-t border-[#f1f5f7] space-y-2 text-xs">
+                  <div class="flex items-center justify-between text-[11px] pt-2">
+                    <span class="font-mono font-bold text-[#0e9f98]">3-1</span>
+                    <b class="text-[#0e9f98] font-mono">2 分</b>
+                  </div>
+                  <strong class="text-xs text-[#172126] block">第(3)问答案</strong>
+                  <p class="text-xs text-[#495057]">选填 B</p>
+                  <div class="p-2.5 bg-[#e8f8f6] border-l-3 border-[#0e9f98] rounded-r-lg text-xs space-y-0.5">
+                    <span class="text-[10px] font-bold text-[#0e9f98] block">判分依据</span>
+                    <span class="font-bold text-[#172126] font-mono">B</span>
+                  </div>
+                  <details class="text-[11px] text-[#929ca6]">
+                    <summary class="cursor-pointer hover:text-[#172126] flex items-center justify-between py-1 border-t border-dashed border-[#e2e8ec] mt-1">
+                      <span>作答形式辅助</span>
+                      <span class="text-[10px] text-[#0e9f98]">1 项 ‹</span>
+                    </summary>
+                    <div class="p-2 bg-[#f8fafb] rounded text-[10px] text-[#66717d] mt-1 border border-[#e2e8ec]">
+                      支持大写 B 或小写 b
+                    </div>
+                  </details>
+                </div>
+              </details>
+
+            </div>
+
+            <!-- 视图 2: 题目原文 (默认隐藏) -->
+            <div id="inspector-content-question" class="hidden space-y-3 text-xs">
+              <div class="p-3 bg-white border border-[#e2e8ec] rounded-xl space-y-2 text-[#172126] leading-relaxed shadow-2xs">
+                <span class="px-2 py-0.5 rounded bg-[#e8f8f6] text-[#0e9f98] font-bold text-[10px] inline-block">题干背景</span>
+                <p>某实验小组利用如图所示的气垫导轨和光电门装置“探究加速度与力的关系”。已知滑块（含遮光条）的总质量为 $M$，沙桶及沙的总质量为 $m$，遮光条宽度为 $d$。实验装置保持水平，计时器频率为 50Hz。</p>
+              </div>
+
+              <div class="p-3 bg-white border border-[#e2e8ec] rounded-xl space-y-1.5 shadow-2xs">
+                <b class="text-xs text-[#172126] block">小问 (1) · 2.0 分</b>
+                <p class="text-[#495057] text-[11px] leading-relaxed">
+                  为了使细绳拉力近似等于沙和沙桶总重力，实验中滑块总质量 $M$ 与沙及桶总质量 $m$ 必须满足的关系是：______（选填选项字母）。<br>
+                  A. $M \ll m$ &nbsp;&nbsp;&nbsp;&nbsp; B. $M = m$ &nbsp;&nbsp;&nbsp;&nbsp; C. $M \gg m$
+                </p>
+              </div>
+
+              <div class="p-3 bg-white border border-[#e2e8ec] rounded-xl space-y-1.5 shadow-2xs">
+                <b class="text-xs text-[#172126] block">小问 (2) · 2.0 分</b>
+                <p class="text-[#495057] text-[11px] leading-relaxed">
+                  已知遮光条通过两光电门的时间分别为 $\Delta t_1 = 0.020\text{s}$ 和 $\Delta t_2 = 0.010\text{s}$，两光电门之间的距离为 $L = 0.60\text{m}$，遮光条宽度 $d = 2.00\text{cm}$，则滑块加速度大小计算值为 ______ $\text{m/s}^2$（结果严格保留两位有效数字）。
+                </p>
+              </div>
+
+              <div class="p-3 bg-white border border-[#e2e8ec] rounded-xl space-y-1.5 shadow-2xs">
+                <b class="text-xs text-[#172126] block">小问 (3) · 2.0 分</b>
+                <p class="text-[#495057] text-[11px] leading-relaxed">
+                  保持沙和沙桶质量 $m$ 不变，改变滑块质量 $M$，以加速度 $a$ 为纵轴，$1/M$ 为横轴，作出的图像正确的是：______（选填选项字母）。<br>
+                  A. 平行横轴直线 &nbsp;&nbsp;&nbsp;&nbsp; B. 过原点倾斜直线 &nbsp;&nbsp;&nbsp;&nbsp; C. 双曲线
+                </p>
+              </div>
+            </div>
+
+            <!-- 视图 3: 批改结果 (最新一条批改的简洁记录展示：只保留总分、每小问最终手写切片、得分) -->
+            <div id="inspector-content-result" class="hidden space-y-3">
+              
+              <!-- 顶部答卷简报与总分卡片 -->
+              <div id="result-summary-card" class="p-3 bg-white border border-[#e2e8ec] rounded-xl shadow-2xs space-y-2 transition-all">
+                <div class="flex items-center justify-between text-xs">
+                  <span class="font-bold text-[#172126] flex items-center gap-1.5">
+                    <span class="w-2 h-2 rounded-full bg-[#0e9f98] animate-pulse"></span>
+                    <span>最新批改 · 答卷 #0001</span>
+                  </span>
+                  <span class="text-[10px] text-[#2e9b65] bg-[#f0fdf4] border border-[#bbf7d0] px-1.5 py-0.5 rounded font-bold">
+                    已填入智学网框 (未提交)
+                  </span>
+                </div>
+
+                <div class="flex items-baseline justify-between pt-1 border-t border-[#f1f5f7]">
+                  <span class="text-xs text-[#66717d]">本题权威重算总分</span>
+                  <div class="flex items-baseline gap-1">
+                    <span id="result-summary-score" class="text-2xl font-bold font-mono text-[#0e9f98]">5.0</span>
+                    <span class="text-xs text-[#929ca6] font-bold">/ 6.0 分</span>
+                  </div>
+                </div>
+
+                <div class="flex items-center justify-between text-[10px] text-[#929ca6] pt-1">
+                  <span>用时: 2.1s · 综合置信度: 0.98</span>
+                  <span class="text-[#c98718] font-semibold">⚠️ 第(2)问有效数字扣1分</span>
+                </div>
+              </div>
+
+              <!-- 逐小问简洁记录列表：最终手写切片 + 最终得分 -->
+              <div class="space-y-2.5">
+                
+                <!-- 小问 (1) -->
+                <div class="bg-white border border-[#e2e8ec] rounded-xl p-3 shadow-2xs space-y-2">
+                  <div class="flex items-center justify-between text-xs">
+                    <b class="text-[#172126]">(1) 验证平衡摩擦力</b>
+                    <span class="px-2 py-0.5 rounded bg-[#f0fdf4] text-[#2e9b65] border border-[#bbf7d0] font-mono font-bold text-xs">
+                      2.0 / 2.0 分
+                    </span>
+                  </div>
+                  
+                  <!-- 手写答案切片图仿真 -->
+                  <div class="space-y-1">
+                    <div class="flex items-center justify-between text-[10px] text-[#929ca6]">
+                      <span>最终手写切片证据：</span>
+                      <span class="font-mono text-[#0e9f98]">bbox: [260, 138, 372, 166]</span>
+                    </div>
+                    <div class="p-2.5 bg-amber-50/70 border border-amber-200 rounded-lg flex items-center justify-between shadow-inner">
+                      <div class="font-serif text-sm font-bold text-blue-950 tracking-wider select-text bg-white/80 px-3 py-1 rounded border border-amber-300/60 shadow-2xs">
+                        间距相等
+                      </div>
+                      <span class="text-[10px] bg-[#2e9b65] text-white px-1.5 py-0.5 rounded font-bold">✓ 判定正确</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 小问 (2) -->
+                <div class="bg-white border border-[#e2e8ec] rounded-xl p-3 shadow-2xs space-y-2">
+                  <div class="flex items-center justify-between text-xs">
+                    <b class="text-[#172126]">(2) 测量加速度数值</b>
+                    <span class="px-2 py-0.5 rounded bg-[#fff8eb] text-[#c98718] border border-[#fbd89a] font-mono font-bold text-xs">
+                      1.0 / 2.0 分
+                    </span>
+                  </div>
+                  
+                  <!-- 手写答案切片图仿真 (扣分点) -->
+                  <div class="space-y-1">
+                    <div class="flex items-center justify-between text-[10px] text-[#929ca6]">
+                      <span>最终手写切片证据：</span>
+                      <span class="font-mono text-[#c98718]">扣分点：有效数字未留2位</span>
+                    </div>
+                    <div class="p-2.5 bg-amber-50/70 border-2 border-amber-300 rounded-lg flex items-center justify-between shadow-inner">
+                      <div class="font-serif text-sm font-bold text-amber-950 tracking-wider select-text bg-white/80 px-3 py-1 rounded border border-amber-300/80 shadow-2xs">
+                        a = 1.4 m/s²
+                      </div>
+                      <span class="text-[10px] bg-[#c98718] text-white px-1.5 py-0.5 rounded font-bold">扣1分 (标答1.40)</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 小问 (3) -->
+                <div class="bg-white border border-[#e2e8ec] rounded-xl p-3 shadow-2xs space-y-2">
+                  <div class="flex items-center justify-between text-xs">
+                    <b class="text-[#172126]">(3) a - 1/M 图像形状</b>
+                    <span class="px-2 py-0.5 rounded bg-[#f0fdf4] text-[#2e9b65] border border-[#bbf7d0] font-mono font-bold text-xs">
+                      2.0 / 2.0 分
+                    </span>
+                  </div>
+                  
+                  <!-- 手写答案切片图仿真 -->
+                  <div class="space-y-1">
+                    <div class="flex items-center justify-between text-[10px] text-[#929ca6]">
+                      <span>最终手写切片证据：</span>
+                      <span class="font-mono text-[#0e9f98]">bbox: [248, 220, 390, 248]</span>
+                    </div>
+                    <div class="p-2.5 bg-amber-50/70 border border-amber-200 rounded-lg flex items-center justify-between shadow-inner">
+                      <div class="font-serif text-sm font-bold text-blue-950 tracking-wider select-text bg-white/80 px-3 py-1 rounded border border-amber-300/60 shadow-2xs">
+                        过原点的倾斜直线
+                      </div>
+                      <span class="text-[10px] bg-[#2e9b65] text-white px-1.5 py-0.5 rounded font-bold">✓ 判定正确</span>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+
+              <!-- 底部审计证据说明 -->
+              <div class="p-2.5 bg-[#f0fdf4] border border-[#bbf7d0] rounded-xl text-[10px] text-[#2e9b65] flex items-center justify-between">
+                <span>✓ 卷面手写证据已就绪 · 支持人工复核</span>
+                <span class="font-mono text-[9px] text-[#66717d]">call_id: c_78a1bc</span>
+              </div>
+
+            </div>
+
+          </div>
+
+          <!-- 面板 Footer (评分标准版本与对齐校验) -->
+          <div class="p-2.5 px-3 border-t border-[#e2e8ec] bg-white flex items-center justify-between text-[10px] text-[#66717d] shrink-0">
+            <span class="flex items-center gap-1.5">
+              <span class="w-1.5 h-1.5 rounded-full bg-[#0e9f98]"></span>
+              <span>评分标准版本：v1.0 (已锁定)</span>
+            </span>
+            <span class="font-mono text-[#0e9f98] font-bold">对齐智学网第13题 ✓</span>
+          </div>
+
+        </aside>
+
+      </div>
+
+    </div>
+
+    <!-- ======================================================== -->
+    <!-- 侧栏【评分标准】管理与新建整页主视图 (100% 对齐用户上传真实截图) -->
+    <!-- ======================================================== -->
+    <div id="view-templates" class="hidden flex-1 flex flex-col overflow-y-auto bg-[#f8fafc]">
+      
+      <!-- 评分资料 Header (100% 复刻用户截图) -->
+      <div class="p-6 pb-4 border-b border-[#e2e8ec] bg-white flex items-center justify-between shrink-0">
+        <div>
+          <span class="text-[11px] font-bold text-[#929ca6] block uppercase tracking-wider">评分资料</span>
+          <h1 class="text-xl font-bold text-[#172126] mt-0.5">评分标准</h1>
+          <p class="text-xs text-[#66717d] mt-1">管理已保存且可继续修改的题目、答案和逐点评分规则。</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="px-2.5 py-1 rounded-lg bg-[#e8f8f6] text-[#0e9f98] font-bold text-xs border border-[#0e9f98]/30 flex items-center gap-1.5 shadow-2xs">
+            <span class="w-1.5 h-1.5 rounded-full bg-[#0e9f98] animate-pulse"></span>
+            页面已连接
+          </span>
+          <span class="px-2.5 py-1 rounded-lg bg-[#f5f8f8] text-[#66717d] font-semibold text-xs border border-[#cfd9de]">
+            异常
+          </span>
+          <button onclick="navigateToView('workbench')" class="btn-pressable px-3 py-1.5 rounded-xl border border-[#0e9f98]/40 bg-[#e8f8f6] text-[#0e9f98] font-bold text-xs flex items-center gap-1.5 hover:bg-[#d8f2ee] shadow-2xs transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+            <span>返回工作台</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 视图 1: 已保存的评分标准列表卡片 (对齐用户截图) -->
+      <div id="templates-list-subview" class="p-6 space-y-4">
+        
+        <div class="bg-white rounded-2xl border border-[#e2e8ec] p-5 shadow-2xs">
+          <!-- 模块 Header -->
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-[#f1f5f7] gap-3">
+            <div>
+              <span class="text-[10px] font-bold text-[#929ca6] uppercase tracking-wider block">本地模板库</span>
+              <h2 class="text-base font-bold text-[#172126] mt-0.5">已保存的评分标准</h2>
+              <p class="text-xs text-[#66717d] mt-0.5">评分标准可以继续修改；绑定后流水线固定使用当时选定的版本。</p>
+            </div>
+            <button onclick="openTemplateEditor('new')" class="btn-pressable px-4 py-2 bg-[#0e9f98] hover:bg-[#0d8c88] text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+              <span>+ 新建评分标准</span>
+            </button>
+          </div>
+
+          <!-- 表格与操作栏 -->
+          <div class="mt-4">
+            <div class="flex items-center justify-between text-xs text-[#929ca6] pb-2 border-b border-[#f1f5f7]">
+              <label class="flex items-center gap-2 cursor-pointer select-none">
+                <input type="checkbox" class="rounded text-[#0e9f98] focus:ring-0">
+                <span class="font-medium text-[#66717d]">全选可删除项</span>
+              </label>
+              <div class="flex items-center gap-2">
+                <span>已选择 0 项</span>
+                <button disabled class="px-2.5 py-1 rounded bg-[#f5f8f8] text-[#929ca6] cursor-not-allowed border border-[#e2e8ec]">删除所选</button>
+              </div>
+            </div>
+
+            <!-- 数据表格 -->
+            <div class="overflow-x-auto">
+              <table class="w-full text-left text-xs text-[#172126]">
+                <thead>
+                  <tr class="text-[11px] font-bold text-[#929ca6] border-b border-[#f1f5f7]">
+                    <th class="py-3 px-2 w-8"></th>
+                    <th class="py-3 px-3">模板</th>
+                    <th class="py-3 px-3">状态</th>
+                    <th class="py-3 px-3">满分</th>
+                    <th class="py-3 px-3">题目素材</th>
+                    <th class="py-3 px-3">批改记录</th>
+                    <th class="py-3 px-3">更新时间</th>
+                    <th class="py-3 px-3">当前任务</th>
+                    <th class="py-3 px-3 text-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-[#f1f5f7]">
+                  <!-- 模板 1: 第13题 实验题 -->
+                  <tr class="hover:bg-[#f8fafb] transition">
+                    <td class="py-3 px-2"><input type="checkbox" disabled class="rounded text-[#0e9f98]" title="当前任务正在使用，不可删除"></td>
+                    <td class="py-3 px-3">
+                      <strong class="font-bold text-[#172126] block">第13题 物理实验题</strong>
+                      <small class="text-[10px] text-[#929ca6]">验证牛顿第二定律 · 3小问细则已锁定</small>
+                    </td>
+                    <td class="py-3 px-3">
+                      <span class="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 text-[11px] font-semibold border border-emerald-200">大题 · 可编辑</span>
+                    </td>
+                    <td class="py-3 px-3 font-mono font-bold text-[#0e9f98]">6.0 分</td>
+                    <td class="py-3 px-3 text-[#66717d]">2 张</td>
+                    <td class="py-3 px-3 text-[#66717d] font-mono">1</td>
+                    <td class="py-3 px-3 text-[#66717d]">刚刚</td>
+                    <td class="py-3 px-3">
+                      <span class="px-2 py-0.5 rounded bg-[#e8f8f6] text-[#0e9f98] text-[11px] font-bold border border-[#0e9f98]/30 flex items-center gap-1 w-fit">
+                        <span>✓ 已绑定当前任务</span>
+                      </span>
+                    </td>
+                    <td class="py-3 px-3 text-right">
+                      <button onclick="navigateToView('workbench')" class="text-[#0e9f98] font-bold hover:underline text-xs">去改卷 ›</button>
+                    </td>
+                  </tr>
+
+                  <!-- 模板 2: 第14题 计算题 (创建后显示或供快速套用) -->
+                  <tr id="row-template-q14" class="hover:bg-[#f8fafb] transition">
+                    <td class="py-3 px-2"><input type="checkbox" class="rounded text-[#0e9f98]"></td>
+                    <td class="py-3 px-3">
+                      <strong class="font-bold text-[#172126] block">第14题 物理计算题</strong>
+                      <small class="text-[10px] text-[#929ca6]">带电粒子在匀强磁场中的运动 · 2小问</small>
+                    </td>
+                    <td class="py-3 px-3">
+                      <span class="px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-[11px] font-semibold border border-blue-200">大题 · 可编辑</span>
+                    </td>
+                    <td class="py-3 px-3 font-mono font-bold text-[#0e9f98]">10.0 分</td>
+                    <td class="py-3 px-3 text-[#66717d]">1 张</td>
+                    <td class="py-3 px-3 text-[#66717d] font-mono">0</td>
+                    <td class="py-3 px-3 text-[#66717d]">刚刚</td>
+                    <td class="py-3 px-3">
+                      <span id="tag-q14-binding" class="text-[11px] text-[#929ca6]">未绑定</span>
+                    </td>
+                    <td class="py-3 px-3 text-right space-x-2">
+                      <button onclick="confirmAndSaveRubricToWorkbench('q14')" class="text-xs font-bold text-[#0e9f98] hover:underline">一键绑定并改卷</button>
+                      <button onclick="openTemplateEditor('q14')" class="text-xs text-[#66717d] hover:text-[#172126] hover:underline">编辑 ›</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+
+      <!-- 视图 2: 全屏新建/编辑评分标准工作台 (解决“小框输入”的局促感) -->
+      <div id="templates-editor-subview" class="hidden p-6 space-y-5 max-w-5xl mx-auto w-full">
+        
+        <!-- 进度与返回栏 -->
+        <div class="flex items-center justify-between pb-3 border-b border-[#e2e8ec]">
+          <div class="flex items-center gap-2">
+            <button onclick="closeTemplateEditor()" class="p-1.5 rounded-lg hover:bg-white text-[#66717d] hover:text-[#172126] transition" title="返回列表">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+            </button>
+            <div>
+              <span class="text-[10px] text-[#929ca6] font-bold uppercase tracking-wider block">全屏编辑器</span>
+              <h2 id="editor-page-title" class="text-lg font-bold text-[#172126]">新建评分标准：第14题 物理计算题</h2>
+            </div>
+          </div>
+
+          <!-- 3 步进度指示 -->
+          <div class="flex items-center gap-2 text-xs">
+            <span class="flex items-center gap-1 font-bold text-[#2e9b65] bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200">
+              <span>✓ 1.导入材料</span>
+            </span>
+            <span class="text-[#cfd9de]">›</span>
+            <span class="flex items-center gap-1 font-bold text-[#0e9f98] bg-[#e8f8f6] px-2 py-1 rounded-lg border border-[#0e9f98]/30 animate-pulse">
+              <span>2.生成与核对</span>
+            </span>
+            <span class="text-[#cfd9de]">›</span>
+            <span class="flex items-center gap-1 text-[#929ca6]">
+              <span>3.保存并返回</span>
+            </span>
+          </div>
+        </div>
+
+        <!-- 步骤 1: 题目原文与参考答案材料导入 -->
+        <div class="bg-white rounded-2xl border border-[#e2e8ec] p-5 shadow-2xs space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <span class="text-[10px] font-bold text-[#929ca6] uppercase tracking-wider">步骤 1</span>
+              <h3 class="text-sm font-bold text-[#172126] mt-0.5">导入题目与评分依据</h3>
+            </div>
+            <div class="flex items-center gap-2 bg-[#f8fafb] p-1 rounded-xl border border-[#e2e8ec] text-xs">
+              <label class="px-2.5 py-1 rounded-lg bg-white font-bold text-[#0e9f98] shadow-2xs cursor-pointer flex items-center gap-1">
+                <input type="radio" checked class="hidden">
+                <span>大题 (AI视觉链路)</span>
+              </label>
+              <label class="px-2.5 py-1 rounded-lg text-[#66717d] cursor-pointer flex items-center gap-1">
+                <input type="radio" class="hidden">
+                <span>小题 (分空切片)</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <!-- 题目原文输入卡片 -->
+            <div class="space-y-1.5 text-xs">
+              <div class="flex items-center justify-between">
+                <label class="font-bold text-[#172126] flex items-center gap-1.5">
+                  <svg class="w-4 h-4 text-[#0e9f98]" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                  <span>题目原文 (TXT / MD / 截图)</span>
+                </label>
+                <span class="text-[10px] text-[#929ca6]">支持拖拽文档</span>
+              </div>
+              <textarea id="editor-question-text" rows="5" class="w-full bg-[#f8fafb] border border-[#cfd9de] rounded-xl p-3 text-xs font-mono text-[#172126] focus:border-[#0e9f98] focus:bg-white outline-none transition leading-relaxed" placeholder="粘贴题目文字，有题图可截图粘贴...">质量为 m、电荷量为 +q 的带电粒子以初速度 v0 垂直射入磁感应强度为 B 的匀强磁场中。求：&#10;(1) 粒子在磁场中做圆周运动的轨道半径与速度表达式；&#10;(2) 粒子在磁场中运动的时间与周期。</textarea>
+            </div>
+
+            <!-- 参考答案与评分标准输入卡片 -->
+            <div class="space-y-1.5 text-xs">
+              <div class="flex items-center justify-between">
+                <label class="font-bold text-[#172126] flex items-center gap-1.5">
+                  <svg class="w-4 h-4 text-[#0e9f98]" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+                  <span>参考答案与评分标准 (支持 LaTeX 公式)</span>
+                </label>
+                <span class="text-[10px] text-[#0e9f98]">公式将自动渲染</span>
+              </div>
+              <textarea id="editor-reference-text" rows="5" class="w-full bg-[#f8fafb] border border-[#cfd9de] rounded-xl p-3 text-xs font-mono text-[#172126] focus:border-[#0e9f98] focus:bg-white outline-none transition leading-relaxed" placeholder="粘贴参考答案和逐点给分要求...">(1) 洛伦兹力提供向心力 qvB = mv²/R 得轨道半径 R = mv/(qB)，推导得速度表达式 (4分)&#10;(2) 运动周期 T = 2πm/(qB)，在磁场中运动时间 t = T/2 = πm/(qB) (6分)</textarea>
+            </div>
+          </div>
+
+          <div class="p-3 bg-[#e8f8f6]/50 rounded-xl border border-[#0e9f98]/20 flex items-center justify-between">
+            <span class="text-xs text-[#0e9f98] font-medium">✨ 模型已准备就绪，点击重新解析可自动更新下方的结构化卡片</span>
+            <button onclick="simulateRegenerateRubricDraft()" class="btn-pressable px-3 py-1.5 rounded-lg bg-[#0e9f98] text-white text-xs font-bold shadow-2xs hover:bg-[#0d8c88]">
+              重新生成评分标准草稿
+            </button>
+          </div>
+        </div>
+
+        <!-- 步骤 2: 评分标准草稿核对与小问细则预览 -->
+        <div class="bg-white rounded-2xl border border-[#e2e8ec] p-5 shadow-2xs space-y-4">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#f1f5f7]">
+            <div>
+              <span class="text-[10px] font-bold text-[#929ca6] uppercase tracking-wider">步骤 2</span>
+              <h3 class="text-sm font-bold text-[#172126] mt-0.5">核对评分标准草稿</h3>
+            </div>
+            <div class="flex items-center gap-3">
+              <div class="text-xs">
+                <span class="text-[#929ca6]">满分：</span>
+                <strong class="font-mono text-sm text-[#0e9f98]">10.0 分</strong>
+              </div>
+              <div class="text-xs">
+                <span class="text-[#929ca6]">小问：</span>
+                <strong class="font-mono text-sm text-[#172126]">2 个</strong>
+              </div>
+              <div class="text-xs">
+                <span class="text-[#929ca6]">评分点：</span>
+                <strong class="font-mono text-sm text-[#172126]">2 个</strong>
+              </div>
+            </div>
+          </div>
+
+          <!-- 小问逐项卡片 (100% 对齐高保真细则卡片) -->
+          <div class="space-y-3">
+            <!-- (1) 卡片 -->
+            <div class="p-3.5 bg-[#f8fafb] border border-[#e2e8ec] rounded-xl space-y-2 text-xs">
+              <div class="flex items-center justify-between">
+                <strong class="font-bold text-xs text-[#172126]">1 · (1) 洛伦兹力与轨道半径推导</strong>
+                <span class="font-mono font-bold text-xs text-[#0e9f98] bg-white px-2 py-0.5 rounded border border-[#cfd9de]">4.0 分</span>
+              </div>
+              <p class="text-xs text-[#66717d]">洛伦兹力提供向心力公式与速度推导</p>
+              <div class="p-2.5 bg-[#e8f8f6] border-l-3 border-[#0e9f98] rounded-r-lg text-xs">
+                <span class="text-[10px] font-bold text-[#0e9f98] block">判分依据</span>
+                <span class="font-bold text-[#172126] font-mono">qvB = m v²/R ➔ v = qBR / m (式子2分，推导2分)</span>
+              </div>
+            </div>
+
+            <!-- (2) 卡片 -->
+            <div class="p-3.5 bg-[#f8fafb] border border-[#e2e8ec] rounded-xl space-y-2 text-xs">
+              <div class="flex items-center justify-between">
+                <strong class="font-bold text-xs text-[#172126]">2 · (2) 在磁场中运动时间与周期</strong>
+                <span class="font-mono font-bold text-xs text-[#0e9f98] bg-white px-2 py-0.5 rounded border border-[#cfd9de]">6.0 分</span>
+              </div>
+              <p class="text-xs text-[#66717d]">圆心角 θ = π 与周期公式联合求解</p>
+              <div class="p-2.5 bg-[#e8f8f6] border-l-3 border-[#0e9f98] rounded-r-lg text-xs">
+                <span class="text-[10px] font-bold text-[#0e9f98] block">判分依据</span>
+                <span class="font-bold text-[#172126] font-mono">T = 2πm / (qB), t = T/2 = πm / (qB) (周期3分，时间3分)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 步骤 3: 底部吸底保存并返回控制栏 (教师确认后 1 键自动返回工作台) -->
+        <div class="sticky bottom-4 z-20 bg-white/95 backdrop-blur-md rounded-2xl border-2 border-[#0e9f98] p-4 shadow-xl flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="w-3 h-3 rounded-full bg-[#0e9f98] animate-ping"></span>
+            <div>
+              <strong class="text-xs text-[#172126] block">评分细则已核对就绪</strong>
+              <span class="text-[11px] text-[#66717d]">点击右侧按钮，系统将保存新标准、自动绑定并切回工作台</span>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <button onclick="closeTemplateEditor()" class="btn-pressable px-4 py-2 rounded-xl border border-[#cfd9de] bg-white text-[#66717d] hover:text-[#172126] font-semibold text-xs">
+              ✕ 取消返回列表
+            </button>
+            <button onclick="confirmAndSaveRubricToWorkbench('q14')" id="btn-save-and-return-workbench" class="btn-pressable px-6 py-2.5 rounded-xl bg-[#0e9f98] hover:bg-[#0d8c88] text-white font-bold text-xs shadow-md flex items-center gap-2 animate-pulse">
+              <span id="txt-save-and-return">💾 确认保存并自动返回工作台开始批改 (Enter)</span>
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- 应用内右下角轻量气泡通知 (不是独立窗口，停留10秒，点击直达记录) -->
+  <!-- ======================================================== -->
+  <div id="grading-toast-bubble" onclick="openResultFromToast()" class="fixed bottom-5 right-5 z-50 max-w-sm w-80 bg-white/95 backdrop-blur-md rounded-2xl shadow-xl border border-[#0e9f98]/30 p-3.5 transition-all duration-300 transform translate-y-28 opacity-0 pointer-events-none select-none cursor-pointer hover:shadow-2xl hover:border-[#0e9f98] group">
+    
+    <!-- 顶部状态栏与倒计时 -->
+    <div class="flex items-center justify-between gap-3 mb-1.5">
+      <div class="flex items-center gap-2">
+        <span class="w-2.5 h-2.5 rounded-full bg-[#0e9f98] animate-ping"></span>
+        <span class="text-xs font-bold text-[#172126]">本题批改完成！</span>
+        <span class="px-2 py-0.5 rounded-full bg-[#e8f8f6] text-[#0e9f98] font-bold font-mono text-[11px] border border-[#0e9f98]/30">5.0 分</span>
+      </div>
+      <div class="flex items-center gap-1.5 text-[10px] text-[#929ca6]">
+        <span id="toast-countdown-text" class="font-mono">10s</span>
+        <button onclick="event.stopPropagation(); closeGradingToast();" class="text-[#929ca6] hover:text-[#172126] p-0.5 rounded hover:bg-[#f5f8f8]" title="关闭通知">✕</button>
+      </div>
+    </div>
+
+    <!-- 简要说明 -->
+    <p class="text-[11px] text-[#66717d] leading-snug mb-2">
+      第 13 题 (满分 6.0分) · 分数已回填智学网输入框
+    </p>
+
+    <!-- 逐小问极简切片分数胶囊 -->
+    <div class="grid grid-cols-3 gap-1.5 py-1.5 px-2 bg-[#f8fafb] rounded-xl border border-[#e2e8ec] text-[10px] font-mono mb-2">
+      <div class="text-center">
+        <span class="text-[#929ca6] block text-[9px]">(1) 满分</span>
+        <b class="text-[#2e9b65]">2.0分</b>
+      </div>
+      <div class="text-center border-x border-[#e2e8ec]">
+        <span class="text-[#929ca6] block text-[9px]">(2) 有效数字</span>
+        <b class="text-[#c98718]">1.0分</b>
+      </div>
+      <div class="text-center">
+        <span class="text-[#929ca6] block text-[9px]">(3) 满分</span>
+        <b class="text-[#2e9b65]">2.0分</b>
+      </div>
+    </div>
+
+    <!-- 底部点击提示 -->
+    <div class="flex items-center justify-between text-[11px] text-[#0e9f98] font-semibold">
+      <span class="flex items-center gap-1 group-hover:underline">
+        👉 点击查看右侧切片与详细记录
+      </span>
+      <span class="text-xs transition-transform group-hover:translate-x-1">→</span>
+    </div>
+
+    <!-- 10秒倒计时进度条 -->
+    <div class="absolute bottom-0 left-3 right-3 h-0.5 bg-[#e2e8ec] rounded-full overflow-hidden">
+      <div id="toast-progress-bar" class="h-full bg-[#0e9f98] w-full"></div>
+    </div>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- 工业级无感镂空聚光灯遮罩层 (Spotlight Mask Engine)       -->
+  <!-- ======================================================== -->
+  <div id="spotlight-container" class="fixed inset-0 z-40 pointer-events-none transition-opacity duration-400 opacity-0 hidden">
+    <!-- SVG 镂空遮罩 -->
+    <svg class="w-full h-full" width="100%" height="100%">
+      <defs>
+        <mask id="spotlight-mask-def">
+          <rect width="100%" height="100%" fill="white" />
+          <rect id="spotlight-cutout" x="0" y="0" width="0" height="0" rx="14" fill="black" />
+        </mask>
+      </defs>
+      <rect width="100%" height="100%" fill="rgba(23, 33, 38, 0.72)" mask="url(#spotlight-mask-def)" />
+    </svg>
+
+    <!-- 聚光灯边缘高亮呼吸光晕框 (带容积辉光) -->
+    <div id="spotlight-aura" class="absolute pointer-events-none rounded-2xl"></div>
+
+    <!-- 原地吸附式交互气泡卡片 (带弹簧物理回弹) -->
+    <div id="spotlight-bubble" class="absolute pointer-events-auto bg-white/95 backdrop-blur-md rounded-2xl p-5 shadow-2xl border border-[#cfd9de] text-xs text-[#172126] w-[390px] z-50 entering">
+      
+      <!-- 气泡标题与步骤提示 -->
+      <div class="flex items-center justify-between border-b border-[#e2e8ec] pb-2.5 mb-3">
+        <div class="flex items-center gap-2">
+          <span id="bubble-step-badge" class="px-2.5 py-0.5 rounded-full bg-[#0e9f98] text-white font-bold font-mono text-[11px] shadow-xs">1 / 4</span>
+          <h3 id="bubble-title" class="font-bold text-sm text-[#172126]">接入物理批改大模型</h3>
+        </div>
+        <button onclick="exitSpotlightTour()" class="text-[#929ca6] hover:text-[#172126] font-bold text-sm transition" title="跳过导览 (Esc)">×</button>
+      </div>
+
+      <!-- 气泡动态主体内容区 -->
+      <div id="bubble-content" class="space-y-3"></div>
+
+      <!-- 气泡底栏操作 -->
+      <div class="flex items-center justify-between pt-3 mt-3 border-t border-[#e2e8ec]">
+        <button onclick="prevSpotlightStep()" id="btn-bubble-prev" class="btn-pressable px-3 py-1.5 rounded-lg text-xs font-semibold text-[#66717d] hover:text-[#172126] hover:bg-[#f5f8f8]">
+          上一步
+        </button>
+        <button onclick="nextSpotlightStep()" id="btn-bubble-next" class="btn-pressable px-4 py-1.5 rounded-lg text-xs font-bold bg-[#0e9f98] hover:bg-[#0d8c88] text-white shadow-xs">
+          下一步 ›
+        </button>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- 动效与导览交互脚本 -->
+  <script>
+    let currentStep = 0;
+    let isZhixueControlsReady = false;
+    let isRubricReady = true; // 官方标准内置就绪
+    let isModelKeyReady = false;
+    let isTrialGradingDone = false;
+    let isSandboxMode = true; // 默认先在模拟虚拟沙盒中运行
+
+    const tourSteps = [
+      {
+        id: 'welcome',
+        anchorId: null,
+        title: '欢迎来到衡准 · 物理智能阅卷台！',
+        stepBadge: '破冰沙盒体验',
+        render: () => `
+          <p class="text-xs text-[#66717d] leading-relaxed">
+            告别传统软件机械复杂的侧边栏填表！我们采用了<b>“沙盒先行，秒出证据”</b>的大厂新体验：
+          </p>
+          <div class="p-3 bg-[#e8f8f6] rounded-xl border border-[#0e9f98]/30 space-y-2">
+            <div class="flex items-center gap-2 text-xs font-bold text-[#0e9f98]">
+              <span class="text-lg">🧪</span>
+              <span>第一阶段：在免登录沙盒中亲身体验 AI 改卷与完整证据链</span>
+            </div>
+            <p class="text-[11px] text-[#66717d] leading-normal">
+              评分标准已为您<b>官方预装锁定</b>（验证牛顿第二定律实验题，满分6.0分）。您只需测通 API Key，点击即可体验批改并查看完整手写切片扣分证据！
+            </p>
+          </div>
+          <div class="p-2.5 bg-[#f8fafb] rounded-xl border border-[#e2e8ec] flex items-center gap-2 text-xs text-[#172126]">
+            <span>🌐</span>
+            <span class="text-[11px] text-[#66717d]">第二阶段：沙盒体验满意后，一键平滑接入真实智学网/睿芽云。</span>
+          </div>
+        `,
+        nextText: '开始 1 分钟沙盒初体验 ›'
+      },
+      {
+        id: 'model',
+        anchorId: 'anchor-model-capsule',
+        title: '第 1 步：配置大模型 API Key (唤醒大脑)',
+        stepBadge: '1 / 4',
+        render: () => `
+          <p class="text-[11px] text-[#66717d]">
+            模拟考场与评分标准均已就绪！现在填入您的 API Key，为 AI 注入视觉识别大脑：
+          </p>
+
+          <!-- 顶部双选切换胶囊 -->
+          <div class="flex bg-[#f5f8f8] p-1 rounded-xl border border-[#e2e8ec]">
+            <button onclick="switchSpotlightProvider('deepseek')" id="spot-tab-deepseek" class="flex-1 py-1.5 rounded-lg bg-white text-[#0e9f98] font-bold shadow-2xs text-xs flex items-center justify-center gap-1 transition">
+              <span>⚡ DeepSeek (推荐直连)</span>
+            </button>
+            <button onclick="switchSpotlightProvider('custom')" id="spot-tab-custom" class="flex-1 py-1.5 rounded-lg text-[#66717d] hover:text-[#172126] font-medium text-xs flex items-center justify-center gap-1 transition">
+              <span>⚙️ 自定义 API 服务</span>
+            </button>
+          </div>
+
+          <!-- 模式 A: DeepSeek 极简直连 -->
+          <div id="spot-view-deepseek" class="space-y-2.5">
+            <div class="space-y-1">
+              <div class="flex justify-between text-[11px]">
+                <span class="font-bold text-[#172126]">DeepSeek API_KEY：</span>
+                <a href="https://platform.deepseek.com/" target="_blank" class="text-[#0e9f98] hover:underline">获取 Key ↗</a>
+              </div>
+              <input id="spot-key-input" type="password" value="sk-deepseek-789a6bc..." class="w-full bg-[#f7fafb] border border-[#cfd9de] rounded-lg px-2.5 py-1.5 text-xs font-mono text-[#172126] focus:border-[#0e9f98] focus:bg-white outline-none transition">
+            </div>
+            <div class="space-y-1">
+              <span class="text-[11px] font-bold text-[#172126]">模型名称：</span>
+              <input id="spot-model-input" type="text" value="deepseek-chat" class="w-full bg-[#f7fafb] border border-[#cfd9de] rounded-lg px-2.5 py-1 text-xs font-mono text-[#172126] focus:border-[#0e9f98] focus:bg-white outline-none transition">
+            </div>
+            <button onclick="testSpotlightModel('deepseek')" id="spot-test-btn" class="btn-pressable w-full py-2 bg-[#0e9f98] hover:bg-[#0d8c88] text-white rounded-lg font-bold text-xs shadow-xs">
+              <span id="spot-test-txt">测通连通性并激活 (Enter)</span>
+            </button>
+          </div>
+
+          <!-- 模式 B: 自定义 API 服务 -->
+          <div id="spot-view-custom" class="hidden space-y-2.5">
+            <div class="space-y-1">
+              <span class="text-[11px] font-bold text-[#172126]">接口地址 (Base URL)：</span>
+              <input id="spot-custom-url" type="text" value="https://api.siliconflow.cn/v1" class="w-full bg-[#f7fafb] border border-[#cfd9de] rounded-lg px-2.5 py-1 text-xs font-mono text-[#172126] focus:border-[#0e9f98] focus:bg-white outline-none transition">
+              <span class="text-[10px] text-[#929ca6] block">⚠️ 通常需包含 /v1 路径</span>
+            </div>
+            <div class="space-y-1">
+              <span class="text-[11px] font-bold text-[#172126]">自定义 API_KEY：</span>
+              <input id="spot-custom-key" type="password" value="sk-custom-token-xyz..." class="w-full bg-[#f7fafb] border border-[#cfd9de] rounded-lg px-2.5 py-1 text-xs font-mono text-[#172126] focus:border-[#0e9f98] focus:bg-white outline-none transition">
+            </div>
+            <div class="space-y-1">
+              <span class="text-[11px] font-bold text-[#172126]">模型名称 (Model)：</span>
+              <input id="spot-custom-model" type="text" value="Qwen/Qwen2.5-VL-72B-Instruct" class="w-full bg-[#f7fafb] border border-[#cfd9de] rounded-lg px-2.5 py-1 text-xs font-mono text-[#172126] focus:border-[#0e9f98] focus:bg-white outline-none transition">
+            </div>
+            <button onclick="testSpotlightModel('custom')" id="spot-custom-test-btn" class="btn-pressable w-full py-2 bg-[#0e9f98] hover:bg-[#0d8c88] text-white rounded-lg font-bold text-xs shadow-xs">
+              <span id="spot-custom-test-txt">测通自定义服务并激活 (Enter)</span>
+            </button>
+          </div>
+        `,
+        nextText: '下一步: 查看已内置的标准 ›'
+      },
+      {
+        id: 'rubric',
+        anchorId: 'anchor-rubric-selector',
+        title: '第 2 步：评分标准已官方内置就绪',
+        stepBadge: '2 / 4',
+        render: () => `
+          <p class="text-[11px] text-[#66717d] leading-relaxed">
+            <b>免去初次使用的繁琐录入！</b>系统已为您预装了官方标准《第13题 验证牛顿第二定律》完整评分细则：
+          </p>
+          <div class="p-3 bg-[#f0fdf4] rounded-xl border border-[#bbf7d0] space-y-2 text-xs">
+            <div class="flex items-center justify-between font-bold text-[#2e9b65]">
+              <span>✓ 官方物理实验题标准 (总分 6.0 分)</span>
+              <span class="text-[10px] px-1.5 py-0.2 bg-[#2e9b65] text-white rounded">已锁定</span>
+            </div>
+            <div class="space-y-1.5 text-[11px] text-[#172126] font-mono bg-white/80 p-2.5 rounded-lg border border-[#bbf7d0]">
+              <div class="flex justify-between items-center">
+                <span>• 1·(1) 调节倾角使点迹间距相等</span>
+                <b class="text-[#0e9f98]">2.0分</b>
+              </div>
+              <div class="flex justify-between items-center text-[#c98718]">
+                <span>• 2·(2) a=1.40m/s² (⚠️严查2位有效数字)</span>
+                <b class="text-[#0e9f98]">2.0分</b>
+              </div>
+              <div class="flex justify-between items-center">
+                <span>• 3·(3) a-1/M图像为过原点倾斜直线</span>
+                <b class="text-[#0e9f98]">2.0分</b>
+              </div>
+            </div>
+            <p class="text-[10px] text-[#2e9b65]">
+              👉 右侧伴侣面板已同步展开，您可以随时切换查看【题目原文】与【评分标准】卡片！
+            </p>
+          </div>
+        `,
+        nextText: '下一步: 一键体验沙盒批改 ›'
+      },
+      {
+        id: 'trial_grading',
+        anchorId: 'anchor-main-btn',
+        title: '第 3 步：一键体验批改，亲眼见证证据链',
+        stepBadge: '3 / 4',
+        render: () => `
+          <p class="text-[11px] text-[#66717d] leading-relaxed">
+            模型已激活，标准已就绪！轻按 <b>空格键 (Space)</b> 或点击下方按钮，亲眼见证 AI 改卷的全过程：
+          </p>
+          
+          <div id="trial-pre-grade" class="${isTrialGradingDone ? 'hidden' : 'space-y-2'}">
+            <button onclick="triggerTrialFromTour()" id="btn-tour-trial" class="btn-pressable w-full py-2.5 bg-[#0e9f98] hover:bg-[#0d8c88] text-white rounded-lg font-bold text-xs shadow-sm flex items-center justify-center gap-1.5">
+              <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              <span>立即开始沙盒体验批改 (Space)</span>
+            </button>
+          </div>
+
+          <div id="trial-post-grade" class="${isTrialGradingDone ? 'space-y-2 text-xs' : 'hidden space-y-2 text-xs'}">
+            <div class="p-3 bg-[#f0fdf4] border border-[#bbf7d0] rounded-xl text-[#2e9b65] space-y-1.5">
+              <div class="flex items-center justify-between font-bold">
+                <span class="flex items-center gap-1">✓ 沙盒批改完成！得分 5.0 / 6.0</span>
+                <span class="text-[10px] bg-[#2e9b65] text-white px-1.5 rounded">证据链已展开</span>
+              </div>
+              <p class="text-[11px] text-[#172126] leading-relaxed">
+                👉 <b>请看右侧伴侣面板【批改结果】</b>：AI 不仅给出了总分 5.0，而且精准识别第(2)问手写 <code>a=1.4</code> 未留2位有效数字，扣除1分，并附带了高清手写切片！
+              </p>
+            </div>
+            <p class="text-[10px] text-[#66717d]">
+              同时右下角已弹出了 10 秒轻量结果气泡通知。满意后，请点击下方按钮进入真实网站配置：
+            </p>
+          </div>
+        `,
+        nextText: '下一步: 接入真实网站配置 ›'
+      },
+      {
+        id: 'real_site',
+        anchorId: 'anchor-browser-viewport',
+        title: '第 4 步：接入真实阅卷平台 (智学网 / 睿芽云)',
+        stepBadge: '4 / 4',
+        render: () => `
+          <p class="text-[11px] text-[#66717d] leading-relaxed">
+            沙盒体验大获成功！现在让我们把这套强大透明的批改引擎接入您的<b>真实工作考场</b>：
+          </p>
+
+          <!-- 教师自主操作指引清单 -->
+          <div class="p-3 bg-[#f7fafb] rounded-xl border border-[#e2e8ec] space-y-2 text-xs">
+            <div class="flex items-start gap-2">
+              <span class="w-4 h-4 rounded-full bg-[#0e9f98]/15 text-[#0e9f98] font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">1</span>
+              <span class="text-[#172126] text-[11px]">在下方真实视口中<b>自主输入账号密码或扫码登录</b>智学网</span>
+            </div>
+            <div class="flex items-start gap-2">
+              <span class="w-4 h-4 rounded-full bg-[#0e9f98]/15 text-[#0e9f98] font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">2</span>
+              <span class="text-[#172126] text-[11px]">进入本次评阅的物理试题（例如第13题），系统探针将自动探测原图与打分框</span>
+            </div>
+            <div class="flex items-start gap-2">
+              <span class="w-4 h-4 rounded-full bg-[#0e9f98]/15 text-[#0e9f98] font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">3</span>
+              <span class="text-[#172126] text-[11px]">控件适配成功后，<b>下方主控按钮点亮</b>，全自动真实批改正式起飞！</span>
+            </div>
+          </div>
+
+          <!-- 实时控件探测状态栏 -->
+          <div class="p-2.5 bg-[#f0fdf4]/60 rounded-xl border border-[#bbf7d0] space-y-1.5 text-[11px]">
+            <div class="flex items-center justify-between">
+              <span class="text-[#66717d]">答卷手写原图探测：</span>
+              <span id="probe-img-status" class="${isZhixueControlsReady ? 'text-[#2e9b65] font-bold' : 'text-[#c98718] font-semibold'}">${isZhixueControlsReady ? '✓ 已精准提取原图' : '等待进入真实批改页面...'}</span>
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="text-[#66717d]">智学网总分打分框：</span>
+              <span id="probe-input-status" class="${isZhixueControlsReady ? 'text-[#2e9b65] font-bold' : 'text-[#c98718] font-semibold'}">${isZhixueControlsReady ? '✓ 可写入 (满分 6.0分)' : '等待进入真实批改页面...'}</span>
+            </div>
+          </div>
+
+          <!-- 模拟自主操作触发器 -->
+          <button onclick="simulateSpotlightEnterMarking()" id="spot-probe-btn" class="btn-pressable w-full py-2 bg-[#1864ab] hover:bg-[#144f88] text-white rounded-lg font-bold text-xs shadow-xs transition flex items-center justify-center gap-1.5">
+            <span>👉 点此模拟：在智学网登录并打开第13题批阅页面</span>
+          </button>
+        `,
+        nextText: '🚀 开启真实考试全自动批改！'
+      }
+    ];
+
+    // ========================================================
+    // 沙盒模式与真实智学网视口动态切换
+    // ========================================================
+    function setViewportMode(mode) {
+      const headerBar = document.getElementById('viewport-header-bar');
+      const modeBadge = document.getElementById('viewport-mode-badge');
+      const titleText = document.getElementById('viewport-mode-title-text');
+      const siteTask = document.getElementById('viewport-site-task');
+      const paperIdx = document.getElementById('viewport-paper-idx');
+      const userTag = document.getElementById('viewport-user-tag');
+      const switchText = document.getElementById('txt-switch-mode');
+      const paperTitle = document.getElementById('lbl-paper-title');
+      const scoreBoxTitle = document.getElementById('lbl-score-box-title');
+      const scoreDesc = document.getElementById('lbl-score-desc');
+      const trialText = document.getElementById('txt-trial-grade');
+
+      if (mode === 'sandbox') {
+        isSandboxMode = true;
+        if (headerBar) {
+          headerBar.className = 'bg-gradient-to-r from-[#0e9f98] to-[#144f88] text-white px-4 py-2.5 flex items-center justify-between text-xs transition-colors duration-500';
+        }
+        if (modeBadge) {
+          modeBadge.innerText = 'SANDBOX';
+          modeBadge.className = 'px-1.5 py-0.5 rounded bg-white/20 text-white text-[10px] uppercase font-bold tracking-wider';
+        }
+        if (titleText) titleText.innerText = '衡准官方虚拟改卷沙盒';
+        if (siteTask) siteTask.innerText = '高频真实答卷样本 · 第13题 (满分6.0分)';
+        if (paperIdx) paperIdx.innerHTML = '答卷编号: <b>#SAMPLE-01</b>';
+        if (userTag) {
+          userTag.innerText = '免登录 · 零风险演示';
+          userTag.className = 'px-2 py-0.5 rounded bg-emerald-500/30 text-emerald-100 border border-emerald-400/40 text-[10px] font-bold';
+        }
+        if (switchText) switchText.innerText = '🌐 切至真实智学网';
+        if (paperTitle) paperTitle.innerText = '学生手写作答扫描原图 (演示样本)';
+        if (scoreBoxTitle) scoreBoxTitle.innerText = '沙盒总分输入框';
+        if (scoreDesc) scoreDesc.innerText = '待 AI 极速回填';
+        if (trialText) trialText.innerText = '🧪 开始体验批改 (沙盒回填·展示证据链)';
+      } else {
+        isSandboxMode = false;
+        if (headerBar) {
+          headerBar.className = 'bg-[#1864ab] text-white px-4 py-2.5 flex items-center justify-between text-xs transition-colors duration-500';
+        }
+        if (modeBadge) {
+          modeBadge.innerText = 'ZHIXUE';
+          modeBadge.className = 'px-1.5 py-0.5 rounded bg-white/20 text-white text-[10px] uppercase font-bold tracking-wider';
+        }
+        if (titleText) titleText.innerText = '智学网 · 线上阅卷系统';
+        if (siteTask) siteTask.innerText = '任务：高三物理期中 ➔ 第13题 (满分6.0分)';
+        if (paperIdx) paperIdx.innerHTML = '当前答卷序号: <b>#0001</b>';
+        if (userTag) {
+          userTag.innerText = '评卷教师: 李老师 (真实环境)';
+          userTag.className = 'px-2 py-0.5 rounded bg-blue-500/30 text-blue-100 border border-blue-400/40 text-[10px] font-bold';
+        }
+        if (switchText) switchText.innerText = '🧪 返回演示沙盒';
+        if (paperTitle) paperTitle.innerText = '学生手写作答扫描原图 (智学网现场)';
+        if (scoreBoxTitle) scoreBoxTitle.innerText = '智学网总分输入框';
+        if (scoreDesc) scoreDesc.innerText = '待衡准自动回填';
+        if (trialText) trialText.innerText = '🧪 试水批改本题 (仅填分·不提交)';
+      }
+    }
+
+    function toggleSandboxZhixueMode() {
+      setViewportMode(isSandboxMode ? 'zhixue' : 'sandbox');
+    }
+
+    function switchToZhixueRealMode() {
+      setViewportMode('zhixue');
+    }
+
+    function startSpotlightTour() {
+      currentStep = 0;
+      isZhixueControlsReady = false;
+      isRubricReady = true; // 官方标准内置就绪
+      isModelKeyReady = false;
+      isTrialGradingDone = false;
+      setViewportMode('sandbox');
+
+      const desc = document.getElementById('rubric-header-desc');
+      if (desc) {
+        desc.innerText = '✓ 官方已内置：验证牛顿第二定律 3小问细则 (6.0分) · 已锁定';
+        desc.className = 'text-xs text-[#2e9b65] font-semibold';
+      }
+
+      // 确保打分框重置
+      const scoreInput = document.getElementById('score-display-input');
+      if (scoreInput) scoreInput.value = '--';
+
+      const markers = document.getElementById('ai-scan-markers');
+      if (markers) markers.classList.add('hidden');
+
+      const container = document.getElementById('spotlight-container');
+      container.classList.remove('hidden');
+      requestAnimationFrame(() => {
+        container.classList.remove('opacity-0');
+        renderSpotlightStep();
+      });
+    }
+
+    function exitSpotlightTour() {
+      const container = document.getElementById('spotlight-container');
+      container.classList.add('opacity-0');
+      document.getElementById('laser-scanner').classList.add('hidden');
+      setTimeout(() => {
+        container.classList.add('hidden');
+      }, 350);
+    }
+
+    function renderSpotlightStep() {
+      const step = tourSteps[currentStep];
+      const bubble = document.getElementById('spotlight-bubble');
+      const cutout = document.getElementById('spotlight-cutout');
+      const aura = document.getElementById('spotlight-aura');
+      const prevBtn = document.getElementById('btn-bubble-prev');
+      const nextBtn = document.getElementById('btn-bubble-next');
+      const scanner = document.getElementById('laser-scanner');
+
+      // 气泡淡出上浮微动效
+      bubble.classList.remove('entered');
+      bubble.classList.add('entering');
+
+      // 步入真实网站步骤时，视口平滑切至智学网并开启扫描
+      if (step.id === 'real_site') {
+        switchToZhixueRealMode();
+        scanner.classList.remove('hidden');
+      } else {
+        scanner.classList.add('hidden');
+      }
+
+      // 步入评分标准核对时，确保右侧面板展开并切至 rubric
+      if (step.id === 'rubric') {
+        if (!isInspectorOpen) toggleInspectorPanel();
+        switchInspectorTab('rubric');
+      }
+
+      setTimeout(() => {
+        document.getElementById('bubble-step-badge').innerText = step.stepBadge;
+        document.getElementById('bubble-title').innerText = step.title;
+        document.getElementById('bubble-content').innerHTML = step.render();
+        prevBtn.style.visibility = currentStep === 0 ? 'hidden' : 'visible';
+
+        // 严格硬门禁与进度解锁
+        if (step.id === 'model' && !isModelKeyReady) {
+          nextBtn.disabled = true;
+          nextBtn.className = 'px-4 py-1.5 rounded-lg text-xs font-bold bg-[#e2e8ec] text-[#929ca6] cursor-not-allowed shadow-none transition';
+          nextBtn.innerText = '🔒 请先测通 API Key...';
+        } else if (step.id === 'trial_grading' && !isTrialGradingDone) {
+          nextBtn.disabled = true;
+          nextBtn.className = 'px-4 py-1.5 rounded-lg text-xs font-bold bg-[#e2e8ec] text-[#929ca6] cursor-not-allowed shadow-none transition';
+          nextBtn.innerText = '🔒 请先体验沙盒批改...';
+        } else if (step.id === 'real_site' && !isZhixueControlsReady) {
+          nextBtn.disabled = true;
+          nextBtn.className = 'px-4 py-1.5 rounded-lg text-xs font-bold bg-[#e2e8ec] text-[#929ca6] cursor-not-allowed shadow-none transition';
+          nextBtn.innerText = '🔒 等待真实网页控件探测就绪...';
+        } else {
+          nextBtn.disabled = false;
+          nextBtn.className = 'btn-pressable px-4 py-1.5 rounded-lg text-xs font-bold bg-[#0e9f98] hover:bg-[#0d8c88] text-white shadow-xs transition';
+          nextBtn.innerText = step.nextText;
+        }
+
+        if (!step.anchorId) {
+          // 居中入场卡片
+          cutout.setAttribute('x', window.innerWidth / 2 - 10);
+          cutout.setAttribute('y', window.innerHeight / 2 - 10);
+          cutout.setAttribute('width', 20);
+          cutout.setAttribute('height', 20);
+          aura.style.opacity = '0';
+
+          bubble.style.top = `${window.innerHeight / 2 - 140}px`;
+          bubble.style.left = `${window.innerWidth / 2 - 195}px`;
+        } else {
+          const anchor = document.getElementById(step.anchorId);
+          if (anchor) {
+            const rect = anchor.getBoundingClientRect();
+            const pad = 10;
+            const x = rect.left - pad;
+            const y = rect.top - pad;
+            const w = rect.width + pad * 2;
+            const h = rect.height + pad * 2;
+
+            cutout.setAttribute('x', x);
+            cutout.setAttribute('y', y);
+            cutout.setAttribute('width', w);
+            cutout.setAttribute('height', h);
+
+            aura.style.opacity = '1';
+            aura.style.left = `${x}px`;
+            aura.style.top = `${y}px`;
+            aura.style.width = `${w}px`;
+            aura.style.height = `${h}px`;
+
+            // 吸附定位算法
+            const bubbleWidth = 390;
+            let bTop = y + h + 16;
+            let bLeft = x + (w - bubbleWidth) / 2;
+
+            if (bTop + 240 > window.innerHeight) {
+              bTop = y - 270;
+            }
+            if (bLeft + bubbleWidth > window.innerWidth - 20) {
+              bLeft = window.innerWidth - bubbleWidth - 24;
+            }
+            if (bLeft < 20) bLeft = 20;
+
+            bubble.style.top = `${bTop}px`;
+            bubble.style.left = `${bLeft}px`;
+          }
+        }
+
+        requestAnimationFrame(() => {
+          bubble.classList.remove('entering');
+          bubble.classList.add('entered');
+        });
+      }, 150);
+    }
+
+    function nextSpotlightStep() {
+      if (currentStep < tourSteps.length - 1) {
+        currentStep++;
+        renderSpotlightStep();
+      } else {
+        exitSpotlightTour();
+        triggerRun();
+      }
+    }
+
+    function prevSpotlightStep() {
+      if (currentStep > 0) {
+        currentStep--;
+        renderSpotlightStep();
+      }
+    }
+
+    // ========================================================
+    // 第 2 步：评分标准生成与脚手架应用
+    // ========================================================
+    function switchRubricGenMode(mode) {
+      const tabAi = document.getElementById('rubric-tab-ai');
+      const tabPreset = document.getElementById('rubric-tab-preset');
+      const viewAi = document.getElementById('rubric-view-ai');
+      const viewPreset = document.getElementById('rubric-view-preset');
+      if (!tabAi || !tabPreset || !viewAi || !viewPreset) return;
+
+      if (mode === 'ai') {
+        tabAi.className = 'flex-1 py-1.5 rounded-lg bg-white text-[#0e9f98] font-bold shadow-2xs text-xs flex items-center justify-center gap-1 transition';
+        tabPreset.className = 'flex-1 py-1.5 rounded-lg text-[#66717d] hover:text-[#172126] font-medium text-xs flex items-center justify-center gap-1 transition';
+        viewAi.classList.remove('hidden');
+        viewPreset.classList.add('hidden');
+      } else {
+        tabPreset.className = 'flex-1 py-1.5 rounded-lg bg-white text-[#0e9f98] font-bold shadow-2xs text-xs flex items-center justify-center gap-1 transition';
+        tabAi.className = 'flex-1 py-1.5 rounded-lg text-[#66717d] hover:text-[#172126] font-medium text-xs flex items-center justify-center gap-1 transition';
+        viewPreset.classList.remove('hidden');
+        viewAi.classList.add('hidden');
+      }
+    }
+
+    function fillSampleRubricText() {
+      const input = document.getElementById('input-rubric-raw');
+      if (input) {
+        input.value = "(1) 改变牵引力后，平衡摩擦力需保证纸带打点间距均匀(2分)\n(2) 加速度大小 a = 1.40 m/s² (2分，未保留2位有效数字扣1分)\n(3) 绘制 a-F 图像为过坐标原点的倾斜直线(2分)";
+      }
+    }
+
+    function generateRubricWithAI() {
+      const btn = document.getElementById('btn-generate-rubric');
+      const txt = document.getElementById('txt-generate-rubric');
+      if (!btn || !txt) return;
+
+      txt.innerText = '🤖 AI 正在智能拆解题型与评分点 (3小问)...';
+      btn.disabled = true;
+
+      setTimeout(() => {
+        const card = document.getElementById('rubric-generated-card');
+        if (card) card.classList.remove('hidden');
+
+        txt.innerText = '✓ 评分标准拆解成功并已锁定！';
+        btn.className = 'w-full py-2 bg-[#2e9b65] text-white rounded-lg font-bold text-xs shadow-xs';
+
+        // 更新顶部态势栏真实控件状态
+        const desc = document.getElementById('rubric-header-desc');
+        if (desc) {
+          desc.innerText = '✓ 验证牛顿第二定律 · 3小问细则已锁定 (6.0分)';
+          desc.className = 'text-xs text-[#2e9b65] font-semibold';
+        }
+
+        // 解除硬门禁，点亮下一步按钮
+        isRubricReady = true;
+        const nextBtn = document.getElementById('btn-bubble-next');
+        if (nextBtn) {
+          nextBtn.disabled = false;
+          nextBtn.className = 'btn-pressable px-4 py-1.5 rounded-lg text-xs font-bold bg-[#0e9f98] hover:bg-[#0d8c88] text-white shadow-md transition animate-bounce';
+          nextBtn.innerText = '下一步: 唤醒AI大脑 ›';
+        }
+
+        // 联动右侧核对面板：高亮并确保展开
+        const insp = document.getElementById('inspector-companion-panel');
+        if (insp) {
+          if (!isInspectorOpen) toggleInspectorPanel();
+          insp.classList.add('ring-2', 'ring-[#0e9f98]', 'ring-offset-2');
+          setTimeout(() => insp.classList.remove('ring-2', 'ring-[#0e9f98]', 'ring-offset-2'), 1200);
+        }
+
+        // 局部微粒子
+        const anchor = document.getElementById('anchor-rubric-selector');
+        if (anchor) {
+          const rect = anchor.getBoundingClientRect();
+          fireConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2, 30);
+        }
+      }, 550);
+    }
+
+    function applyPresetRubricFramework() {
+      const btn = document.getElementById('btn-apply-preset');
+      if (!btn) return;
+
+      const card = document.getElementById('rubric-generated-card');
+      if (card) card.classList.remove('hidden');
+
+      btn.classList.add('border-[#2e9b65]', 'bg-[#dcfce7]');
+
+      // 更新顶部态势栏真实控件状态
+      const desc = document.getElementById('rubric-header-desc');
+      if (desc) {
+        desc.innerText = '✓ 官方实验题脚手架 · 3小问细则已载入 (6.0分)';
+        desc.className = 'text-xs text-[#2e9b65] font-semibold';
+      }
+
+      // 解除硬门禁，点亮下一步按钮
+      isRubricReady = true;
+      const nextBtn = document.getElementById('btn-bubble-next');
+      if (nextBtn) {
+        nextBtn.disabled = false;
+        nextBtn.className = 'btn-pressable px-4 py-1.5 rounded-lg text-xs font-bold bg-[#0e9f98] hover:bg-[#0d8c88] text-white shadow-md transition animate-bounce';
+        nextBtn.innerText = '下一步: 唤醒AI大脑 ›';
+      }
+
+      // 联动右侧核对面板：高亮并确保展开
+      const insp = document.getElementById('inspector-companion-panel');
+      if (insp) {
+        if (!isInspectorOpen) toggleInspectorPanel();
+        insp.classList.add('ring-2', 'ring-[#0e9f98]', 'ring-offset-2');
+        setTimeout(() => insp.classList.remove('ring-2', 'ring-[#0e9f98]', 'ring-offset-2'), 1200);
+      }
+
+      // 局部微粒子
+      const anchor = document.getElementById('anchor-rubric-selector');
+      if (anchor) {
+        const rect = anchor.getBoundingClientRect();
+        fireConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2, 30);
+      }
+    }
+
+    // ========================================================
+    // 题目原文与评分标准展示空间交互 (Inspector Companion Panel)
+    // ========================================================
+    let isInspectorOpen = true;
+
+    function toggleInspectorPanel() {
+      const panel = document.getElementById('inspector-companion-panel');
+      const btn = document.getElementById('btn-toggle-inspector');
+      const text = document.getElementById('btn-toggle-inspector-text');
+      if (!panel || !btn) return;
+
+      isInspectorOpen = !isInspectorOpen;
+      if (isInspectorOpen) {
+        panel.classList.remove('hidden');
+        btn.className = 'btn-pressable px-3 py-1.5 rounded-xl border border-[#0e9f98]/40 bg-[#e8f8f6] text-[#0e9f98] font-bold text-xs flex items-center gap-1.5 hover:bg-[#d8f2ee] transition shadow-2xs';
+        if (text) text.innerText = '题目与评分标准';
+      } else {
+        panel.classList.add('hidden');
+        btn.className = 'btn-pressable px-3 py-1.5 rounded-xl border border-[#cfd9de] bg-white text-[#66717d] font-semibold text-xs flex items-center gap-1.5 hover:text-[#172126] hover:bg-[#f5f8f8] transition shadow-2xs';
+        if (text) text.innerText = '展开核对面板';
+      }
+    }
+
+    function switchInspectorTab(tab) {
+      const tabQ = document.getElementById('inspector-tab-question');
+      const tabR = document.getElementById('inspector-tab-rubric');
+      const tabRes = document.getElementById('inspector-tab-result');
+      const contentQ = document.getElementById('inspector-content-question');
+      const contentR = document.getElementById('inspector-content-rubric');
+      const contentRes = document.getElementById('inspector-content-result');
+      if (!tabQ || !tabR || !tabRes || !contentQ || !contentR || !contentRes) return;
+
+      const activeClass = 'flex-1 py-1.5 rounded-lg bg-white text-[#0e9f98] font-bold shadow-2xs text-xs transition flex items-center justify-center gap-1';
+      const inactiveClass = 'flex-1 py-1.5 rounded-lg text-[#66717d] hover:text-[#172126] font-bold text-xs transition flex items-center justify-center gap-1';
+
+      tabQ.className = inactiveClass;
+      tabR.className = inactiveClass;
+      tabRes.className = inactiveClass;
+      contentQ.classList.add('hidden');
+      contentR.classList.add('hidden');
+      contentRes.classList.add('hidden');
+
+      if (tab === 'question') {
+        tabQ.className = activeClass;
+        contentQ.classList.remove('hidden');
+      } else if (tab === 'rubric') {
+        tabR.className = activeClass;
+        contentR.classList.remove('hidden');
+      } else if (tab === 'result') {
+        tabRes.className = activeClass;
+        contentRes.classList.remove('hidden');
+        const badge = document.getElementById('tab-result-badge');
+        if (badge) badge.classList.add('hidden');
+      }
+    }
+
+    // ========================================================
+    // 试水批改本题 (仅填分·不提交)
+    // ========================================================
+    function trialGradeCurrentPaper() {
+      const btn = document.getElementById('btn-trial-grade');
+      const txt = document.getElementById('txt-trial-grade');
+      if (!btn || !txt) return;
+
+      txt.innerText = '🤖 正在试批当前答卷 (提取原图+核算)...';
+      btn.disabled = true;
+
+      setTimeout(() => {
+        // 1. 智学网真实验卷：展开切片识别框
+        const markers = document.getElementById('ai-scan-markers');
+        if (markers) markers.classList.remove('hidden');
+
+        // 2. 智学网总分输入框：回填 5.0 分，高亮脉冲
+        const scoreInput = document.getElementById('score-display-input');
+        if (scoreInput) {
+          scoreInput.value = '5.0';
+          scoreInput.classList.add('bg-emerald-100', 'scale-105', 'border-emerald-600');
+          setTimeout(() => scoreInput.classList.remove('scale-105', 'bg-emerald-100'), 800);
+        }
+
+        // 3. 统计计数更新
+        const counter = document.getElementById('counter-processed');
+        if (counter) counter.innerText = '1';
+
+        // 4. 试水按钮状态恢复，提示只填分不提交
+        txt.innerText = '✓ 试水成功！已填入 5.0 分 (未提交)';
+        btn.disabled = false;
+        btn.className = 'w-full py-2 bg-[#f0fdf4] hover:bg-[#dcfce7] border border-[#bbf7d0] text-[#2e9b65] text-xs font-bold rounded-lg shadow-2xs btn-pressable flex items-center justify-center gap-1.5 transition';
+
+        // 5. 局部微粒子
+        const rect = scoreInput.getBoundingClientRect();
+        fireConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2, 35);
+
+        // 6. 右侧伴侣面板自动展开并切换到“批改结果”模式
+        if (!isInspectorOpen) toggleInspectorPanel();
+        switchInspectorTab('result');
+
+        // 7. 弹出应用内右下角轻量气泡通知 (停留10秒)
+        showGradingToast();
+
+        // 8. 若当前处于新手导览步骤 3 (体验沙盒批改)，同步更新导览气泡状态与解锁下一步
+        isTrialGradingDone = true;
+        const pre = document.getElementById('trial-pre-grade');
+        const post = document.getElementById('trial-post-grade');
+        if (pre) pre.classList.add('hidden');
+        if (post) post.classList.remove('hidden');
+
+        const nextBtn = document.getElementById('btn-bubble-next');
+        if (nextBtn && tourSteps[currentStep]?.id === 'trial_grading') {
+          nextBtn.disabled = false;
+          nextBtn.className = 'btn-pressable px-4 py-1.5 rounded-lg text-xs font-bold bg-[#0e9f98] hover:bg-[#0d8c88] text-white shadow-md transition animate-bounce';
+          nextBtn.innerText = '下一步: 接入真实网站配置 ›';
+        }
+      }, 600);
+    }
+
+    function triggerTrialFromTour() {
+      trialGradeCurrentPaper();
+    }
+
+    // ========================================================
+    // 应用内右下角轻量气泡通知管理 (持续 10 秒，点击直达记录)
+    // ========================================================
+    let toastTimer = null;
+    let toastCountdownInterval = null;
+
+    function showGradingToast() {
+      const toast = document.getElementById('grading-toast-bubble');
+      const progressBar = document.getElementById('toast-progress-bar');
+      const countText = document.getElementById('toast-countdown-text');
+      if (!toast) return;
+
+      if (toastTimer) clearTimeout(toastTimer);
+      if (toastCountdownInterval) clearInterval(toastCountdownInterval);
+
+      // 显示并向上滑入 (不是独立窗口，不要覆盖其他用户界面)
+      toast.classList.remove('translate-y-28', 'opacity-0', 'pointer-events-none');
+      toast.classList.add('translate-y-0', 'opacity-100', 'pointer-events-auto');
+
+      // 启动 10 秒平滑倒计时进度条
+      if (progressBar) {
+        progressBar.style.transition = 'none';
+        progressBar.style.width = '100%';
+        requestAnimationFrame(() => {
+          progressBar.style.transition = 'width 10000ms linear';
+          progressBar.style.width = '0%';
+        });
+      }
+
+      // 数字倒计时 10s -> 0s
+      let remaining = 10;
+      if (countText) countText.innerText = `${remaining}s`;
+      toastCountdownInterval = setInterval(() => {
+        remaining--;
+        if (countText) countText.innerText = `${remaining}s`;
+        if (remaining <= 0) {
+          clearInterval(toastCountdownInterval);
+        }
+      }, 1000);
+
+      // 10 秒后自动收起
+      toastTimer = setTimeout(() => {
+        closeGradingToast();
+      }, 10000);
+    }
+
+    function closeGradingToast() {
+      const toast = document.getElementById('grading-toast-bubble');
+      if (!toast) return;
+      if (toastTimer) clearTimeout(toastTimer);
+      if (toastCountdownInterval) clearInterval(toastCountdownInterval);
+
+      toast.classList.remove('translate-y-0', 'opacity-100', 'pointer-events-auto');
+      toast.classList.add('translate-y-28', 'opacity-0', 'pointer-events-none');
+    }
+
+    function openResultFromToast() {
+      closeGradingToast();
+      if (!isInspectorOpen) toggleInspectorPanel();
+      switchInspectorTab('result');
+
+      // 高亮聚焦结果卡片
+      const card = document.getElementById('result-summary-card');
+      if (card) {
+        card.classList.add('ring-2', 'ring-[#0e9f98]', 'ring-offset-2');
+        setTimeout(() => card.classList.remove('ring-2', 'ring-[#0e9f98]', 'ring-offset-2'), 1200);
+      }
+    }
+
+    // ========================================================
+    // 日常第二次使用演练：智学网切题 ➔ 智能感知 ➔ 秒级配对
+    // ========================================================
+    function simulateSwitchToNewQuestion14() {
+      // 1. 关闭新手导览 (若开启)
+      exitSpotlightTour();
+
+      // 2. 模拟智学网内嵌网页切换到第14题
+      const zhixueTask = document.querySelector('#anchor-browser-viewport .bg-\\[\\#1864ab\\] .px-2');
+      if (zhixueTask) {
+        zhixueTask.innerText = '任务：高三物理期中 ➔ 第14题 (满分10分)';
+      }
+
+      // 3. 智学网分数框重置为 -- / 10分
+      const scoreInput = document.getElementById('score-display-input');
+      if (scoreInput) {
+        scoreInput.value = '--';
+        const scoreMax = scoreInput.parentElement.querySelector('span');
+        if (scoreMax) scoreMax.innerText = '/ 10分';
+      }
+
+      // 4. 滑出智能感知切题悬浮条
+      const banner = document.getElementById('smart-question-banner');
+      if (banner) {
+        banner.classList.remove('hidden');
+        banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }
+
+    function dismissSmartBanner() {
+      const banner = document.getElementById('smart-question-banner');
+      if (banner) banner.classList.add('hidden');
+    }
+
+    function quickApplyNewQuestion14(mode) {
+      const banner = document.getElementById('smart-question-banner');
+      const desc = document.getElementById('smart-banner-desc');
+      if (desc) {
+        desc.innerText = mode === 'preset' 
+          ? '✓ 已一键载入历史标准库：高三物理期中第14题计算题细则 (10.0分)！防串题校验放行 ✓'
+          : '✓ AI 已秒级拆解第14题标答文字为 2 小问 (4分+6分)！防串题校验放行 ✓';
+        desc.className = 'text-[11px] text-[#2e9b65] font-bold mt-0.5';
+      }
+
+      // 1. 顶部驾驶舱态势栏更新为第14题
+      const rubricChip = document.getElementById('anchor-rubric-selector');
+      if (rubricChip) {
+        rubricChip.querySelector('span.font-bold').innerText = '第 14 题 物理计算题';
+        rubricChip.querySelector('span.font-mono').innerText = '满分 10.0 分';
+        const p = rubricChip.querySelector('p');
+        if (p) {
+          p.innerText = '带电粒子在匀强磁场中的运动 (2小问细则已锁定)';
+          p.className = 'text-xs text-[#2e9b65] font-semibold';
+        }
+      }
+
+      // 2. 右侧伴侣核对面板更新为第14题细则
+      const inspTitle = document.getElementById('inspector-panel-title');
+      const inspScore = document.getElementById('inspector-panel-score');
+      if (inspTitle) inspTitle.innerText = '第14题 物理计算题';
+      if (inspScore) inspScore.innerText = '10 分';
+
+      const rubricContent = document.getElementById('inspector-content-rubric');
+      if (rubricContent) {
+        rubricContent.innerHTML = `
+          <!-- 1 · (1) 卡片 -->
+          <details class="bg-white border border-[#e2e8ec] rounded-xl overflow-hidden shadow-2xs group transition" open>
+            <summary class="flex items-center justify-between p-3 cursor-pointer hover:bg-[#f8fafb] transition list-none select-none">
+              <div>
+                <strong class="text-xs font-bold text-[#172126]">1 · (1) 带电粒子运动半径与速度</strong>
+                <span class="text-[10px] text-[#929ca6] block mt-0.5">1 个评分点</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-bold font-mono text-[#0e9f98]">4 分</span>
+                <svg class="w-3.5 h-3.5 text-[#929ca6] transform transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+              </div>
+            </summary>
+            <div class="p-3 pt-0 border-t border-[#f1f5f7] space-y-2 text-xs">
+              <div class="flex items-center justify-between text-[11px] pt-2">
+                <span class="font-mono font-bold text-[#0e9f98]">1-1</span>
+                <b class="text-[#0e9f98] font-mono">4 分</b>
+              </div>
+              <strong class="text-xs text-[#172126] block">洛伦兹力提供向心力公式与速度推导</strong>
+              <div class="p-2.5 bg-[#e8f8f6] border-l-3 border-[#0e9f98] rounded-r-lg text-xs space-y-0.5">
+                <span class="text-[10px] font-bold text-[#0e9f98] block">判分依据</span>
+                <span class="font-bold text-[#172126] font-mono">qvB = m v²/R ➔ v = qBR / m (式子2分，结果2分)</span>
+              </div>
+            </div>
+          </details>
+
+          <!-- 2 · (2) 卡片 -->
+          <details class="bg-white border border-[#e2e8ec] rounded-xl overflow-hidden shadow-2xs group transition" open>
+            <summary class="flex items-center justify-between p-3 cursor-pointer hover:bg-[#f8fafb] transition list-none select-none">
+              <div>
+                <strong class="text-xs font-bold text-[#172126]">2 · (2) 在磁场中运动时间与周期</strong>
+                <span class="text-[10px] text-[#929ca6] block mt-0.5">1 个评分点</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-bold font-mono text-[#0e9f98]">6 分</span>
+                <svg class="w-3.5 h-3.5 text-[#929ca6] transform transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+              </div>
+            </summary>
+            <div class="p-3 pt-0 border-t border-[#f1f5f7] space-y-2 text-xs">
+              <div class="flex items-center justify-between text-[11px] pt-2">
+                <span class="font-mono font-bold text-[#0e9f98]">2-1</span>
+                <b class="text-[#0e9f98] font-mono">6 分</b>
+              </div>
+              <strong class="text-xs text-[#172126] block">圆心角 θ = π 与周期公式联合求解</strong>
+              <div class="p-2.5 bg-[#e8f8f6] border-l-3 border-[#0e9f98] rounded-r-lg text-xs space-y-0.5">
+                <span class="text-[10px] font-bold text-[#0e9f98] block">判分依据</span>
+                <span class="font-bold text-[#172126] font-mono">T = 2πm / (qB), t = T/2 = πm / (qB)</span>
+              </div>
+            </div>
+          </details>
+        `;
+      }
+
+      // 确保切换到“评分标准”视口展示
+      if (!isInspectorOpen) toggleInspectorPanel();
+      switchInspectorTab('rubric');
+
+      // 3. 高亮主控按钮，提示可立即开始自动批改第14题
+      const mainBtn = document.getElementById('anchor-main-btn');
+      if (mainBtn) {
+        mainBtn.classList.add('ring-4', 'ring-[#2e9b65]/40', 'animate-pulse');
+        setTimeout(() => mainBtn.classList.remove('ring-4', 'ring-[#2e9b65]/40', 'animate-pulse'), 1500);
+      }
+
+      // 4. 局部微粒子
+      fireConfetti(window.innerWidth / 2, 100, 40);
+
+      // 5. 1.2秒后优雅收起悬浮条
+      setTimeout(() => {
+        dismissSmartBanner();
+      }, 1400);
+    }
+
+    // 聚光灯中切换 DeepSeek 与 自定义 API 服务
+    function switchSpotlightProvider(mode) {
+      const tabDeepseek = document.getElementById('spot-tab-deepseek');
+      const tabCustom = document.getElementById('spot-tab-custom');
+      const viewDeepseek = document.getElementById('spot-view-deepseek');
+      const viewCustom = document.getElementById('spot-view-custom');
+
+      if (mode === 'deepseek') {
+        tabDeepseek.className = 'flex-1 py-1.5 rounded-lg bg-white text-[#0e9f98] font-bold shadow-2xs text-xs flex items-center justify-center gap-1 transition';
+        tabCustom.className = 'flex-1 py-1.5 rounded-lg text-[#66717d] hover:text-[#172126] font-medium text-xs flex items-center justify-center gap-1 transition';
+        viewDeepseek.classList.remove('hidden');
+        viewCustom.classList.add('hidden');
+      } else {
+        tabCustom.className = 'flex-1 py-1.5 rounded-lg bg-white text-[#0e9f98] font-bold shadow-2xs text-xs flex items-center justify-center gap-1 transition';
+        tabDeepseek.className = 'flex-1 py-1.5 rounded-lg text-[#66717d] hover:text-[#172126] font-medium text-xs flex items-center justify-center gap-1 transition';
+        viewCustom.classList.remove('hidden');
+        viewDeepseek.classList.add('hidden');
+      }
+    }
+
+    // 测通模型 (支持 DeepSeek 与 自定义服务)
+    function testSpotlightModel(type = 'deepseek') {
+      const isCustom = type === 'custom';
+      const btn = document.getElementById(isCustom ? 'spot-custom-test-btn' : 'spot-test-btn');
+      const txt = document.getElementById(isCustom ? 'spot-custom-test-txt' : 'spot-test-txt');
+      txt.innerText = isCustom ? '正在真机测通自定义接口…' : '正在测通 DeepSeek…';
+      btn.disabled = true;
+
+      setTimeout(() => {
+        txt.innerText = isCustom ? '自定义 API 测通成功 (280ms) ✓' : 'DeepSeek 测通成功 (310ms) ✓';
+        btn.className = 'w-full py-2 bg-[#2e9b65] text-white rounded-lg font-bold text-xs shadow-xs';
+        
+        const cap = document.getElementById('anchor-model-capsule');
+        cap.className = 'flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#e8f8f6] border border-[#0e9f98]/40 text-[#0e9f98] text-xs font-semibold';
+        document.getElementById('model-capsule-dot').className = 'w-2.5 h-2.5 rounded-full bg-[#0e9f98]';
+        document.getElementById('model-capsule-text').innerText = isCustom ? '🧠 自定义API (已激活)' : '🧠 DeepSeek (已激活)';
+
+        // 喷射局部微粒子
+        const rect = cap.getBoundingClientRect();
+        fireConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2, 28);
+
+        isModelKeyReady = true;
+        const nextBtn = document.getElementById('btn-bubble-next');
+        if (nextBtn) {
+          nextBtn.disabled = false;
+          nextBtn.className = 'btn-pressable px-4 py-1.5 rounded-lg text-xs font-bold bg-[#0e9f98] hover:bg-[#0d8c88] text-white shadow-md transition animate-bounce';
+          nextBtn.innerText = '下一步: 查看已内置的标准 ›';
+        }
+
+        setTimeout(nextSpotlightStep, 650);
+      }, 650);
+    }
+
+    // 智学网进题：触发水波纹与激光识别框
+    function simulateSpotlightEnterMarking() {
+      const btn = document.getElementById('spot-probe-btn');
+      btn.innerText = '正在探测智学网 DOM 结构…';
+      btn.disabled = true;
+
+      setTimeout(() => {
+        const viewport = document.getElementById('anchor-browser-viewport');
+        viewport.classList.add('animate-ripple', 'border-[#0e9f98]');
+        document.getElementById('ai-scan-markers').classList.remove('hidden');
+
+        // 更新状态指示
+        const sImg = document.getElementById('probe-img-status');
+        const sInput = document.getElementById('probe-input-status');
+        if (sImg) { sImg.innerText = '✓ 已精准提取原图'; sImg.className = 'text-[#2e9b65] font-bold'; }
+        if (sInput) { sInput.innerText = '✓ 可写入 (满分 6.0分)'; sInput.className = 'text-[#2e9b65] font-bold'; }
+
+        // 标记控件已就绪，点亮“下一步”按钮
+        isZhixueControlsReady = true;
+        const nextBtn = document.getElementById('btn-bubble-next');
+        if (nextBtn) {
+          nextBtn.disabled = false;
+          nextBtn.className = 'btn-pressable px-4 py-1.5 rounded-lg text-xs font-bold bg-[#0e9f98] hover:bg-[#0d8c88] text-white shadow-md transition animate-bounce';
+          nextBtn.innerText = '🚀 开启真实考试全自动批改！';
+        }
+
+        btn.innerText = '✓ 智学网控件适配成功！点击右下方按钮开启正式批改 ›';
+        btn.className = 'w-full py-2 bg-[#2e9b65] text-white rounded-lg font-bold text-xs shadow-xs';
+
+        const rect = viewport.getBoundingClientRect();
+        fireConfetti(rect.left + rect.width / 2, rect.top + 100, 35);
+      }, 500);
+    }
+
+    // 终极点火：盛大粒子烟花与数字跳动
+    function triggerRun() {
+      fireConfetti(window.innerWidth / 2, window.innerHeight / 3, 90);
+      
+      // 模拟总分框回填与计数跳动
+      setTimeout(() => {
+        const scoreInput = document.getElementById('score-display-input');
+        if (scoreInput) {
+          scoreInput.value = '5.0';
+          scoreInput.classList.add('bg-emerald-100', 'scale-105');
+        }
+        const markers = document.getElementById('ai-scan-markers');
+        if (markers) markers.classList.remove('hidden');
+
+        document.getElementById('counter-processed').innerText = '1';
+        document.getElementById('counter-processed').classList.add('text-2xl', 'text-emerald-500');
+
+        setTimeout(() => {
+          if (scoreInput) scoreInput.classList.remove('scale-105');
+          document.getElementById('counter-processed').classList.remove('text-2xl');
+        }, 500);
+
+        // 切换右侧面板到批改结果
+        if (!isInspectorOpen) toggleInspectorPanel();
+        switchInspectorTab('result');
+
+        // 调出右下角持续 10 秒的气泡通知
+        showGradingToast();
+      }, 300);
+    }
+
+    // ========================================================
+    // 侧栏【评分标准】整页主场管理与自动返回工作台引擎
+    // ========================================================
+    let currentMainView = 'workbench'; // 'workbench' | 'templates'
+
+    function navigateToView(viewName) {
+      currentMainView = viewName;
+      const viewWb = document.getElementById('view-workbench');
+      const viewTpl = document.getElementById('view-templates');
+      const btnWb = document.getElementById('nav-btn-workbench');
+      const btnTpl = document.getElementById('nav-btn-templates');
+      const indWb = document.getElementById('nav-indicator-workbench');
+      const indTpl = document.getElementById('nav-indicator-templates');
+
+      if (viewName === 'workbench') {
+        if (viewWb) viewWb.classList.remove('hidden');
+        if (viewTpl) viewTpl.classList.add('hidden');
+        if (btnWb) {
+          btnWb.className = 'w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-[#e8f8f6] text-[#0e9f98] font-bold relative transition text-left';
+        }
+        if (indWb) indWb.classList.remove('hidden');
+        if (btnTpl) {
+          btnTpl.className = 'w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-[#f5f8f8] hover:text-[#172126] text-[#66717d] transition text-left relative';
+        }
+        if (indTpl) indTpl.classList.add('hidden');
+      } else {
+        // 进入评分标准管理主场
+        exitSpotlightTour();
+        if (viewWb) viewWb.classList.add('hidden');
+        if (viewTpl) viewTpl.classList.remove('hidden');
+        if (btnTpl) {
+          btnTpl.className = 'w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-[#e8f8f6] text-[#0e9f98] font-bold relative transition text-left';
+        }
+        if (indTpl) indTpl.classList.remove('hidden');
+        if (btnWb) {
+          btnWb.className = 'w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-[#f5f8f8] hover:text-[#172126] text-[#66717d] transition text-left relative';
+        }
+        if (indWb) indWb.classList.add('hidden');
+      }
+    }
+
+    function navigateToRubricManagement(action) {
+      navigateToView('templates');
+      if (action === 'create_q14' || action === 'create') {
+        openTemplateEditor('q14');
+      } else {
+        closeTemplateEditor();
+      }
+    }
+
+    function openTemplateEditor(mode = 'new') {
+      const listView = document.getElementById('templates-list-subview');
+      const editorView = document.getElementById('templates-editor-subview');
+      const title = document.getElementById('editor-page-title');
+      const container = document.getElementById('view-templates');
+
+      if (listView) listView.classList.add('hidden');
+      if (editorView) editorView.classList.remove('hidden');
+      if (container) container.scrollTo({ top: 0, behavior: 'smooth' });
+
+      if (mode === 'q14') {
+        if (title) title.innerText = '新建评分标准：第14题 物理计算题';
+      } else {
+        if (title) title.innerText = '新建评分标准：高中物理试题';
+      }
+    }
+
+    function closeTemplateEditor() {
+      const listView = document.getElementById('templates-list-subview');
+      const editorView = document.getElementById('templates-editor-subview');
+      const container = document.getElementById('view-templates');
+
+      if (editorView) editorView.classList.add('hidden');
+      if (listView) listView.classList.remove('hidden');
+      if (container) container.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function simulateRegenerateRubricDraft() {
+      const editorView = document.getElementById('templates-editor-subview');
+      if (!editorView) return;
+      fireConfetti(window.innerWidth / 2, 250, 30);
+    }
+
+    function confirmAndSaveRubricToWorkbench(templateId = 'q14') {
+      const btn = document.getElementById('btn-save-and-return-workbench');
+      const txt = document.getElementById('txt-save-and-return');
+      if (txt) txt.innerText = '💾 正在保存细则并绑定当前任务…';
+      if (btn) btn.disabled = true;
+
+      setTimeout(() => {
+        // 1. 更新列表中的状态指示
+        const tagQ14 = document.getElementById('tag-q14-binding');
+        if (tagQ14) {
+          tagQ14.innerHTML = '<span class="px-2 py-0.5 rounded bg-[#e8f8f6] text-[#0e9f98] text-[11px] font-bold border border-[#0e9f98]/30 flex items-center gap-1 w-fit">✓ 已绑定当前任务</span>';
+        }
+
+        // 2. 自动关闭编辑器并无缝导航返回【工作台】主场
+        closeTemplateEditor();
+        navigateToView('workbench');
+
+        // 3. 自动更新工作台态势栏 (第14题 满分10.0分)
+        const rubricChip = document.getElementById('anchor-rubric-selector');
+        if (rubricChip) {
+          const tSpan = rubricChip.querySelector('span.font-bold');
+          if (tSpan) tSpan.innerText = '第 14 题 物理计算题';
+          const sSpan = rubricChip.querySelector('span.font-mono');
+          if (sSpan) sSpan.innerText = '满分 10.0 分';
+          const p = rubricChip.querySelector('p');
+          if (p) {
+            p.innerText = '✓ 新标准已绑定：带电粒子在匀强磁场中的运动 (2小问细则已锁定)';
+            p.className = 'text-xs text-[#2e9b65] font-semibold';
+          }
+        }
+
+        // 4. 模拟视口同步进入第14题
+        const zhixueTask = document.querySelector('#anchor-browser-viewport .bg-\\[\\#1864ab\\] .px-2');
+        if (zhixueTask) {
+          zhixueTask.innerText = '任务：高三物理期中 ➔ 第14题 (满分10分)';
+        }
+        const scoreInput = document.getElementById('score-display-input');
+        if (scoreInput) {
+          scoreInput.value = '--';
+          const scoreMax = scoreInput.parentElement ? scoreInput.parentElement.querySelector('span') : null;
+          if (scoreMax) scoreMax.innerText = '/ 10分';
+        }
+
+        // 5. 更新右侧伴侣面板题目与细则卡片
+        const inspTitle = document.getElementById('inspector-panel-title');
+        const inspScore = document.getElementById('inspector-panel-score');
+        if (inspTitle) inspTitle.innerText = '第14题 物理计算题';
+        if (inspScore) inspScore.innerText = '10 分';
+
+        const rubricContent = document.getElementById('inspector-content-rubric');
+        if (rubricContent) {
+          rubricContent.innerHTML = `
+            <!-- 1 · (1) 卡片 -->
+            <details class="bg-white border border-[#e2e8ec] rounded-xl overflow-hidden shadow-2xs group transition" open>
+              <summary class="flex items-center justify-between p-3 cursor-pointer hover:bg-[#f8fafb] transition list-none select-none">
+                <div>
+                  <strong class="text-xs font-bold text-[#172126]">1 · (1) 带电粒子运动半径与速度</strong>
+                  <span class="text-[10px] text-[#929ca6] block mt-0.5">1 个评分点</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs font-bold font-mono text-[#0e9f98]">4 分</span>
+                  <svg class="w-3.5 h-3.5 text-[#929ca6] transform transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                </div>
+              </summary>
+              <div class="p-3 pt-0 border-t border-[#f1f5f7] space-y-2 text-xs">
+                <div class="flex items-center justify-between text-[11px] pt-2">
+                  <span class="font-mono font-bold text-[#0e9f98]">1-1</span>
+                  <b class="text-[#0e9f98] font-mono">4 分</b>
+                </div>
+                <strong class="text-xs text-[#172126] block">洛伦兹力提供向心力公式与速度推导</strong>
+                <div class="p-2.5 bg-[#e8f8f6] border-l-3 border-[#0e9f98] rounded-r-lg text-xs space-y-0.5">
+                  <span class="text-[10px] font-bold text-[#0e9f98] block">判分依据</span>
+                  <span class="font-bold text-[#172126] font-mono">qvB = m v²/R ➔ v = qBR / m (式子2分，结果2分)</span>
+                </div>
+              </div>
+            </details>
+
+            <!-- 2 · (2) 卡片 -->
+            <details class="bg-white border border-[#e2e8ec] rounded-xl overflow-hidden shadow-2xs group transition" open>
+              <summary class="flex items-center justify-between p-3 cursor-pointer hover:bg-[#f8fafb] transition list-none select-none">
+                <div>
+                  <strong class="text-xs font-bold text-[#172126]">2 · (2) 在磁场中运动时间与周期</strong>
+                  <span class="text-[10px] text-[#929ca6] block mt-0.5">1 个评分点</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs font-bold font-mono text-[#0e9f98]">6 分</span>
+                  <svg class="w-3.5 h-3.5 text-[#929ca6] transform transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                </div>
+              </summary>
+              <div class="p-3 pt-0 border-t border-[#f1f5f7] space-y-2 text-xs">
+                <div class="flex items-center justify-between text-[11px] pt-2">
+                  <span class="font-mono font-bold text-[#0e9f98]">2-1</span>
+                  <b class="text-[#0e9f98] font-mono">6 分</b>
+                </div>
+                <strong class="text-xs text-[#172126] block">圆心角 θ = π 与周期公式联合求解</strong>
+                <div class="p-2.5 bg-[#e8f8f6] border-l-3 border-[#0e9f98] rounded-r-lg text-xs space-y-0.5">
+                  <span class="text-[10px] font-bold text-[#0e9f98] block">判分依据</span>
+                  <span class="font-bold text-[#172126] font-mono">T = 2πm / (qB), t = T/2 = πm / (qB)</span>
+                </div>
+              </div>
+            </details>
+          `;
+        }
+
+        // 确保右侧面板展开并切至 rubric
+        if (!isInspectorOpen) toggleInspectorPanel();
+        switchInspectorTab('rubric');
+
+        // 6. 重置保存按钮文本
+        if (txt) txt.innerText = '💾 确认保存并自动返回工作台开始批改 (Enter)';
+        if (btn) btn.disabled = false;
+
+        // 7. 高亮主控开始批改按钮
+        const mainBtn = document.getElementById('anchor-main-btn');
+        if (mainBtn) {
+          mainBtn.classList.add('ring-4', 'ring-[#0e9f98]/40', 'animate-pulse');
+          setTimeout(() => mainBtn.classList.remove('ring-4', 'ring-[#0e9f98]/40', 'animate-pulse'), 1600);
+        }
+
+        // 8. 绽放物理微粒子
+        fireConfetti(window.innerWidth / 2, 80, 50);
+
+        // 9. 隐藏悬浮条 (若显示)
+        dismissSmartBanner();
+      }, 400);
+    }
+
+    // ========================================================
+    // 物理粒子烟花引擎 (Particle Confetti Engine)
+    // ========================================================
+    const canvas = document.getElementById('confetti-canvas');
+    const ctx = canvas.getContext('2d');
+    let particles = [];
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    function fireConfetti(x, y, count = 50) {
+      const colors = ['#0e9f98', '#2e9b65', '#3478f6', '#38bdf8', '#a7f3d0'];
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 8 + 3;
+        particles.push({
+          x,
+          y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 2,
+          size: Math.random() * 5 + 3,
+          color: colors[Math.floor(Math.random() * colors.length)],
+          alpha: 1,
+          decay: Math.random() * 0.025 + 0.015,
+          rotation: Math.random() * 360,
+          rotationSpeed: (Math.random() - 0.5) * 10
+        });
+      }
+    }
+
+    function updateParticles() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.22; // 重力
+        p.alpha -= p.decay;
+        p.rotation += p.rotationSpeed;
+
+        if (p.alpha <= 0) {
+          particles.splice(i, 1);
+          continue;
+        }
+
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate((p.rotation * Math.PI) / 180);
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.alpha;
+        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+        ctx.restore();
+      }
+      requestAnimationFrame(updateParticles);
+    }
+    updateParticles();
+
+    // 页面加载后自动开启聚光灯导览
+    window.addEventListener('load', () => {
+      setTimeout(startSpotlightTour, 350);
+    });
+
+    window.addEventListener('keydown', (e) => {
+      // 1. 若处于全屏新建评分标准模式，Esc 返回列表，Enter (或 Ctrl+Enter) 保存并返回工作台
+      const editorView = document.getElementById('templates-editor-subview');
+      const isEditorOpen = editorView && !editorView.classList.contains('hidden');
+      if (isEditorOpen) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeTemplateEditor();
+          return;
+        }
+        if ((e.key === 'Enter' && (e.ctrlKey || e.metaKey)) || (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA')) {
+          e.preventDefault();
+          confirmAndSaveRubricToWorkbench('q14');
+          return;
+        }
+      }
+
+      // 2. 聚光灯导览 Esc 与空格批改控制
+      if (e.key === 'Escape') exitSpotlightTour();
+      if (e.code === 'Space' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+        if (tourSteps[currentStep]?.id === 'trial_grading' && !document.getElementById('spotlight-container').classList.contains('hidden')) {
+          e.preventDefault();
+          triggerTrialFromTour();
+        } else if (tourSteps[currentStep]?.id === 'real_site' && isZhixueControlsReady) {
+          e.preventDefault();
+          nextSpotlightStep();
+        }
+      }
+      if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+        toggleInspectorPanel();
+      }
+    });
+  </script>
+</body>
+</html>
