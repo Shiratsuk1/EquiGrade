@@ -1,6 +1,6 @@
 # 《衡准 · 物理阅卷工作台》界面重构设计方案与美学标准白皮书
-> **面向对象**：产品经理、UI/UX 设计师、ChatGPT / Claude 等大模型 Prompt 指令、前端开发团队  
-> **文档版本**：v2.1 · 2026 旗舰增强版（含防溢出硬防御与用户 E2E 验收全清单）  
+> **面向对象**：产品经理、UI/UX 设计师、ChatGPT / Claude 等大模型 Prompt 指令、Codex 自动化代码智能体、前端开发团队  
+> **文档版本**：v2.2 · 2026 旗舰增强版（聚焦引导零溢出架构与 Codex 启动指令版）  
 > **核心使命**：将传统“局促、挤压、填表式”的本地桌面改卷软件，蜕变为**极客级、高沉浸、暗场抗疲劳、毫秒级证据链回放的下一代 AI 阅卷工作台**。
 
 ---
@@ -21,12 +21,14 @@
   - [5.4 手写高清切图极端长宽比（长条/窄高）容器自适应](#54-手写高清切图极端长宽比长条窄高容器自适应)
   - [5.5 Z-Index 严格分层架构与视口穿透防御](#55-z-index-严格分层架构与视口穿透防御)
   - [5.6 Electron 原生 BrowserView 与 DOM 像素级尺寸同步](#56-electron-原生-browserview-与-dom-像素级尺寸同步)
+  - [5.7 聚焦引导（Spotlight Tour）对话框定位引擎与零溢出防御架构](#57-聚焦引导spotlight-tour对话框定位引擎与零溢出防御架构)
 - [六、 真实界面用户 E2E 体验验证与验收标准 (Real-World E2E Verification)](#六-真实界面用户-e2e-体验验证与验收标准-real-world-e2e-verification)
   - [6.1 全分辨率与 Windows 缩放实机矩阵测试](#61-全分辨率与-windows-缩放实机矩阵测试)
   - [6.2 真实阅卷业务场景的压力极限用例](#62-真实阅卷业务场景的压力极限用例)
   - [6.3 物理教师眼动心流与操作人体工学核对](#63-物理教师眼动心流与操作人体工学核对)
   - [6.4 界面验收“五禁五必”一票否决红线](#64-界面验收五禁五必一票否决红线)
-- [七、 可直接提供给 ChatGPT / AI 的设计指导指令 (Prompt Template)](#七-可直接提供给-chatgpt--ai-的设计指导指令-prompt-template)
+- [七、 启动 Codex 落地重构的官方指令 Prompt (Codex Launch Prompt)](#七-启动-codex-落地重构的官方指令-prompt-codex-launch-prompt)
+- [八、 供 ChatGPT / Claude 进行 UI 设计对话的 Prompt (UI Chat Prompt)](#八-供-chatgpt--claude-进行-ui-设计对话的-prompt-ui-chat-prompt)
 
 ---
 
@@ -175,7 +177,7 @@ Cyan (站点探针/连通)    : #06B6D4 | 边框: rgba(6, 182, 212, 0.3)  | 背�
 ## 五、 空间边界防御与防 UI 排布溢出硬性铁律 (Anti-Overflow & Boundary Defense)
 
 > [!CAUTION]
-> 界面重构最常见的致命缺陷是：**在设计师的 2K/4K 大屏上很美，但在教师真实的 1080p 笔记本（尤其是 Windows 125% 或 150% DPI 缩放）下，文字溢出截断、出现双重横向滚动条、抽屉把网页打分框遮挡**。以下规范为硬性约束，违背任何一条即视为不合格。
+> 界面重构最常见的致命缺陷是：**在设计师的 2K/4K 大屏上很美，但在教师真实的 1080p 笔记本（尤其是 Windows 125% 或 150% DPI 缩放）下，文字溢出截断、出现双重横向滚动条、聚焦指引卡片被挤出屏幕边缘、抽屉把网页打分框遮挡**。以下规范为硬性约束，违背任何一条即视为不合格。
 
 ### 5.1 根容器与横向滚动条绝对防御
 1. **全局横向锁死**：应用根容器 `#root` 及主工作台视口必须声明 `overflow-x: hidden; width: 100vw; max-width: 100vw;`。除特定代码块或长公式内部容器外，**严禁在页面全局或主视口出现横向滚动条**。
@@ -241,6 +243,84 @@ Layer 999 : 全局 Toast 吐司通知
 
 ---
 
+### 5.7 聚焦引导（Spotlight Tour）对话框定位引擎与零溢出防御架构
+
+> [!IMPORTANT]
+> **聚焦引导最容易翻车的场景**：当聚光灯高亮“顶部胶囊”时，弹窗向下展开被浏览器顶部遮挡；当高亮“右下角重试按钮”时，弹窗向右溢出屏幕外；在 125%/150% 笔记本小屏幕上，弹窗过长把“下一步”按钮挤到可视区外导致流程卡死。必须采用以下 **4D 零溢出定位引擎**。
+
+```mermaid
+flowchart TD
+    Target["获取目标元素 targetRect"] --> ScrollCheck{"目标是否完全在可视区?"}
+    ScrollCheck -- "否" --> ScrollIntoView["执行平滑滚动 scrollIntoView"]
+    ScrollCheck -- "是" --> CollisionDetection["计算四周可用空间 (Top/Bottom/Left/Right)"]
+    ScrollIntoView --> CollisionDetection
+
+    CollisionDetection --> FlipDecision{"首选方向是否产生视口碰撞?"}
+    FlipDecision -- "有碰撞 (溢出边界)" --> AutoFlip["自动翻转至对侧 (Auto-Flip)"]
+    FlipDecision -- "无碰撞 (空间充足)" --> KeepPlacement["保持最佳朝向"]
+
+    AutoFlip --> ClampCoords["执行 16px 视口钳位 (Clamping)"]
+    KeepPlacement --> ClampCoords
+
+    ClampCoords --> SlideArrow["动态滑轨吸附计算 (Dynamic Arrow Offset)"]
+    SlideArrow --> RenderPortal["通过 React Portal 挂载至 document.body"]
+```
+
+#### 1. 基于视口碰撞的主动翻转算法（Auto-Flip Positioning）
+- **垂直轴智能决策**：
+  - 若目标位于视口上半屏（`targetRect.top < window.innerHeight / 2`），指引卡片首选挂在目标下方（`placement = 'bottom'`）；
+  - 若目标位于下半屏，首选挂在目标上方（`placement = 'top'`）；
+  - **动态避障检查**：`if (computedTop + popoverHeight > window.innerHeight - 16) -> flip to Top`。
+- **水平轴智能防飞出**：
+  - 若目标靠右（如右侧抽屉按钮），气泡首选向左弹出（`placement = 'left'` 或贴右边缘）；
+  - 气泡水平坐标强制执行 **16px 视口钳位**：
+    $$\text{popoverLeft} = \text{clamp}(16\text{px},\ \text{targetCenter} - \frac{\text{width}}{2},\ \text{window.innerWidth} - \text{width} - 16\text{px})$$
+
+#### 2. 动态滑轨自适应三角箭头（Sliding Dynamic Arrow）
+- 当指引卡片因防止溢出而向左或向右平移时，卡片上的指示箭头**不得固定在卡片中间**（否则箭头会指向虚空或脱靶）。
+- 箭头水平偏移必须根据目标实际中心与卡片相对位置动态算出：
+  $$\text{arrowLeft} = \text{clamp}(12\text{px},\ \text{targetCenter} - \text{popoverLeft} - 6\text{px},\ \text{popoverWidth} - 24\text{px})$$
+  **确保无论卡片怎么避让，箭头永远死死咬住目标控件的中心！**
+
+#### 3. 三层固定盒模型与操作栏防截断熔断（Pinned Footer）
+在小分辨率或 150% 缩放下，指引气泡卡片必须满足：
+```css
+.spotlight-popover-card {
+  max-width: min(420px, calc(100vw - 32px));
+  max-height: min(460px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* 保证圆角干净 */
+}
+
+/* 顶部标题区：绝对不压缩 */
+.spotlight-popover-header {
+  flex-shrink: 0;
+}
+
+/* 中间内容区：超长时内部优雅纵向滚动，自带细体滚动条 */
+.spotlight-popover-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: 12px 16px;
+}
+
+/* 底部操作区（下一步/跳过/测试按键）：永远焊死在可视范围内，绝不被挤出！ */
+.spotlight-popover-footer {
+  flex-shrink: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 12px 16px;
+  background: rgba(18, 21, 29, 0.95);
+}
+```
+
+#### 4. 脱离 DOM 堆叠上下文（Direct Body Portal）
+- 聚焦气泡与遮罩必须通过 `ReactDOM.createPortal(..., document.body)` 挂载到根节点，彻底粉碎父级容器因 `overflow: hidden`、`transform`、`filter` 等 CSS 属性引发的裁切灾难。
+
+---
+
 ## 六、 真实界面用户 E2E 体验验证与验收标准 (Real-World E2E Verification)
 
 > [!IMPORTANT]
@@ -277,21 +357,6 @@ Layer 999 : 全局 Toast 吐司通知
 
 模拟真实教师连续批阅 50 份试卷的沉浸式心流，检查以下人体工学指标：
 
-```mermaid
-journey
-    title 物理教师高频阅卷眼动与操作心流
-    section 1. 视线审阅
-      目光扫视左侧手写过程: 5: 教师
-      余光确认顶部总分与绿灯: 5: 教师
-      右眼瞥见扣分点与切片证据: 5: 教师
-    section 2. 决策放行
-      全对满分直接单手轻按空格: 5: 教师
-      系统 200ms 内自动回填网页并换卷: 5: 系统
-    section 3. 疑点复核
-      遇到争议点单手按 Tab 聚焦抽屉: 5: 教师
-      小键盘直接键入改分回车: 5: 教师
-```
-
 - **眼动距离核对**：从“答卷手写推导”（左中）到“AI 得分结论”（右上）视线夹角 $\le 25^\circ$，无需频繁大幅度扭头。
 - **单手键盘盲操**：双手无需频繁在“鼠标”和“键盘”之间来回切换；核心操作（启停批改、放行、复核、重跑）均配有单键快捷键（`Space`、`Enter`、`R`、`Esc`）。
 - **误触防护**：高危操作（如“清空历史”、“重置配置”）必须具备二次确认或 3 秒撤销气泡（Undo Toast），普通操作禁止频繁弹出烦人的系统级 Modal 阻断工作流。
@@ -320,37 +385,76 @@ journey
 
 ---
 
-## 七、 可直接提供给 ChatGPT / AI 的设计指导指令 (Prompt Template)
+## 七、 启动 Codex 落地重构的官方指令 Prompt (Codex Launch Prompt)
 
-如果你需要将此设计规范投喂给 ChatGPT、Claude 或其他 AI 编码助手进行界面生成与代码重构，请直接复制下方 Prompt：
+> [!TIP]
+> **使用方法**：直接将下方 Markdown 框内的指令完整复制并发送给 Codex 或具备代码写权限的智能体。
 
 ````markdown
-# Role & Mission
-你是一位精通 Linear、Raycast、Figma 视觉风格的高级前端架构师与 UI/UX 体验专家，擅长使用 React 19 + TypeScript 打造工业级高抗疲劳、极客级桌面应用界面。
+# Codex Mission: 衡准·物理改卷工作台 界面重构与防溢出排布工程落地
 
-请严格根据《衡准 · 物理阅卷工作台 界面重构设计方案与美学标准白皮书 (v2.1)》，重构阅卷工作台核心界面，并遵循以下严密铁律：
+## 1. 任务背景与核心使命
+你正在为《衡准 · 物理阅卷工作台》（Electron + React 19 + TypeScript 严格模式）执行界面重构。
+请根据项目 `docs/workbench-redesign/` 目录下的设计白皮书与 H5 交互原型，将旧版拥挤杂乱的工作台重构为极客级暗场工作台。
 
-## 1. 空间布局与视口极限化 (Content-First & 0-Chrome)
-- **主视口黄金法则**：左侧真实学生手写答卷视口必须保证占据全屏 70%~75% 宽度，严禁层层嵌套边框或厚重侧边栏挤压答卷！
-- **顶部 HUD 悬浮胶囊**：高度严格控制在 44px 以内，采用暗场毛玻璃（background: rgba(22, 27, 38, 0.82); backdrop-filter: blur(16px); 1px solid rgba(255,255,255,0.07)），仅承载运行指示灯、批改进度、分值徽标和主控启停键。
-- **右侧证据伴侣抽屉**：默认宽度 320px，支持流畅收折。内部按小题卡片流展示：小题得分、手写局部高清切图（红框标注）、AI 扣分原因与置信度。
+## 2. 必须阅读的参考与规则文件
+在开始修改代码之前，你必须完整阅读并遵守以下文件约束：
+- `AGENTS.md`：核心设计不变量（计分权威、复核安全、防串卷三道防线、严格 json_schema、标准验证链）。
+- `docs/workbench-redesign/workbench-design-spec-and-aesthetic-standards.md`：设计白皮书（核心目标、色彩系统、防溢出铁律、E2E 验收清单）。
+- `docs/workbench-redesign/spotlight-tour-implementation.md`：现场暗场聚光灯引导实施细则。
+- `docs/workbench-redesign/workbench-interactive-prototype.html`：已通过的完整 H5 演示原型。
 
-## 2. 空间边界与防溢出排布硬性铁律 (Anti-Overflow & DPI Defense)
-- **零全局横向滚动条**：根容器与主视口强制 overflow-x: hidden; 所有水平 flex 容器文本项必须添加 min-width: 0; 图标必须添加 flex-shrink: 0。
-- **Windows 125% / 150% DPI 自适应**：文字排版杜绝硬编码固定大宽度，标题与按钮文字必须添加 white-space: nowrap; text-overflow: ellipsis; 并在宽度 < 1280px 时自动收缩抽屉。
-- **KaTeX 长公式安全容器**：所有物理公式容器必须具备 max-width: 100%; overflow-x: auto; 绝对严禁长公式撑爆卡片宽度！
-- **极端切片图长宽比防御**：切片图片必须设置 max-height: 220px; object-fit: contain; background: #0D0F14; 杜绝白图穿透与比例拉伸。
-- **严密 Z-Index 分层天梯**：底层视口(0) -> 抽屉(10) -> 胶囊(20) -> Popover(50) -> 灯箱(200) -> 全局通知(999)，严禁手写 z-index: 99999！
+## 3. 核心实现要点与硬性边界约束
+1. **视口黄金分割 (Content-First)**：
+   - 左侧真实网页/答卷嵌入视口必须占据全屏 70%~75% 面积，无冗余多层边框；
+   - 顶部悬浮控制胶囊（HUD Floating Capsule）高度严格限制在 44px 以内，采用暗场毛玻璃；
+   - 右侧证据伴侣抽屉（Evidence Companion Drawer）宽度默认 320px，支持平滑收折，大屏自适应，超长卡片独立自循环滚动。
+2. **防溢出与边界保护铁律 (Anti-Overflow)**：
+   - 根容器强制 `overflow-x: hidden;`，严禁产生全局横向滚动条；
+   - 所有水平 Flex 文本项必须添加 `min-width: 0;`，图标加 `flex-shrink: 0;`；
+   - 适配 Windows 125%/150% DPI 缩放，屏幕宽度 < 1280px 时证据抽屉自动折叠为悬浮微标；
+   - KaTeX 复杂公式必须包裹在带 `max-width: 100%; overflow-x: auto;` 的专用容器内；
+   - 极端长宽比切片图限制 `max-height: 220px; object-fit: contain;`，严禁拉伸变形；
+   - 严格遵循 9 级 Z-Index 分层天梯，严禁任意书写 `z-index: 99999`。
+3. **聚焦引导（Spotlight Tour）对话框防溢出引擎**：
+   - 必须实现基于视口碰撞的主动翻转（Auto-Flip：上下自动判定、左右 16px 视口钳位）；
+   - 指示箭头必须支持动态滑轨计算，严禁箭头脱靶或指向虚空；
+   - 对话框采用三层盒模型：Header 与 Footer 必须 `flex-shrink: 0;`（操作按钮永远在可视范围内），Body 内部溢出纵向滚动；
+   - 必须使用 `ReactDOM.createPortal(..., document.body)` 挂载，彻底摆脱父级 `overflow: hidden` 的裁切。
+4. **单手键盘盲操流**：
+   - `Space` 键无缝启停改卷流水线；
+   - `Tab` 键快速展开/收折右侧证据抽屉；
+   - `Esc` 键退出灯箱或弹窗。
 
-## 3. 暗场 Obsidian 美学与视觉系统 (Dark Pro Aesthetics)
-- **背景梯度**：基底 #0B0D12，表面色 #12151D，卡片色 #181C26，浮层高亮 #202634。
-- **微质感边框**：全站使用 1px solid rgba(255, 255, 255, 0.07)，卡片顶部可附带 1px 细微倒角高光。
-- **功能语义色**：翡翠绿 #10B981（全对/就绪）、琥珀金 #F59E0B（疑点/复核）、玫瑰红 #F43F5E（扣分）、靛蓝 #6366F1（AI 推理）。
-- **排版阶梯**：英数 Inter，数值采用 JetBrains Mono 并开启 font-variant-numeric: tabular-nums；公式采用 KaTeX。
-- **动效手感**：所有过渡统一采用 Apple 顺滑曲线 transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1)。
+## 4. 标准实施步骤 (Phased Plan)
+- **Phase 1: 基础防溢出机制与定位 Hook**
+  - 创建 `src/useSmartPositioning.ts` 实现视口碰撞检测、16px 钳位与滑轨箭头计算。
+  - 完善 CSS 变量与 `.katex-safe-container` 防撑破样式。
+- **Phase 2: 零溢出聚焦引导组件 (Spotlight Tour)**
+  - 实现基于 Portal 的 `SpotlightTour` 组件，覆盖沙盒破冰、API 配置气泡与真实考卷感应流程。
+- **Phase 3: 桌面端主工作台双栏排布重构**
+  - 重构 `src/DesktopApp.tsx` 与相关样式，接入 44px 极简顶栏胶囊与右侧可收折证据抽屉。
+  - 保持 Electron `updateViewBounds` 像素级同步。
+- **Phase 4: 全量回归与标准验证链**
+  - 依次执行：`npx tsc -b` -> `npx tsc -p tsconfig.server.json` -> `npx tsc -p tsconfig.electron.json` -> `npx vitest run` -> `npm run build`。
+  - 确保 50 个测试文件、454 项测试全部通过，0 编译错误。
 
-## 4. 交付与自测要求
-产出的代码必须符合 TypeScript 严格类型与无编译警告，并在结构上完全符合“五禁五必”验收标准，保证在真实 Electron 嵌入式环境中从教师视角达到完美的人体工学心流体验。
+请按照以上规范与步骤逐步执行，每完成一个阶段均进行严格的类型与回归自检。
+````
+
+---
+
+## 八、 供 ChatGPT / Claude 进行 UI 设计对话的 Prompt (UI Chat Prompt)
+
+如果你是在 ChatGPT 或 Claude 对话框中进行 UI 组件微调或探讨，请复制以下 Prompt：
+
+````markdown
+你是一位精通 Linear、Raycast、Figma 视觉风格的高级前端架构师。
+请协助我重构《衡准 · 物理阅卷工作台》的 UI 组件，核心要求：
+1. 暗场 Obsidian 风格：底色 #0B0D12，表面色 #12151D，1px 细线边框 rgba(255,255,255,0.07)，语义色采用翡翠绿、琥珀金、玫瑰红。
+2. 空间极致防御：严禁横向滚动条，Flex 文本项必带 min-width: 0，长公式独立滚动，切片图防拉伸。
+3. 聚焦引导气泡零溢出：自动视口碰撞翻转（Auto-Flip）、16px 屏幕边距钳位、滑轨自适应三角箭头、底栏按钮防截断。
+请产出符合 React 19 + TypeScript 严格标准的纯净代码。
 ````
 
 ---
